@@ -93,6 +93,27 @@ _checkout() {
     success "$(basename "$dir"): at ${ref:0:12}."
 }
 
+# _checkout_repo <dir> <repo> <ref> <update> — one repository holding every
+# tree, at a branch, tag or commit: cloned once, moved only with --update,
+# never over local changes.
+_checkout_repo() {
+    local dir="$1" repo="$2" ref="$3" update="$4"
+    if [[ ! -d "${dir}/.git" ]]; then
+        [[ ! -e "$dir" ]] || [[ -z "$(ls -A "$dir" 2>/dev/null)" ]] || error_exit "${dir} exists and is not a checkout of ${repo}."
+        info "Cloning ${repo} (${ref}) into ${dir}..."
+        git clone -q --branch "$ref" "$repo" "$dir" 2>/dev/null \
+            || { git clone -q "$repo" "$dir" && git -C "$dir" checkout -q "$ref"; } \
+            || error_exit "Could not clone ${repo} at ${ref}."
+        success "Sources: ${repo} at $(git -C "$dir" rev-parse --short HEAD)."
+        return 0
+    fi
+    if (( ! update )); then info "Sources: ${dir} at $(git -C "$dir" rev-parse --short HEAD) ('source --update' fetches ${ref})."; return 0; fi
+    [[ -z "$(git -C "$dir" status --porcelain)" ]] || error_exit "${dir} has local changes; commit or remove them first."
+    git -C "$dir" fetch -q origin "$ref" || error_exit "Could not fetch ${ref} from ${repo}."
+    git -C "$dir" checkout -q --detach FETCH_HEAD
+    success "Sources: ${repo} at $(git -C "$dir" rev-parse --short HEAD)."
+}
+
 cmd_source() {
     local update=0
     while [[ $# -gt 0 ]]; do case "$1" in
@@ -101,6 +122,19 @@ cmd_source() {
     esac; done
     command -v git >/dev/null || error_exit "git is required."
     _paths
+    # One repository with all three trees (kalimdor), or the three upstreams.
+    if [[ -n "$SOURCE_REPO" ]]; then
+        _checkout_repo "$SOURCE_DIR" "$SOURCE_REPO" "$SOURCE_REF" "$update"
+        local t
+        for t in mangos-classic playerbots classic-db; do
+            [[ -d "${SOURCE_DIR}/${t}" ]] || error_exit "${SOURCE_REPO} has no ${t}/: it is not a source tree teldrassil can build."
+        done
+        return 0
+    fi
+    if git -C "$SOURCE_DIR" rev-parse --show-toplevel 2>/dev/null | grep -qxF -- "$(cd "$SOURCE_DIR" 2>/dev/null && pwd -P)"; then
+        info "${SOURCE_DIR} is one repository (set SOURCE_REPO to have 'source' manage it); left as it is."
+        return 0
+    fi
     mkdir -p "$SOURCE_DIR"
     _checkout "$SRC_MANGOS" "$MANGOS_REPO" "$MANGOS_REF" "$update"
     _checkout "$SRC_PB" "$PLAYERBOTS_REPO" "$PLAYERBOTS_REF" "$update"
@@ -109,14 +143,25 @@ cmd_source() {
 
 # Our playerbots changes (templates/patches/playerbots/*.patch), applied to
 # the checkout before every build and taken off before it moves.
+# _apply <dir> <git apply args...> — git apply, right in a subfolder too. In a
+# subfolder of a bigger repository (kalimdor's playerbots/), git apply skips
+# every file outside it, so a patch whose paths are relative to playerbots
+# became empty and every check passed - "already applied" on a tree that is
+# not. --directory puts the paths where they are.
+_apply() {
+    local dir="$1"; shift
+    local prefix; prefix="$(git -C "$dir" rev-parse --show-prefix 2>/dev/null || true)"
+    if [[ -n "$prefix" ]]; then git -C "$dir" apply --directory="${prefix%/}" "$@"; else git -C "$dir" apply "$@"; fi
+}
+
 _patch() {
     local p
     for p in "${PATCH_DIR}"/playerbots/*.patch; do
         [[ -f "$p" ]] || continue
-        if git -C "$SRC_PB" apply --reverse --check "$p" 2>/dev/null; then
+        if _apply "$SRC_PB" --reverse --check "$p" 2>/dev/null; then
             info "Patch $(basename "$p"): already applied."
-        elif git -C "$SRC_PB" apply --check "$p" 2>/dev/null; then
-            git -C "$SRC_PB" apply "$p"; success "Patch $(basename "$p"): applied."
+        elif _apply "$SRC_PB" --check "$p" 2>/dev/null; then
+            _apply "$SRC_PB" "$p"; success "Patch $(basename "$p"): applied."
         else
             error_exit "Patch $(basename "$p") does not apply to playerbots at $(git -C "$SRC_PB" rev-parse --short HEAD); it needs updating for that commit."
         fi
@@ -127,7 +172,7 @@ _unpatch() {
     [[ "$dir" == "$SRC_PB" ]] || return 0
     for p in "${PATCH_DIR}"/playerbots/*.patch; do
         [[ -f "$p" ]] || continue
-        if git -C "$dir" apply --reverse --check "$p" 2>/dev/null; then git -C "$dir" apply --reverse "$p"; fi
+        if _apply "$dir" --reverse --check "$p" 2>/dev/null; then _apply "$dir" --reverse "$p"; fi
     done
     return 0
 }
@@ -161,16 +206,25 @@ cmd_build() {
     _patch
     if (( clean )) && [[ -d "$BUILD_OUT" ]]; then info "Clearing the build tree."; rm -r -- "${BUILD_OUT:?}"; fi
     mkdir -p "$BUILD_OUT" "$INSTALL"
-    info "Compiling cmangos-classic with playerbots on ${jobs} jobs (tens of minutes the first time; the log is ${LOGS}/build.log)..."
     # playerbots sits inside the cmangos tree, where its CMake expects it.
-    # zlib is fetched from GitHub while configuring: the first build needs
-    # the network.
-    _run_tools "${LOGS}/build.log" \
-        -v "${SRC_MANGOS}:/src/mangos-classic:z" -v "${SRC_PB}:/src/mangos-classic/src/modules/PlayerBots:z" \
+    # cmangos fetches zlib from GitHub while configuring; sources with their
+    # own zlib/ (kalimdor) are used instead, and then nothing needs the
+    # network: the build runs with none.
+    local -a zlib=() net=()
+    local zflags=""
+    if [[ -f "${SOURCE_DIR}/zlib/zlib.h" ]]; then
+        zlib=(-v "${SOURCE_DIR}/zlib:/src/zlib:ro,z"); net=(--network none)
+        zflags="-DFETCHCONTENT_SOURCE_DIR_ZLIB=/src/zlib -DFETCHCONTENT_FULLY_DISCONNECTED=ON"
+        info "Compiling cmangos-classic with playerbots on ${jobs} jobs, offline, with the vendored zlib (the log is ${LOGS}/build.log)..."
+    else
+        info "Compiling cmangos-classic with playerbots on ${jobs} jobs (tens of minutes the first time; zlib is fetched from GitHub; the log is ${LOGS}/build.log)..."
+    fi
+    _run_tools "${LOGS}/build.log" "${net[@]}" \
+        -v "${SRC_MANGOS}:/src/mangos-classic:z" -v "${SRC_PB}:/src/mangos-classic/src/modules/PlayerBots:z" "${zlib[@]}" \
         -v "${BUILD_OUT}:/build:z" -v "${INSTALL}:/install:z" "$BUILD_IMAGE" bash -c "set -e
             [[ -f /build/CMakeCache.txt ]] || cmake -S /src/mangos-classic -B /build -DCMAKE_BUILD_TYPE=Release \
                 -DCMAKE_INSTALL_PREFIX=/install -DBUILD_PLAYERBOTS=ON -DBUILD_EXTRACTORS=ON -DBUILD_AHBOT=OFF -DPCH=ON \
-                -DFETCHCONTENT_SOURCE_DIR_PLAYERBOTS=/src/mangos-classic/src/modules/PlayerBots
+                -DFETCHCONTENT_SOURCE_DIR_PLAYERBOTS=/src/mangos-classic/src/modules/PlayerBots ${zflags}
             cmake --build /build -j${jobs}
             cmake --install /build"
     [[ -x "${INSTALL}/bin/mangosd" && -x "${INSTALL}/bin/realmd" ]] || error_exit "The build ran but left no mangosd/realmd in ${INSTALL}/bin."
