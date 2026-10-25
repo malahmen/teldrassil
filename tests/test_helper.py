@@ -331,5 +331,45 @@ class Search(unittest.TestCase):
         self.assertEqual(t.area_names("/nonexistent"), {})
 
 
+class Attunements(unittest.TestCase):
+    STATE = {
+        "bots": [{"guid": 1, "name": "Sixty", "level": 60}, {"guid": 2, "name": "Fiftynine", "level": 59},
+                 {"guid": 3, "name": "Honored", "level": 60}, {"guid": 4, "name": "Done", "level": 60}],
+        "rewarded": [{"guid": 4, "quest": 9378}],
+        "reputation": [{"guid": 3, "faction": 529, "standing": 9000}, {"guid": 1, "faction": 529, "standing": 8999}],
+    }
+
+    def test_defaults(self):
+        rules = t.load_attunements({})
+        self.assertEqual([r["quest"] for r in rules], [7848, 7761, 9378])
+        self.assertEqual(rules[2]["faction"], 529)
+        self.assertEqual(rules[2]["standing"], 9000)
+
+    def test_reputation_and_level(self):
+        rules = t.load_attunements({})
+        lines, sql = t.plan_attunements([rules[2]], self.STATE)
+        self.assertEqual(sql, ["INSERT INTO character_queststatus (guid, quest, status, rewarded) VALUES "
+                               "(3, 9378, 1, 1) ON DUPLICATE KEY UPDATE status = 1, rewarded = 1;"])
+        self.assertIn("grant 1, already 1, 1 at the level but short of the reputation", lines[0])
+
+    def test_level_only(self):
+        rules = t.load_attunements({"attunements": [{"name": "MC", "quest": 7848, "level": 60}]})
+        _, sql = t.plan_attunements(rules, self.STATE)
+        self.assertEqual(len(sql), 3)          # every level-60 bot, not the 59
+        self.assertFalse(any("(2," in s for s in sql))
+
+    def test_bad_rules(self):
+        with self.assertRaises(t.RosterError):
+            t.load_attunements({"attunements": [{"quest": 1, "level": 70}]})
+        with self.assertRaises(t.RosterError):
+            t.load_attunements({"attunements": [{"quest": 1, "reputation": {"faction": "no such", "at_least": "honored"}}]})
+
+    def test_state_query_names_the_rules(self):
+        sql = t.attune_sql("chars", "realmd", "RNDBOT", t.load_attunements({}))
+        self.assertIn("quest IN (7848,7761,9378)", sql)
+        self.assertIn("faction IN (529)", sql)
+        self.assertIn("LIKE 'RNDBOT%'", sql)
+
+
 if __name__ == "__main__":
     unittest.main()

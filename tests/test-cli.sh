@@ -97,6 +97,8 @@ chk "character filters only for characters/bots"  '[[ $rc -ne 0 && "$out" == *"a
 run search --kind items --term "50%_off"
 want_like="LIKE '%50\\\\%\\\\_off%'"   # in SQL: \\% and \\_ - LIKE then reads \% and \_ as literals
 chk "LIKE wildcards in a term are literal"        'grep -qF -- "$want_like" "$T/sql.in"'
+run attune grant
+chk "attune: only plan or apply"                  '[[ $rc -ne 0 && "$out" == *"attune plan|apply"* ]]'
 unset STUB_RUNNING STUB_SQL_IN
 
 printf '\npass=%d fail=%d\n' "$pass" "$fail"

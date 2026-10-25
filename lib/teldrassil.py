@@ -686,6 +686,9 @@ def cmd_check(a):
     if r["population"]:
         print(f"population: {r['population']['bots']} bots, 50/50")
     print(f"cards: {sum(1 for b in r['bots'] if b['card'])}")
+    with open(a.roster, encoding="utf-8") as f:
+        rules = load_attunements(json.load(f))
+    print("attunements: " + ", ".join(f"{x['name']} at {x['level']}" + (" + reputation" if x["faction"] else "") for x in rules))
 
 
 def cmd_plan(a):
@@ -799,6 +802,127 @@ def cmd_commands(a):
             first = text.split("\n", 1)[0].strip()
             line += f"   {first}" if first else ""
         print(line)
+
+
+# ----------------------------------------------------------------------------
+# Attunements: grant raid entry to bots by rule
+# ----------------------------------------------------------------------------
+
+# Factions an attunement rule may name, and the standing each rank starts at.
+# character_reputation keeps the standing EARNED; these factions start everyone
+# at 0 (neutral), so the thresholds compare with it directly.
+FACTIONS = {"argent dawn": 529, "brood of nozdormu": 910, "cenarion circle": 609,
+            "hydraxian waterlords": 749, "zandalar tribe": 270, "timbermaw hold": 576}
+STANDINGS = {"neutral": 0, "friendly": 3000, "honored": 9000, "revered": 21000, "exalted": 42000}
+
+# The raids whose entrance checks a completed quest (areatrigger_teleport.
+# required_quest_done in classic-db): what a bot needs to follow players in.
+# Each rule asks for what bots CAN earn - level, and for Naxxramas the
+# reputation - and waives what they cannot, the dungeon steps.
+DEFAULT_ATTUNEMENTS = [
+    {"name": "Molten Core", "quest": 7848, "level": 58},
+    {"name": "Blackwing Lair", "quest": 7761, "level": 60},
+    {"name": "Naxxramas", "quest": 9378, "level": 60, "reputation": {"faction": "argent dawn", "at_least": "honored"}},
+]
+
+
+def load_attunements(data):
+    """The roster's 'attunements' rules (or the defaults), validated."""
+    rules = data.get("attunements", DEFAULT_ATTUNEMENTS)
+    out, errors = [], []
+    for i, r in enumerate(rules):
+        where = f"attunements[{i}]"
+        try:
+            rule = {"name": str(r.get("name") or f"quest {r['quest']}"), "quest": int(r["quest"]),
+                    "level": int(r.get("level", 60)), "faction": None, "standing": 0}
+            if not 1 <= rule["level"] <= 60:
+                raise RosterError(f"{where}: level is 1-60")
+            rep = r.get("reputation")
+            if rep:
+                f = rep["faction"]
+                rule["faction"] = int(f) if str(f).isdigit() else _lookup(FACTIONS, f, "faction", where)
+                a = rep["at_least"]
+                rule["standing"] = int(a) if str(a).lstrip("-").isdigit() else _lookup(STANDINGS, a, "standing", where)
+            out.append(rule)
+        except (RosterError, KeyError, ValueError, TypeError) as e:
+            errors.append(str(e) if isinstance(e, RosterError) else f"{where}: missing {e}")
+    if errors:
+        raise RosterError("\n".join(errors))
+    return out
+
+
+ATTUNE_SQL = """SELECT JSON_OBJECT(
+ 'bots', (SELECT JSON_ARRAYAGG(JSON_OBJECT('guid', c.guid, 'name', c.name, 'level', c.level))
+   FROM {chars}.characters c JOIN {realmd}.account a ON a.id = c.account WHERE a.username LIKE '{prefix}%'),
+ 'rewarded', (SELECT JSON_ARRAYAGG(JSON_OBJECT('guid', guid, 'quest', quest))
+   FROM {chars}.character_queststatus WHERE rewarded = 1 AND quest IN ({quests})),
+ 'reputation', (SELECT JSON_ARRAYAGG(JSON_OBJECT('guid', guid, 'faction', faction, 'standing', standing))
+   FROM {chars}.character_reputation WHERE faction IN ({factions}))
+);"""
+
+
+def attune_sql(chars, realmd, prefix, rules):
+    quests = ",".join(str(r["quest"]) for r in rules) or "0"
+    factions = ",".join(sorted({str(r["faction"]) for r in rules if r["faction"]})) or "0"
+    return LONG_JSON + " " + ATTUNE_SQL.format(chars=chars, realmd=realmd, prefix=prefix,
+                                               quests=quests, factions=factions).replace("\n", " ")
+
+
+def plan_attunements(rules, state):
+    """(per-rule summary lines, SQL): which bots meet a rule and lack its quest."""
+    have = {(r["guid"], r["quest"]) for r in state.get("rewarded") or []}
+    rep = {(r["guid"], r["faction"]): int(r["standing"]) for r in state.get("reputation") or []}
+    lines, sql = [], []
+    for rule in rules:
+        granted, already, short = [], 0, 0
+        for b in state.get("bots") or []:
+            if (b["guid"], rule["quest"]) in have:
+                already += 1
+                continue
+            if b["level"] < rule["level"]:
+                continue
+            if rule["faction"] and rep.get((b["guid"], rule["faction"]), 0) < rule["standing"]:
+                short += 1
+                continue
+            granted.append(b)
+        need = f"level {rule['level']}" + (f", standing {rule['standing']} with faction {rule['faction']}" if rule["faction"] else "")
+        lines.append(f"{rule['name']} (quest {rule['quest']}; {need}): grant {len(granted)}, "
+                     f"already {already}" + (f", {short} at the level but short of the reputation" if rule["faction"] else ""))
+        for b in sorted(granted, key=lambda x: x["name"]):
+            sql.append(f"INSERT INTO character_queststatus (guid, quest, status, rewarded) VALUES "
+                       f"({b['guid']}, {rule['quest']}, 1, 1) ON DUPLICATE KEY UPDATE status = 1, rewarded = 1;")
+    return lines, sql
+
+
+def _read_rules(path):
+    data = {}
+    if path:
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            raise SystemExit(f"cannot read roster {path}: {e}")
+    try:
+        return load_attunements(data)
+    except RosterError as e:
+        raise SystemExit("attunement rules:\n  " + str(e).replace("\n", "\n  "))
+
+
+def cmd_attune_sql(a):
+    print(attune_sql(a.chars, a.realmd, a.prefix, _read_rules(a.roster)))
+
+
+def cmd_attune_plan(a):
+    rules = _read_rules(a.roster)
+    with open(a.state, encoding="utf-8") as f:
+        raw = f.read().strip()
+    lines, sql = plan_attunements(rules, json.loads(raw) if raw and raw != "NULL" else {})
+    for line in lines:
+        print(line)
+    if a.out_sql:
+        with open(a.out_sql, "w", encoding="utf-8") as f:
+            if sql:
+                f.write("START TRANSACTION;\n" + "\n".join(sql) + "\nCOMMIT;\n")
 
 
 # ----------------------------------------------------------------------------
@@ -982,6 +1106,19 @@ def main(argv=None):
     s.add_argument("roster")
     s.add_argument("--state", required=True)
     s.set_defaults(fn=cmd_show)
+
+    s = sub.add_parser("attune-sql")
+    s.add_argument("--roster")
+    s.add_argument("--chars", required=True)
+    s.add_argument("--realmd", required=True)
+    s.add_argument("--prefix", default="RNDBOT")
+    s.set_defaults(fn=cmd_attune_sql)
+
+    s = sub.add_parser("attune-plan")
+    s.add_argument("--roster")
+    s.add_argument("--state", required=True)
+    s.add_argument("--out-sql")
+    s.set_defaults(fn=cmd_attune_plan)
 
     s = sub.add_parser("chars")
     s.add_argument("--rows", required=True)

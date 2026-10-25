@@ -41,6 +41,16 @@ the next slice.
   themselves (ranks, tabards), the LLM chat settings and the population's
   size. `roster plan` shows what applying it would change; `roster apply
   --yes` makes the server match it.
+- **Attunements:** `attune plan|apply` gives bots the raid attunements they
+  cannot earn. Molten Core, Blackwing Lair and Naxxramas check a completed
+  quest at the door, and bots never pursue those chains (their dungeon steps
+  need a group bots do not form). A rule says what a bot must reach instead -
+  by default level 58 for Molten Core, 60 for Blackwing Lair, and 60 plus
+  Honored with the Argent Dawn for Naxxramas - and the roster's
+  `"attunements"` list can replace them:
+  `[{"name": "Naxxramas", "quest": 9378, "level": 60, "reputation":
+  {"faction": "argent dawn", "at_least": "honored"}}]`. Bots only; written
+  with the world server stopped, since a quest log lives in its memory.
 - **playerbots' commands:** the chat commands bots obey, from the server's own
   help texts, marked by who may use each.
 
@@ -65,6 +75,7 @@ It runs from its checkout:
 | `lib/roster.sh` | the roster commands and `commands` |
 | `lib/search.sh` | `search` |
 | `lib/admin.sh` | `rename-character`, `apply-sql`, `dump`, `restore`, the graceful restart |
+| `lib/attune.sh` | `attune` |
 | `lib/teldrassil.py` | the helper |
 | `examples/roster.example.json` | a roster to start from |
 

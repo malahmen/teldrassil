@@ -36,6 +36,7 @@ source "${SCRIPT_DIR}/lib/accounts.sh"
 source "${SCRIPT_DIR}/lib/roster.sh"
 source "${SCRIPT_DIR}/lib/search.sh"
 source "${SCRIPT_DIR}/lib/admin.sh"
+source "${SCRIPT_DIR}/lib/attune.sh"
 
 usage() {
     cat >&2 <<'EOF'
@@ -97,6 +98,12 @@ Roster (one JSON file: shaped bots, guilds, ranks, tabards, cards, LLM, populati
                                 population at the roster's counts.
 
 Bots:
+  attune plan|apply [--file ROSTER] [--yes]
+                                give bots the raid attunements they cannot earn
+                                (Molten Core, Blackwing Lair, Naxxramas), by the
+                                roster's "attunements" rules or the defaults:
+                                level, and for Naxxramas Honored with the Argent
+                                Dawn. Bots only. apply stops the server.
   commands [--any] [--search TEXT] [--verbose]
                                 playerbots' chat commands, and who may use each:
                                 'anyone' or only the bot's master (the player
@@ -136,6 +143,7 @@ main() {
         dump)               cmd_dump "$@" ;;
         restore)            cmd_restore "$@" ;;
         roster)             cmd_roster "$@" ;;
+        attune)             cmd_attune "$@" ;;
         commands)           cmd_commands "$@" ;;
         set)                cmd_set "$@" ;;
         get)                cmd_get "$@" ;;
