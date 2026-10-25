@@ -68,7 +68,7 @@ printf '{"bots": [{"name": "Leadra", "race": "undead", "class": "paladin"}]}' > 
 run roster check --file "$T/bad.json"
 chk "an invalid one names the problem" '[[ $rc -ne 0 && "$out" == *"cannot be a paladin"* ]]'
 
-hdr "dump and restore (podman stubbed; the database my-db "runs", the server does not)"
+hdr "dump and restore (podman stubbed; the database my-db runs, the server does not)"
 export STUB_RUNNING="my-db" STUB_SQL_IN="$T/sql.in"
 run dump --all
 chk "dump --all writes a file (no silent exit)"   '[[ $rc -eq 0 && "$out" == *"Dumped to"* ]]'
