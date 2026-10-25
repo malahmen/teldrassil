@@ -42,7 +42,10 @@ cmd_attune() {
     _stop
     _attune_plan
     if [[ -s "$d/attune.sql" ]]; then
-        _db_raw < "$d/attune.sql"
+        if ! { printf 'USE `%s`;\n' "$DB_CHARACTERS"; cat -- "$d/attune.sql"; } | _db_raw; then
+            if (( was_running )); then _start; fi
+            error_exit "The database refused the grants; nothing was written."
+        fi
         success "Granted ($(grep -c '^INSERT' "$d/attune.sql") attunement(s), one transaction)."
     else
         success "No bot is due an attunement."

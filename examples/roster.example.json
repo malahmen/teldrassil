@@ -12,11 +12,11 @@
   },
   "guilds": [
     {"name": "Order of the Ember", "faction": "horde", "leader": "Ashveil",
-     "ranks": ["Warchief", "Blood Guard", "Grunt", "Peon"], "officer_ranks": 2,
+     "ranks": ["Warchief", "Blood Guard", "Centurion", "Grunt", "Peon"], "officer_ranks": 2,
      "tabard": {"symbol": 168, "symbol_color": 16, "border": 0, "border_color": 4, "background": 44},
      "motd": "Farm orders are in the officer notes."},
     {"name": "Silver Ledger", "faction": "alliance", "leader": "Brannoc",
-     "ranks": ["Treasurer", "Clerk", "Member"],
+     "ranks": ["Treasurer", "Auditor", "Clerk", "Member", "Apprentice"],
      "tabard": {"symbol": 90, "symbol_color": 14, "border": 1, "border_color": 14, "background": 32}}
   ],
   "bots": [

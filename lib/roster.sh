@@ -89,25 +89,48 @@ _replace() {
 }
 
 # _fresh_population <roster> — replace every random bot: the roster's counts
-# and the delete flags in aiplayerbot.conf, one start to recreate them, then
-# the flags off again. Bot guilds go too; the roster recreates its own.
+# in aiplayerbot.conf, then one start with playerbots' "delete all random bot
+# characters" request (a 'bot_delete' row of value 2; playerbots removes it
+# itself once done) - stronger than DeleteRandomBotAccounts, which keeps any
+# bot that is in a guild or someone's friend. Bot guilds go too; the roster
+# recreates its own. Players' characters are on other accounts and untouched.
 _fresh_population() {
     local roster="$1" d; d="$(tmp_dir)"
     local total; total="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get("population",{}).get("bots",""))' "$roster")"
     [[ "$total" =~ ^[0-9]+$ ]] || error_exit "--fresh-population needs a 'population' section with 'bots' in the roster."
     header "Fresh population: ${total} new bots"
-    warn "Every random bot and every guild a bot leads is deleted and recreated."
+    warn "Every random bot, including the roster's own, and every guild a bot leads is deleted and recreated."
     _stop
+    # No random guilds while the new bots are made: a bot that founds one in
+    # the first minute leads it, and a leader cannot be taken over. They
+    # form on the next start, from the bots the roster leaves.
+    local guilds; guilds="$(grep -E '^AiPlayerbot\.RandomBotGuildCount[[:space:]]*=' "$BOT_CONF" | tail -1 | cut -d= -f2 | tr -d '[:space:]' || true)"
     helper conf --conf "$BOT_CONF" --out "$d/fresh.conf" --roster "$roster" --cards-in-server "$CARDS_FILE_IN_SERVER" \
-        --set AiPlayerbot.DeleteRandomBotAccounts=1 --set AiPlayerbot.DeleteRandomBotGuilds=1 >/dev/null
+        --set AiPlayerbot.DeleteRandomBotGuilds=1 --set AiPlayerbot.RandomBotGuildCount=0 >/dev/null
     _replace "$d/fresh.conf" "$BOT_CONF"
+    printf '%s\n' "DELETE FROM ${DB_CHARACTERS}.ai_playerbot_random_bots WHERE event='bot_delete';" \
+        "INSERT INTO ${DB_CHARACTERS}.ai_playerbot_random_bots (owner, bot, \`time\`, validIn, event, \`value\`) VALUES (0, 0, UNIX_TIMESTAMP(), 0, 'bot_delete', 2);" | _db_raw
     _start
-    _wait_bots "$total" || warn "Carrying on with the bots that did log in."
+    _wait_bot_characters "$total" || warn "Carrying on with the bots that were created."
     _stop
-    helper conf --conf "$BOT_CONF" --out "$d/after.conf" \
-        --set AiPlayerbot.DeleteRandomBotAccounts=0 --set AiPlayerbot.DeleteRandomBotGuilds=0 >/dev/null
+    helper conf --conf "$BOT_CONF" --out "$d/after.conf" --set AiPlayerbot.DeleteRandomBotGuilds=0 \
+        --set "AiPlayerbot.RandomBotGuildCount=${guilds:-20}" >/dev/null
     cat -- "$d/after.conf" > "$BOT_CONF"
-    success "New population created; the delete flags are off again."
+    success "New population created; guild deletion off and random guilds back on (${guilds:-20})."
+}
+
+# _wait_bot_characters <count> — until that many characters exist on bot
+# accounts: the plan needs them to exist, not to be online.
+_wait_bot_characters() {
+    local want="$1" deadline=$((SECONDS + BOTS_TIMEOUT)) n
+    info "Waiting for ${want} bot characters to be created (up to ${BOTS_TIMEOUT}s)..."
+    while (( SECONDS < deadline )); do
+        n="$(_db_value "SELECT COUNT(*) FROM ${DB_CHARACTERS}.characters c JOIN ${DB_REALMD}.account a ON a.id=c.account WHERE a.username LIKE '${BOT_ACCOUNT_PREFIX}%';")"
+        if [[ "${n:-0}" -ge "$want" ]]; then success "${n} bot characters."; return 0; fi
+        sleep 5
+    done
+    warn "Only ${n:-0} of ${want} bot characters after ${BOTS_TIMEOUT}s."
+    return 1
 }
 
 _roster_cmd_apply() {
@@ -134,14 +157,25 @@ _roster_cmd_apply() {
     _stop
     _roster_state "$d/state.json"
     header "Plan"
-    _roster_plan "$roster" "$d"
+    # A plan that cannot be made changes nothing - but the server is stopped
+    # by now, so it is started again before giving up.
+    if ! _roster_plan "$roster" "$d"; then
+        if (( was_running )); then _start; fi
+        error_exit "Nothing was changed."
+    fi
 
     if [[ ! -s "$d/plan.sql" && ! -s "$d/plan.conf" && ! -s "$d/plan.cards" ]]; then
         success "The server already matches the roster."
     else
         header "Apply"
         if [[ -s "$d/plan.sql" ]]; then
-            _db_raw < "$d/plan.sql"
+            # The plan names tables, not databases. A failed statement ends
+            # the session, and MariaDB rolls the transaction back: nothing is
+            # half-written - and the server is started again before stopping.
+            if ! { printf 'USE `%s`;\n' "$DB_CHARACTERS"; cat -- "$d/plan.sql"; } | _db_raw; then
+                if (( was_running )); then _start; fi
+                error_exit "The database refused the plan; nothing was written."
+            fi
             success "Database written ($(grep -cvE '^(START TRANSACTION|COMMIT);$' "$d/plan.sql") statements, one transaction)."
         fi
         if [[ -s "$d/plan.conf" ]]; then _replace "$d/plan.conf" "$BOT_CONF"; success "aiplayerbot.conf updated (old copy in ${BACKUP_DIR})."; fi

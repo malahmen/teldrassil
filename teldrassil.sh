@@ -10,11 +10,11 @@
 # from a shell, a Makefile, CI or cron. A scomp-link front-end
 # (wow-cmangos-teldrassil) can collect values and drive it by flags.
 #
-# This first slice manages a server that is already built and running in
-# containers: start, stop, status, the remote console, accounts, and the
-# roster - the bots shaped on purpose, their guilds, character cards, the LLM
-# and population settings. Building, client-data extraction and the database
-# bootstrap come next.
+# It builds the server from pinned sources, extracts the client's data,
+# installs the databases and runs it all in containers; then it manages the
+# running server - the console, accounts, search, administration - and the
+# roster: the bots shaped on purpose, their guilds, character cards, the LLM
+# and population settings, and their raid attunements.
 #
 # Config: ~/.config/teldrassil/teldrassil.conf (XDG-style, key=value).
 # -----------------------------------------------------------------------------
@@ -37,12 +37,32 @@ source "${SCRIPT_DIR}/lib/roster.sh"
 source "${SCRIPT_DIR}/lib/search.sh"
 source "${SCRIPT_DIR}/lib/admin.sh"
 source "${SCRIPT_DIR}/lib/attune.sh"
+source "${SCRIPT_DIR}/lib/provision.sh"
+source "${SCRIPT_DIR}/lib/llm.sh"
 
 usage() {
     cat >&2 <<'EOF'
 teldrassil — cmangos-classic + playerbots server engine (1.12.1)
 
 Usage: teldrassil.sh <command> [flags]
+
+Provision (from nothing to a running server; files under WORK_DIR):
+  install [--client PATH] --yes run every step below that is not done yet, then start
+  source [--update]             check out cmangos-classic, playerbots and classic-db
+                                at the pinned commits (MANGOS_REF, ...)
+  build-image                   the build, tools and server image
+  build [--jobs N] [--clean]    apply teldrassil's playerbots patches, compile
+  extract [--client PATH] [--force]
+                                maps, vmaps, mmaps and dbc from the 1.12.1 client
+  db-init --yes                 the database container and the four databases
+                                (REPLACES existing ones), the realm's name and
+                                address, the console account; removes cmangos'
+                                default accounts
+  configure [--force]           the server's config files from their templates;
+                                an existing one is kept unless --force
+  create [--force]              the realm and world server containers
+  remove --yes [--database]     delete the server's containers; --database also
+                                the database container and volume (everything)
 
 Server:
   start | stop                  stop saves the world first, then disconnects everyone
@@ -104,6 +124,13 @@ Bots:
                                 roster's "attunements" rules or the defaults:
                                 level, and for Naxxramas Honored with the Argent
                                 Dawn. Bots only. apply stops the server.
+  llm status | off | on --endpoint URL --model NAME [--max-tokens N]
+         [--reasoning-effort LEVEL] [--bot-to-bot PERCENT] [--api-key-file FILE]
+                                bots' chat through a language model (an OpenAI-
+                                style endpoint: LM Studio, llama.cpp, a hosted
+                                API). Optional and off by default; without it
+                                bots answer with playerbots' own lines. Takes
+                                effect at the next restart.
   commands [--any] [--search TEXT] [--verbose]
                                 playerbots' chat commands, and who may use each:
                                 'anyone' or only the bot's master (the player
@@ -144,6 +171,16 @@ main() {
         restore)            cmd_restore "$@" ;;
         roster)             cmd_roster "$@" ;;
         attune)             cmd_attune "$@" ;;
+        llm)                cmd_llm "$@" ;;
+        install)            cmd_install "$@" ;;
+        source)             cmd_source "$@" ;;
+        build-image)        cmd_build_image "$@" ;;
+        build)              cmd_build "$@" ;;
+        extract)            cmd_extract "$@" ;;
+        db-init)            cmd_db_init "$@" ;;
+        configure)          cmd_configure "$@" ;;
+        create)             cmd_create "$@" ;;
+        remove)             cmd_remove "$@" ;;
         commands)           cmd_commands "$@" ;;
         set)                cmd_set "$@" ;;
         get)                cmd_get "$@" ;;

@@ -40,6 +40,23 @@ CONFIG_KEYS=(
     "START_TIMEOUT=300|seconds to wait for the world server to come up"
     "STOP_TIMEOUT=120|seconds the world server gets to save and stop"
     "BOTS_TIMEOUT=600|seconds to wait for bots to log in"
+    "WORK_DIR=|where provisioning keeps sources, the build, client data, configs, logs and secrets (empty: ~/.local/share/teldrassil)"
+    "SOURCE_DIR=|the source checkouts: mangos-classic/, playerbots/, classic-db/ (empty: WORK_DIR/src)"
+    "CLIENT_DIR=|the 1.12.1 client, for 'extract' (holds Data/)"
+    "BUILD_IMAGE=localhost/teldrassil-build:latest|the build, tools and server image"
+    "DB_IMAGE=docker.io/library/mariadb:11.4|the database image"
+    "DB_VOLUME=teldrassil-db|the database's volume"
+    "DB_PORT=3307|the database's port, on 127.0.0.1 only"
+    "BUILD_JOBS=0|compile jobs (0: one per CPU)"
+    "REALM_NAME=Teldrassil|the realm's name in the realm list"
+    "REALM_ADDRESS=127.0.0.1|the address clients connect to after login (this host's LAN address for LAN play)"
+    "BOTS=100|random bots for a new configuration ('configure'); the roster can change it later"
+    "MANGOS_REPO=https://github.com/cmangos/mangos-classic.git|cmangos-classic's repository"
+    "MANGOS_REF=ff53dfc4679cab3521726384e24692fef35d2718|the cmangos-classic commit 'source' checks out"
+    "PLAYERBOTS_REPO=https://github.com/cmangos/playerbots.git|playerbots' repository"
+    "PLAYERBOTS_REF=39d47006e4aa1658c7e17af15e4f63d47ec5a3eb|the playerbots commit 'source' checks out"
+    "CLASSICDB_REPO=https://github.com/cmangos/classic-db.git|classic-db's repository"
+    "CLASSICDB_REF=2f5b31bc32e80f121d78656817fbc5d6c3b1e99c|the classic-db commit 'source' checks out"
 )
 
 _cfg_default() {
@@ -61,7 +78,7 @@ cfg_set() {
     _cfg_known "$key" || error_exit "set: unknown key '${key}' (see 'config')."
     [[ "$val" != *$'\n'* ]] || error_exit "set: ${key}: the value must not contain a newline."
     case "$key" in
-        RA_PORT|WORLD_PORT|REALM_PORT|START_TIMEOUT|STOP_TIMEOUT|BOTS_TIMEOUT)
+        RA_PORT|WORLD_PORT|REALM_PORT|START_TIMEOUT|STOP_TIMEOUT|BOTS_TIMEOUT|DB_PORT|BUILD_JOBS|BOTS)
             [[ "$val" =~ ^[0-9]+$ ]] || error_exit "set: ${key} must be a number (got '${val}')." ;;
     esac
     _mkdir_private "$CONFIG_DIR"
@@ -79,6 +96,9 @@ _settings() {
         key="${entry%%=*}"
         printf -v "$key" '%s' "$(cfg_get "$key")"
     done
+    WORK_DIR="${WORK_DIR/#\~/$HOME}"; SOURCE_DIR="${SOURCE_DIR/#\~/$HOME}"; CLIENT_DIR="${CLIENT_DIR/#\~/$HOME}"
+    [[ -n "$WORK_DIR" ]] || WORK_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/teldrassil"
+    [[ -n "$SOURCE_DIR" ]] || SOURCE_DIR="${WORK_DIR}/src"
     [[ -n "$BOT_CONF" || -z "$ETC_DIR" ]] || BOT_CONF="${ETC_DIR}/aiplayerbot.conf"
     [[ -n "$CARDS_FILE" || -z "$ETC_DIR" ]] || CARDS_FILE="${ETC_DIR}/llm_character_card.txt"
     # Paths may be written with ~.

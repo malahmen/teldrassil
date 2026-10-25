@@ -1,0 +1,12 @@
+# teldrassil's build and tools image: compiles cmangos-classic with
+# playerbots, runs the client-data extractors, the database installer
+# (classic-db's InstallFullDB, which needs the mariadb client), and the
+# realm and world servers themselves.
+FROM docker.io/library/ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential cmake git ca-certificates \
+      libboost-all-dev libssl-dev libmysqlclient-dev zlib1g-dev libbz2-dev \
+      mariadb-client \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /build

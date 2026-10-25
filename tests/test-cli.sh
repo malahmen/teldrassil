@@ -101,5 +101,53 @@ run attune grant
 chk "attune: only plan or apply"                  '[[ $rc -ne 0 && "$out" == *"attune plan|apply"* ]]'
 unset STUB_RUNNING STUB_SQL_IN
 
+hdr "provisioning guards"
+run install
+chk "install needs --yes"                         '[[ $rc -ne 0 && "$out" == *"add --yes"* ]]'
+run db-init
+chk "db-init without an image: refused first"     '[[ $rc -ne 0 && "$out" == *"build-image"* ]]'
+export STUB_IMAGE=1
+run db-init
+chk "db-init without sources: refused"            '[[ $rc -ne 0 && "$out" == *"run '"'"'source'"'"' first"* ]]'
+mkdir -p "$T/config/teldrassil" "$T/work/src/mangos-classic" "$T/work/src/playerbots" "$T/work/src/classic-db"
+run set WORK_DIR "$T/work"
+run db-init
+chk "db-init with sources but no --yes: refused (it replaces databases)" '[[ $rc -ne 0 && "$out" == *"REPLACES"* ]]'
+run extract
+chk "extract needs a client"                      '[[ $rc -ne 0 && "$out" == *"Where is the 1.12.1 client"* ]]'
+mkdir -p "$T/client"
+run extract --client "$T/client"
+chk "a folder with no Data/ is not a client"      '[[ $rc -ne 0 && "$out" == *"no Data/ folder"* ]]'
+run configure
+chk "configure before a build: refused"           '[[ $rc -ne 0 && "$out" == *"run '"'"'build'"'"' first"* ]]'
+run create
+chk "create before a build: refused"              '[[ $rc -ne 0 && "$out" == *"run '"'"'build'"'"' first"* ]]'
+run remove
+chk "remove needs --yes"                          '[[ $rc -ne 0 && "$out" == *"add --yes"* ]]'
+run build --jobs many
+chk "build --jobs must be a number"               '[[ $rc -ne 0 ]]'
+unset STUB_IMAGE
+
+hdr "llm (on a copy of a shipped conf)"
+printf '# AiPlayerbot.LLMEnabled = 1\n# AiPlayerbot.LLMApiEndpoint = x\n# AiPlayerbot.LLMApiJson = x\n# AiPlayerbot.LLMResponseStartPattern = x\n# AiPlayerbot.LLMBotToBotChatChance = 0\n# AiPlayerbot.LLMApiKey =\n' > "$T/aiplayerbot.conf"
+run set BOT_CONF "$T/aiplayerbot.conf"
+run llm status
+chk "a shipped conf reads as off"                 '[[ "$out" == "LLM chat: off" ]]'
+printf 'sk-test-key\n' > "$T/key"
+run llm on --endpoint http://127.0.0.1:9/v1/chat/completions --model test-model --reasoning-effort none --api-key-file "$T/key"
+chk "llm on succeeds (an unreachable endpoint only warns)" '[[ $rc -eq 0 && "$out" == *"does not answer now"* ]]'
+chk "  every bot (LLMEnabled 2)"                  'grep -qx "AiPlayerbot.LLMEnabled = 2" "$T/aiplayerbot.conf"'
+chk "  the model and reasoning effort in the request" 'grep -q "\"model\": \"test-model\".*\"reasoning_effort\": \"none\"" "$T/aiplayerbot.conf"'
+chk "  the key is in the conf"                    'grep -qx "AiPlayerbot.LLMApiKey = sk-test-key" "$T/aiplayerbot.conf"'
+chk "  and in no output"                          '[[ "$out" != *sk-test-key* ]]'
+run llm status
+chk "status says on, every bot"                   '[[ "$out" == *"on (LLMEnabled 2: every bot)"* ]]'
+run llm off
+chk "llm off"                                     'grep -qx "AiPlayerbot.LLMEnabled = 0" "$T/aiplayerbot.conf"'
+run llm on --endpoint ftp://x --model m
+chk "an endpoint must be http(s)"                 '[[ $rc -ne 0 ]]'
+run llm on --model m
+chk "on needs an endpoint"                        '[[ $rc -ne 0 && "$out" == *"Usage: llm on"* ]]'
+
 printf '\npass=%d fail=%d\n' "$pass" "$fail"
 (( fail == 0 ))
