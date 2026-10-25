@@ -1,7 +1,8 @@
 name: ci
 
-# Every push and pull request. The suites need no network, no tokens and no
-# services: podman is stubbed and every test works in a temporary directory.
+# Every push and pull request, on GitHub Actions and on the Gitea runner alike.
+# The suites need no network, no tokens and no services: podman is stubbed and
+# every test works in a temporary directory.
 on:
   push:
     branches: [main]
@@ -16,6 +17,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # Its own Python and shellcheck rather than the image's: the Gitea
+      # runner's job image (catthehacker/ubuntu:act-22.04) has Python 3.10 and
+      # no shellcheck. Pinned, so a new release cannot turn this red on its own.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: tools
+        run: python -m pip install --quiet "shellcheck-py==0.11.0.1"
 
       - name: Versions
         run: |
