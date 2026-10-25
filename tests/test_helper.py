@@ -291,5 +291,45 @@ class Misc(unittest.TestCase):
             os.unlink(f.name)
 
 
+class Search(unittest.TestCase):
+    ROWS = [
+        {"guid": 1, "name": "Bolshemort", "race": 5, "class": 4, "level": 8, "online": 1, "zone": 14, "bot": True, "guild": "Workers"},
+        {"guid": 2, "name": "Hugwa", "race": 6, "class": 1, "level": 8, "online": 1, "zone": 17, "bot": True, "guild": None},
+        {"guid": 3, "name": "Playerone", "race": 8, "class": 7, "level": 3, "online": 0, "zone": 1637, "bot": False, "guild": "Workers"},
+    ]
+    ZONES = {14: "Durotar", 17: "The Barrens", 1637: "Orgrimmar"}
+
+    def names(self, **kw):
+        return [c["name"] for c in t.filter_characters(self.ROWS, self.ZONES, **kw)]
+
+    def test_filters(self):
+        self.assertEqual(self.names(zone="durotar"), ["Bolshemort"])
+        self.assertEqual(self.names(zone="14"), ["Bolshemort"])
+        self.assertEqual(self.names(cls="warrior"), ["Hugwa"])
+        self.assertEqual(self.names(level="3-7"), ["Playerone"])
+        self.assertEqual(self.names(kind="bot", guild="work"), ["Bolshemort"])
+        self.assertEqual(self.names(online=True, kind="player"), [])
+        self.assertEqual(self.names(roster_names={"Hugwa"}, roster_only=True), ["Hugwa"])
+        self.assertEqual(self.names(roster_names={"Hugwa"}, roster_only=False), ["Bolshemort", "Playerone"])
+
+    def test_bad_level(self):
+        with self.assertRaises(SystemExit):
+            t.filter_characters(self.ROWS, {}, level="high")
+
+    def test_area_names_from_a_dbc(self):
+        import struct
+        import tempfile
+        strings = b"\0Durotar\0Mulgore\0"
+        recs = [(14, 143 * 0 + 1), (215, 9)]
+        nfield = 12
+        body = b"".join(struct.pack(f"<{nfield}I", rid, *([0] * 10), off) for rid, off in recs)
+        data = struct.pack("<4s4I", b"WDBC", len(recs), nfield, nfield * 4, len(strings)) + body + strings
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "AreaTable.dbc"), "wb") as f:
+                f.write(data)
+            self.assertEqual(t.area_names(d), {14: "Durotar", 215: "Mulgore"})
+        self.assertEqual(t.area_names("/nonexistent"), {})
+
+
 if __name__ == "__main__":
     unittest.main()

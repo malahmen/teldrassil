@@ -34,6 +34,8 @@ source "${SCRIPT_DIR}/lib/config.sh"
 source "${SCRIPT_DIR}/lib/runtime.sh"
 source "${SCRIPT_DIR}/lib/accounts.sh"
 source "${SCRIPT_DIR}/lib/roster.sh"
+source "${SCRIPT_DIR}/lib/search.sh"
+source "${SCRIPT_DIR}/lib/admin.sh"
 
 usage() {
     cat >&2 <<'EOF'
@@ -42,7 +44,10 @@ teldrassil — cmangos-classic + playerbots server engine (1.12.1)
 Usage: teldrassil.sh <command> [flags]
 
 Server:
-  start | stop | restart        stop saves the world first, then disconnects everyone
+  start | stop                  stop saves the world first, then disconnects everyone
+  restart [--graceful [SECS]]   stop and start here; --graceful asks mangosd to
+                                warn players, save and exit in SECS (default 60),
+                                then starts it again
   status                        containers, ports, who is online, the LLM endpoint,
                                 and a warning while cmangos' default accounts exist
   save                          save every character now
@@ -56,6 +61,28 @@ Accounts:
   set-account-level --name N --level 0-3     takes effect at the next full login
   list-accounts [--bots]
   delete-account --name N --yes              only an account with no characters
+
+Characters:
+  rename-character --from OLD --to NEW       refused while it is online
+
+Search (up to --limit rows, default 50):
+  search --kind items|npcs|objects|quests|teleports --term TEXT
+  search --kind characters|bots [--term TEXT] [--zone NAME] [--class C] [--race R]
+         [--level N|MIN-MAX] [--guild TEXT] [--online] [--roster-only|--random-only]
+  search --kind guilds [--term TEXT]
+                                objects: herb and ore nodes, chests, doors - with
+                                their spawn counts and maps. Zone names need DBC_DIR.
+
+Administration:
+  apply-sql --file PATH --db NAME [--force] [--no-record]
+                                run a .sql file; tracked by content hash, so an
+                                unchanged file runs once
+  dump --all | --db NAME [--tables "a b c"] [--out PATH] [--no-gzip]
+                                gzipped, 0600, to ~/.config/teldrassil/dumps by
+                                default. Carries CREATE DATABASE, except --tables.
+  restore --file PATH --yes [--db NAME]
+                                DESTRUCTIVE: replaces the databases the dump
+                                names; with the world server stopped
 
 Roster (one JSON file: shaped bots, guilds, ranks, tabards, cards, LLM, population):
   roster check [--file F]       validate it
@@ -103,6 +130,11 @@ main() {
         set-account-level)  cmd_set_account_level "$@" ;;
         list-accounts)      cmd_list_accounts "$@" ;;
         delete-account)     cmd_delete_account "$@" ;;
+        rename-character)   cmd_rename_character "$@" ;;
+        search)             cmd_search "$@" ;;
+        apply-sql)          cmd_apply_sql "$@" ;;
+        dump)               cmd_dump "$@" ;;
+        restore)            cmd_restore "$@" ;;
         roster)             cmd_roster "$@" ;;
         commands)           cmd_commands "$@" ;;
         set)                cmd_set "$@" ;;

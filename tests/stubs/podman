@@ -12,7 +12,9 @@ case "$1" in
             *'{{.State.Running}}'*) echo true ;;
             *'{{.State.Status}}'*) echo running ;;
         esac ;;
-    exec) cat > /dev/null; printf '%s\n' "${STUB_SQL_REPLY:-0}" ;;
+    exec)
+        if [[ "$*" == *mariadb-dump* ]]; then printf -- '-- stub dump\nCREATE TABLE t (a INT);\n'
+        else cat >> "${STUB_SQL_IN:-/dev/null}"; printf '%s\n' "${STUB_SQL_REPLY:-0}"; fi ;;
     start|stop) exit 0 ;;
     logs) echo "${STUB_LOG_LINE:-}" ;;
     *) exit 1 ;;

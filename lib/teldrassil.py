@@ -801,6 +801,113 @@ def cmd_commands(a):
         print(line)
 
 
+# ----------------------------------------------------------------------------
+# Search: characters and bots
+# ----------------------------------------------------------------------------
+
+RACE_NAMES = {v: k for k, v in RACES.items()}
+CLASS_NAMES = {v: k for k, v in CLASSES.items()}
+
+
+def area_names(dbc_dir):
+    """{area id: name} from the client's AreaTable.dbc (1.12.1: id in field 0,
+    the English name's string offset in field 11). Empty without the file."""
+    import os
+    import struct
+    path = os.path.join(dbc_dir or "", "AreaTable.dbc")
+    try:
+        with open(path, "rb") as f:
+            b = f.read()
+    except OSError:
+        return {}
+    magic, nrec, nfield, rsize, ssize = struct.unpack("<4s4I", b[:20])
+    if magic != b"WDBC" or nfield < 12:
+        return {}
+    strings = b[20 + nrec * rsize:]
+    names = {}
+    for i in range(nrec):
+        rec = struct.unpack_from(f"<{nfield}I", b, 20 + i * rsize)
+        off = rec[11]
+        if off < ssize:
+            end = strings.find(b"\0", off)
+            names[rec[0]] = strings[off:end].decode("utf-8", "replace")
+    return names
+
+
+def _level_range(text):
+    m = re.fullmatch(r"(\d+)(?:-(\d+))?", str(text).strip())
+    if not m:
+        raise SystemExit(f"--level wants N or MIN-MAX, got '{text}'")
+    lo = int(m.group(1))
+    return lo, int(m.group(2) or lo)
+
+
+def filter_characters(rows, zones, term=None, zone=None, cls=None, race=None, level=None,
+                      guild=None, online=False, kind="all", roster_names=None, roster_only=None):
+    """The characters that match every filter given."""
+    out = []
+    zone_ids = None
+    if zone:
+        z = zone.lower()
+        zone_ids = {i for i, n in zones.items() if z in n.lower()}
+        if zone.isdigit():
+            zone_ids.add(int(zone))
+    cls_id = _lookup(CLASSES, cls, "class", "--class") if cls else None
+    race_id = _lookup(RACES, race, "race", "--race") if race else None
+    lo_hi = _level_range(level) if level else None
+    for c in rows:
+        if term and term.lower() not in c["name"].lower():
+            continue
+        if kind == "bot" and not c["bot"] or kind == "player" and c["bot"]:
+            continue
+        if zone_ids is not None and c["zone"] not in zone_ids:
+            continue
+        if cls_id and c["class"] != cls_id or race_id and c["race"] != race_id:
+            continue
+        if lo_hi and not lo_hi[0] <= c["level"] <= lo_hi[1]:
+            continue
+        if guild and guild.lower() not in (c.get("guild") or "").lower():
+            continue
+        if online and not c["online"]:
+            continue
+        if roster_only is True and c["name"] not in roster_names:
+            continue
+        if roster_only is False and c["name"] in roster_names:
+            continue
+        out.append(c)
+    return sorted(out, key=lambda c: (c["name"]))
+
+
+def cmd_chars(a):
+    with open(a.rows, encoding="utf-8") as f:
+        raw = f.read().strip()
+    rows = json.loads(raw) if raw and raw != "NULL" else []
+    rows = rows or []
+    for c in rows:
+        c["bot"] = bool(c["bot"])
+    zones = area_names(a.dbc)
+    names = set()
+    if a.roster:
+        names = {b["name"] for b in _read_roster(a.roster)["bots"]}
+    roster_only = True if a.roster_only else False if a.random_only else None
+    if roster_only is not None and not a.roster:
+        raise SystemExit("--roster-only and --random-only need a roster (--file, or ROSTER_FILE)")
+    found = filter_characters(rows, zones, a.term, a.zone, a.cls, a.race, a.level, a.guild,
+                              a.online, a.kind, names, roster_only)
+    shown = found[:a.limit]
+    print(f"{'name':<13} {'kind':<7} {'lvl':>3} {'race/class':<17} {'on':<3} {'zone':<22} guild")
+    for c in shown:
+        kind = ("roster" if c["name"] in names else "bot") if c["bot"] else "player"
+        rc = f"{RACE_NAMES.get(c['race'], c['race'])} {CLASS_NAMES.get(c['class'], c['class'])}"
+        zone = zones.get(c["zone"], str(c["zone"]))
+        guild = c.get("guild") or ""
+        if guild and c.get("rank"):
+            guild += f" ({c['rank']})"
+        print(f"{c['name']:<13} {kind:<7} {c['level']:>3} {rc:<17} {'yes' if c['online'] else 'no':<3} {zone[:22]:<22} {guild}")
+    more = len(found) - len(shown)
+    print(f"\n{len(found)} found" + (f", {more} not shown (raise --limit)" if more > 0 else ""))
+
+
 def cmd_names(a):
     for b in _read_roster(a.roster)["bots"]:
         print(b["name"])
@@ -875,6 +982,23 @@ def main(argv=None):
     s.add_argument("roster")
     s.add_argument("--state", required=True)
     s.set_defaults(fn=cmd_show)
+
+    s = sub.add_parser("chars")
+    s.add_argument("--rows", required=True)
+    s.add_argument("--dbc", default="")
+    s.add_argument("--roster")
+    s.add_argument("--term")
+    s.add_argument("--zone")
+    s.add_argument("--class", dest="cls")
+    s.add_argument("--race")
+    s.add_argument("--level")
+    s.add_argument("--guild")
+    s.add_argument("--online", action="store_true")
+    s.add_argument("--kind", choices=["all", "bot", "player"], default="all")
+    s.add_argument("--roster-only", action="store_true")
+    s.add_argument("--random-only", action="store_true")
+    s.add_argument("--limit", type=int, default=50)
+    s.set_defaults(fn=cmd_chars)
 
     s = sub.add_parser("names")
     s.add_argument("roster")

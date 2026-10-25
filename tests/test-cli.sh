@@ -68,5 +68,36 @@ printf '{"bots": [{"name": "Leadra", "race": "undead", "class": "paladin"}]}' > 
 run roster check --file "$T/bad.json"
 chk "an invalid one names the problem" '[[ $rc -ne 0 && "$out" == *"cannot be a paladin"* ]]'
 
+hdr "dump and restore (podman stubbed; the database my-db "runs", the server does not)"
+export STUB_RUNNING="my-db" STUB_SQL_IN="$T/sql.in"
+run dump --all
+chk "dump --all writes a file (no silent exit)"   '[[ $rc -eq 0 && "$out" == *"Dumped to"* ]]'
+chk "it is gzipped and private"                  'f=$(ls "$T"/config/teldrassil/dumps/all-*.sql.gz) && [[ "$(stat -c %a "$f")" == 600 ]] && gzip -t "$f"'
+run dump --db classiccharacters --tables "guild guild_rank" --no-gzip --out "$T/t.sql"
+chk "dump --tables to a path, uncompressed"       '[[ $rc -eq 0 && -s "$T/t.sql" && "$out" == *"restore it with --db"* ]]'
+run dump --tables guild
+chk "--tables without --db refused"              '[[ $rc -ne 0 ]]'
+run restore --file "$T/t.sql" --yes
+chk "a dump with no CREATE DATABASE needs --db (no silent exit)" '[[ $rc -ne 0 && "$out" == *"give --db"* ]]'
+: > "$T/sql.in"
+run restore --file "$T/t.sql" --db scratch --yes
+chk "restore --db sends USE scratch and the dump" '[[ $rc -eq 0 && "$(head -1 "$T/sql.in")" == "USE \`scratch\`;" ]] && grep -q "CREATE TABLE t" "$T/sql.in"'
+gzip -c "$T/t.sql" > "$T/t.sql.gz"; : > "$T/sql.in"
+run restore --file "$T/t.sql.gz" --db scratch --yes
+chk "a gzipped dump is detected by content"      'grep -q "CREATE TABLE t" "$T/sql.in"'
+
+hdr "search guards"
+run search --kind spells --term x
+chk "unknown kind refused"                        '[[ $rc -ne 0 && "$out" == *"--kind must be"* ]]'
+run search --kind items
+chk "items need --term"                           '[[ $rc -ne 0 && "$out" == *"--term is required"* ]]'
+run search --kind items --term x --zone Durotar
+chk "character filters only for characters/bots"  '[[ $rc -ne 0 && "$out" == *"are for characters and bots"* ]]'
+: > "$T/sql.in"
+run search --kind items --term "50%_off"
+want_like="LIKE '%50\\\\%\\\\_off%'"   # in SQL: \\% and \\_ - LIKE then reads \% and \_ as literals
+chk "LIKE wildcards in a term are literal"        'grep -qF -- "$want_like" "$T/sql.in"'
+unset STUB_RUNNING STUB_SQL_IN
+
 printf '\npass=%d fail=%d\n' "$pass" "$fail"
 (( fail == 0 ))

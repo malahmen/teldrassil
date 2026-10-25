@@ -7,6 +7,7 @@
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/teldrassil"
 CONFIG_FILE="${CONFIG_DIR}/teldrassil.conf"
 BACKUP_DIR="${CONFIG_DIR}/backups"
+DUMP_DIR="${CONFIG_DIR}/dumps"
 
 # Every setting, with its default and what it is for. The defaults describe a
 # server run by teldrassil itself; a prototype or another layout sets its own
@@ -19,6 +20,7 @@ CONFIG_KEYS=(
     "DB_WORLD=classicmangos|the world database"
     "DB_CHARACTERS=classiccharacters|the characters database"
     "DB_REALMD=classicrealmd|the realm (accounts) database"
+    "DB_LOGS=classiclogs|the logs database"
     "SERVER_CONTAINER=teldrassil-mangosd|the world server container"
     "REALM_CONTAINER=teldrassil-realmd|the realm (login) server container"
     "BOT_ACCOUNT_PREFIX=RNDBOT|playerbots' random-bot account names start with this"
@@ -31,6 +33,7 @@ CONFIG_KEYS=(
     "CARDS_FILE=|the character-card file on the host (empty: ETC_DIR/llm_character_card.txt)"
     "CARDS_FILE_IN_SERVER=/install/etc/llm_character_card.txt|the same file as the server sees it"
     "ROSTER_FILE=|the roster (JSON) that 'roster' commands use by default"
+    "DBC_DIR=|the extracted client dbc directory on the host (zone names in search)"
     "WORLD_PORT=8085|the world server's port"
     "REALM_PORT=3724|the realm server's port"
     "READY_PATTERN=World initialized|the world server's log line that means it is up"
@@ -80,7 +83,7 @@ _settings() {
     [[ -n "$CARDS_FILE" || -z "$ETC_DIR" ]] || CARDS_FILE="${ETC_DIR}/llm_character_card.txt"
     # Paths may be written with ~.
     RA_PASS_FILE="${RA_PASS_FILE/#\~/$HOME}"; ETC_DIR="${ETC_DIR/#\~/$HOME}"
-    BOT_CONF="${BOT_CONF/#\~/$HOME}"; CARDS_FILE="${CARDS_FILE/#\~/$HOME}"; ROSTER_FILE="${ROSTER_FILE/#\~/$HOME}"
+    BOT_CONF="${BOT_CONF/#\~/$HOME}"; CARDS_FILE="${CARDS_FILE/#\~/$HOME}"; ROSTER_FILE="${ROSTER_FILE/#\~/$HOME}"; DBC_DIR="${DBC_DIR/#\~/$HOME}"
 }
 
 cmd_set() {

@@ -21,9 +21,20 @@ containers** (podman or docker): a MariaDB container, a realm server and a
 world server. Building, client-data extraction and the database bootstrap are
 the next slice.
 
-- **The server:** `start`, `stop` (saves first), `restart`, `status`, `save`,
-  and the remote console.
+- **The server:** `start`, `stop` (saves first), `restart` (or `--graceful`:
+  players warned, the world saved, mangosd exits and is started again),
+  `status`, `save`, and the remote console.
 - **Accounts:** create one, set its GM level, list them, delete one.
+- **Characters:** rename one (refused while it is online: the world server
+  would write the old name back).
+- **Search:** items, NPCs, objects (herb and ore nodes, chests, doors, with
+  spawn counts and maps), quests and teleports in the world database;
+  characters and bots - by zone, class, race, level range, guild, online,
+  roster or random - and guilds (leader, members online, ranks, tabard).
+  Zone names come from the client's `AreaTable.dbc` (`set DBC_DIR`).
+- **Administration:** `apply-sql` (a file runs once, tracked by its content
+  hash), `dump` (all four databases, one, or some tables; gzipped, 0600) and
+  `restore` (with the world server stopped).
 - **The roster:** one JSON file that says which bots are shaped on purpose and
   how - name, race, class, gender, professions, priorities, guild and rank,
   farm order, character card, preferred guild size - plus the guilds
@@ -52,6 +63,8 @@ It runs from its checkout:
 | `lib/runtime.sh` | the database, the containers and the console; `start`, `stop`, `status`, `save`, `console` |
 | `lib/accounts.sh` | the account commands |
 | `lib/roster.sh` | the roster commands and `commands` |
+| `lib/search.sh` | `search` |
+| `lib/admin.sh` | `rename-character`, `apply-sql`, `dump`, `restore`, the graceful restart |
 | `lib/teldrassil.py` | the helper |
 | `examples/roster.example.json` | a roster to start from |
 

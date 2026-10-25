@@ -100,7 +100,14 @@ _stop() {
     success "World server stopped."
 }
 
-cmd_restart() { [[ $# -eq 0 ]] || error_exit "Usage: restart"; _stop; _start; }
+# restart [--graceful [SECS]]: by default stop and start here. --graceful asks
+# mangosd itself (players warned, world saved, default 60 s), then starts it
+# again when it has exited.
+cmd_restart() {
+    if [[ $# -eq 0 ]]; then _stop; _start; return; fi
+    [[ "$1" == "--graceful" && $# -le 2 ]] || error_exit "Usage: restart [--graceful [SECS]]"
+    _restart_graceful "${2:-60}"
+}
 
 # -----------------------------------------------------------------------------
 # The remote console
