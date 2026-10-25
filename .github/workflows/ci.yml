@@ -1,0 +1,30 @@
+name: ci
+
+# Every push and pull request. The suites need no network, no tokens and no
+# services: podman is stubbed and every test works in a temporary directory.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Versions
+        run: |
+          bash --version | head -1
+          python3 --version
+          shellcheck --version | sed -n 2p
+
+      - name: shellcheck
+        run: shellcheck -x -S warning teldrassil.sh tests/run-all.sh tests/test-cli.sh tests/stubs/podman
+
+      - name: tests
+        run: tests/run-all.sh

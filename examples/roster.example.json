@@ -1,0 +1,36 @@
+{
+  "about": "An example roster: two guilds and four shaped bots in a population of 100. Copy it, change it, then 'roster plan' and 'roster apply --yes'.",
+  "population": {"bots": 100, "balance": "50/50"},
+  "llm": {
+    "enabled": 2,
+    "endpoint": "http://127.0.0.1:1234/v1/chat/completions",
+    "model": "qwen/qwen3.6-35b-a3b",
+    "max_tokens": 80,
+    "reasoning_effort": "none",
+    "bot_to_bot_chance": 0,
+    "pre_prompt": "You are a roleplaying character in World of Warcraft: <expansion name>. Your name is <bot name>. The <other type> <other name> is speaking to you <channel name> and is an <other gender> <other race> <other class> of level <other level>. You are level <bot level> and play as a <bot gender> <bot race> <bot class> that is currently in <bot subzone> <bot zone>. Answer as a roleplaying character, in one or two short sentences."
+  },
+  "guilds": [
+    {"name": "Order of the Ember", "faction": "horde", "leader": "Ashveil",
+     "ranks": ["Warchief", "Blood Guard", "Grunt", "Peon"], "officer_ranks": 2,
+     "tabard": {"symbol": 168, "symbol_color": 16, "border": 0, "border_color": 4, "background": 44},
+     "motd": "Farm orders are in the officer notes."},
+    {"name": "Silver Ledger", "faction": "alliance", "leader": "Brannoc",
+     "ranks": ["Treasurer", "Clerk", "Member"],
+     "tabard": {"symbol": 90, "symbol_color": 14, "border": 1, "border_color": 14, "background": 32}}
+  ],
+  "bots": [
+    {"name": "Ashveil", "note": "the founder", "race": "undead", "class": "priest", "gender": "female",
+     "spec": "pve heal holy", "professions": ["tailoring", "enchanting"],
+     "priorities": ["quests", "gather", "dungeons", "raids"], "guild": "Order of the Ember",
+     "card": "You are Ashveil, a dry-witted Forsaken priest who keeps the guild's ledgers and trusts no one's arithmetic but her own."},
+    {"name": "Gorrak", "race": "orc", "class": "shaman", "professions": ["herbalism", "alchemy"],
+     "priorities": ["gather", "ah", "quests", "others"], "guild": "Order of the Ember", "rank": "Grunt",
+     "farm": "Peacebloom 40"},
+    {"name": "Brannoc", "race": "dwarf", "class": "paladin", "professions": ["mining", "engineering"],
+     "priorities": ["gather", "quests", "ah", "others"], "guild": "Silver Ledger", "farm": "Copper Ore 40",
+     "card": "You are Brannoc, a cheerful dwarf paladin who measures everything in ale and copper ore."},
+    {"name": "Lysara", "race": "human", "class": "warlock", "gender": "female", "professions": ["herbalism", "alchemy"],
+     "priorities": ["ah", "wpvp", "quests", "gather", "others"], "guild": "Silver Ledger", "rank": "Clerk"}
+  ]
+}
