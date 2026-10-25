@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# A stand-in for podman: no test may reach a real container. Containers named
+# in $STUB_RUNNING are "running"; every other one is missing. Each call is
+# logged to $STUB_LOG, and 'exec' answers SQL with $STUB_SQL_REPLY.
+echo "podman $*" >> "${STUB_LOG:-/dev/null}"
+case "$1" in
+    container)
+        [[ "$2" == "inspect" ]] || exit 1
+        name="${*: -1}"
+        [[ " ${STUB_RUNNING:-} " == *" ${name} "* ]] || exit 125
+        case "$*" in
+            *'{{.State.Running}}'*) echo true ;;
+            *'{{.State.Status}}'*) echo running ;;
+        esac ;;
+    exec)
+        if [[ "$*" == *mariadb-dump* ]]; then printf -- '-- stub dump\nCREATE TABLE t (a INT);\n'
+        else cat >> "${STUB_SQL_IN:-/dev/null}"; printf '%s\n' "${STUB_SQL_REPLY:-0}"; fi ;;
+    start|stop) exit 0 ;;
+    logs) echo "${STUB_LOG_LINE:-}" ;;
+    *) exit 1 ;;
+esac
