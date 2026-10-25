@@ -87,7 +87,7 @@ cmd_delete_account() {
     chars="$(_db_value "SELECT COUNT(*) FROM ${DB_CHARACTERS}.characters c JOIN ${DB_REALMD}.account a ON a.id=c.account WHERE a.username=$(_sql_str "$name");")"
     [[ "$chars" == "0" ]] || error_exit "${name} still has ${chars} character(s); delete them in game first."
     printf '%s\n' \
-        "DELETE rc FROM ${DB_REALMD}.realmcharacters rc JOIN ${DB_REALMD}.account a ON a.id=rc.acctid WHERE a.username=$(_sql_str "$name");" \
+        "DELETE FROM ${DB_REALMD}.realmcharacters WHERE acctid IN (SELECT id FROM ${DB_REALMD}.account WHERE username=$(_sql_str "$name"));" \
         "DELETE FROM ${DB_REALMD}.account WHERE username=$(_sql_str "$name");" | _db_raw
     success "Account ${name} deleted."
 }

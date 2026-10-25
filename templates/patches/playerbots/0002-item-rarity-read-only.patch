@@ -1,0 +1,15 @@
+diff --git a/playerbot/RandomItemMgr.cpp b/playerbot/RandomItemMgr.cpp
+index 9224283..2e04607 100644
+--- a/playerbot/RandomItemMgr.cpp
++++ b/playerbot/RandomItemMgr.cpp
+@@ -4025,5 +4025,9 @@ void RandomItemMgr::LoadRandomEnchantments()
+ 
+ float RandomItemMgr::GetItemRarity(uint32 itemId)
+ {
+-    return rarityCache[itemId];
++    // kalimdor: read without inserting. operator[] inserted on every miss,
++    // from several map-update threads at once (the cache is never built), and
++    // a std::map written concurrently can corrupt and loop forever.
++    auto it = rarityCache.find(itemId);
++    return it == rarityCache.end() ? 0.0f : it->second;
+ }

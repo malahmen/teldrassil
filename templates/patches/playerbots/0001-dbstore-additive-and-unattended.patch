@@ -1,0 +1,116 @@
+diff --git a/playerbot/PlayerbotAI.cpp b/playerbot/PlayerbotAI.cpp
+index 996ffaa..98e6965 100644
+--- a/playerbot/PlayerbotAI.cpp
++++ b/playerbot/PlayerbotAI.cpp
+@@ -2840,7 +2840,7 @@ void PlayerbotAI::ResetStrategies(bool autoLoad)
+             stanceValue->Load("near");
+     }
+ 
+-    if (autoLoad && HasPlayerRelation()) sPlayerbotDbStore.Load(this);
++    if (autoLoad && (HasPlayerRelation() || sPlayerbotDbStore.HasStoredRows(bot->GetObjectGuid().GetRawValue()))) sPlayerbotDbStore.Load(this);
+ 
+ #ifdef GenerateBotTests
+     for (auto& [state, strats] : testStrategies)
+diff --git a/playerbot/PlayerbotDbStore.cpp b/playerbot/PlayerbotDbStore.cpp
+index 190fdfe..0e2332a 100644
+--- a/playerbot/PlayerbotDbStore.cpp
++++ b/playerbot/PlayerbotDbStore.cpp
+@@ -20,28 +20,57 @@ void PlayerbotDbStore::Load(PlayerbotAI *ai, std::string preset)
+     auto results = CharacterDatabase.PQuery("SELECT `key`,`value` FROM `ai_playerbot_db_store` WHERE `guid` = '%lu' AND `preset` = '%s'", guid, preset.c_str());
+     if (results)
+     {
+-        ai->ClearStrategies(BotState::BOT_STATE_COMBAT);
+-        ai->ClearStrategies(BotState::BOT_STATE_NON_COMBAT);
+-        ai->ChangeStrategy("+chat", BotState::BOT_STATE_COMBAT);
+-        ai->ChangeStrategy("+chat", BotState::BOT_STATE_NON_COMBAT);
+-
+-        std::list<std::string> values;
++        // kalimdor: "co+"/"nc+"/"dead+"/"react+" rows add to the default strategies;
++        // only full lists ("co", "nc", "dead", "react") replace them.
++        std::vector<std::pair<std::string, std::string>> rows;
++        bool fullList = false;
+         do
+         {
+             Field* fields = results->Fetch();
+-            std::string key = fields[0].GetString();
+-            std::string value = fields[1].GetString();
+-            if (key == "value") values.push_back(value);
+-            else if (key == "co") ai->ChangeStrategy(value, BotState::BOT_STATE_COMBAT);
+-            else if (key == "nc") ai->ChangeStrategy(value, BotState::BOT_STATE_NON_COMBAT);
+-            else if (key == "dead") ai->ChangeStrategy(value, BotState::BOT_STATE_DEAD);
+-            else if (key == "react") ai->ChangeStrategy(value, BotState::BOT_STATE_REACTION);
++            rows.emplace_back(fields[0].GetString(), fields[1].GetString());
++            const std::string& key = rows.back().first;
++            if (key == "co" || key == "nc" || key == "dead" || key == "react")
++                fullList = true;
+         } while (results->NextRow());
+ 
++        if (fullList)
++        {
++            ai->ClearStrategies(BotState::BOT_STATE_COMBAT);
++            ai->ClearStrategies(BotState::BOT_STATE_NON_COMBAT);
++            ai->ChangeStrategy("+chat", BotState::BOT_STATE_COMBAT);
++            ai->ChangeStrategy("+chat", BotState::BOT_STATE_NON_COMBAT);
++        }
++
++        std::list<std::string> values;
++        for (const auto& [key, value] : rows)
++        {
++            if (key == "value") values.push_back(value);
++            else if (key == "co" || key == "co+") ai->ChangeStrategy(value, BotState::BOT_STATE_COMBAT);
++            else if (key == "nc" || key == "nc+") ai->ChangeStrategy(value, BotState::BOT_STATE_NON_COMBAT);
++            else if (key == "dead" || key == "dead+") ai->ChangeStrategy(value, BotState::BOT_STATE_DEAD);
++            else if (key == "react" || key == "react+") ai->ChangeStrategy(value, BotState::BOT_STATE_REACTION);
++        }
++
+         ai->GetAiObjectContext()->Load(values);
+     }
+ }
+ 
++bool PlayerbotDbStore::HasStoredRows(uint64 guid)
++{
++    std::call_once(storedGuidsLoaded, [this]()
++    {
++        auto results = CharacterDatabase.Query("SELECT DISTINCT `guid` FROM `ai_playerbot_db_store` WHERE `preset` = ''");
++        if (results)
++        {
++            do
++            {
++                storedGuids.insert(results->Fetch()[0].GetUInt64());
++            } while (results->NextRow());
++        }
++    });
++    return storedGuids.count(guid) > 0;
++}
++
+ void PlayerbotDbStore::Save(PlayerbotAI *ai, std::string preset)
+ {
+     uint64 guid = ai->GetBot()->GetObjectGuid().GetRawValue();
+diff --git a/playerbot/PlayerbotDbStore.h b/playerbot/PlayerbotDbStore.h
+index 8696b74..cef127d 100644
+--- a/playerbot/PlayerbotDbStore.h
++++ b/playerbot/PlayerbotDbStore.h
+@@ -4,6 +4,8 @@
+ #include "Common.h"
+ #include "PlayerbotAIBase.h"
+ #include "PlayerbotMgr.h"
++#include <mutex>
++#include <set>
+ 
+ class PlayerbotDbStore
+ {
+@@ -19,10 +21,14 @@ public:
+     void Save(PlayerbotAI *ai, std::string preset = "");
+     void Load(PlayerbotAI *ai, std::string preset = "");
+     void Reset(PlayerbotAI *ai, std::string preset = "");
++    // kalimdor: bots with stored rows load them without a player relation.
++    bool HasStoredRows(uint64 guid);
+ 
+ private:
+     void SaveValue(uint64 guid, std::string preset, std::string key, std::string value);
+     std::string FormatStrategies(std::string type, std::list<std::string_view> strategies);
++    std::set<uint64> storedGuids;
++    std::once_flag storedGuidsLoaded;
+ };
+ 
+ #define sPlayerbotDbStore PlayerbotDbStore::instance()

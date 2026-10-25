@@ -13,7 +13,7 @@ import teldrassil as t  # noqa: E402
 def roster(**over):
     data = {
         "guilds": [{"name": "Test Guild", "faction": "horde", "leader": "Leadra",
-                    "ranks": ["Boss", "Deputy", "Member"],
+                    "ranks": ["Boss", "Deputy", "Sergeant", "Member", "Recruit"],
                     "tabard": {"symbol": 1, "symbol_color": 2, "border": 3, "border_color": 4, "background": 5}}],
         "bots": [
             {"name": "Leadra", "race": "undead", "class": "priest", "gender": "female",
@@ -70,7 +70,7 @@ def apply_plan_to_state(rost, state):
         if co:
             st["store"].append({"guid": c["guid"], "key": "co+", "value": ",".join("+" + s for s in co)})
         st["store"].append({"guid": c["guid"], "key": "value", "value": t.GUILDER_PREFIX + "70"})
-        rank = 0 if b["name"] == "Leadra" else r["guilds"][0]["ranks"].index(b["rank"]) if b["rank"] else 2
+        rank = 0 if b["name"] == "Leadra" else r["guilds"][0]["ranks"].index(b["rank"]) if b["rank"] else len(r["guilds"][0]["ranks"]) - 1
         st["members"].append({"guild": gid, "guid": c["guid"], "rank": rank, "pnote": "",
                               "offnote": f"Farm: {b['farm']}" if b["farm"] else ""})
     return st
@@ -112,6 +112,14 @@ class LoadRoster(unittest.TestCase):
             bad["bots"][1]["name"] = name
             with self.assertRaises(t.RosterError, msg=name):
                 t.load_roster(bad)
+
+    def test_at_least_five_ranks(self):
+        bad = roster()
+        bad["guilds"][0]["ranks"] = ["Boss", "Deputy", "Member"]
+        bad["bots"][1]["rank"] = "Deputy"
+        with self.assertRaises(t.RosterError) as e:
+            t.load_roster(bad)
+        self.assertIn("5 to 10 ranks", str(e.exception))
 
     def test_leader_must_be_in_the_guild(self):
         bad = roster()
@@ -182,6 +190,34 @@ class Plan(unittest.TestCase):
         self.assertIn("(1,10,0,", joined)   # the leader at the top rank
         self.assertIn("(1,11,1,", joined)   # Grunt as Deputy
 
+    def test_takes_a_bot_out_of_a_random_guild_when_needed(self):
+        st = empty_state()
+        st["guilds"] = [{"id": 7, "name": "Random Bots", "leader": 99, "EmblemStyle": 0, "EmblemColor": 0,
+                         "BorderStyle": 0, "BorderColor": 0, "BackgroundColor": 0, "info": "", "motd": ""}]
+        st["members"] = [{"guild": 7, "guid": 10, "rank": 3, "pnote": "", "offnote": ""}]
+        lines, sql, _ = t.plan(t.load_roster(roster()), st, now=1)
+        text = "\n".join(lines)
+        self.assertIn("rename Randoma (guid 10) to Leadra", text)
+        self.assertIn("Leadra: leaves guild id 7", text)
+
+    def test_prefers_a_guildless_bot(self):
+        st = empty_state()
+        st["guilds"] = [{"id": 7, "name": "Random Bots", "leader": 99, "EmblemStyle": 0, "EmblemColor": 0,
+                         "BorderStyle": 0, "BorderColor": 0, "BackgroundColor": 0, "info": "", "motd": ""}]
+        st["members"] = [{"guild": 7, "guid": 11, "rank": 3, "pnote": "", "offnote": ""}]
+        lines, _, _ = t.plan(t.load_roster(roster()), st, now=1)
+        self.assertIn("rename Randomc (guid 12) to Grunt", "\n".join(lines))   # 11 is in a guild; 12 is not
+
+    def test_never_takes_from_a_roster_guild_or_a_leader(self):
+        st = empty_state()
+        st["guilds"] = [{"id": 7, "name": "Test Guild", "leader": 12, "EmblemStyle": 0, "EmblemColor": 0,
+                         "BorderStyle": 0, "BorderColor": 0, "BackgroundColor": 0, "info": "", "motd": ""}]
+        st["members"] = [{"guild": 7, "guid": 11, "rank": 3, "pnote": "", "offnote": ""},
+                         {"guild": 7, "guid": 12, "rank": 0, "pnote": "", "offnote": ""}]
+        with self.assertRaises(t.RosterError) as e:
+            t.plan(t.load_roster(roster()), st, now=1)
+        self.assertIn("Grunt: no free bot", str(e.exception))
+
     def test_never_touches_players(self):
         state = empty_state()
         rost = roster()
@@ -211,15 +247,14 @@ class Plan(unittest.TestCase):
         lines, sql, _ = t.plan(t.load_roster(rost), after, now=1)
         self.assertEqual(sql, [])
 
-    def test_ranks_shrink_moves_members_up(self):
+    def test_changed_ranks_are_rewritten(self):
         rost = roster()
         after = apply_plan_to_state(rost, empty_state())
-        rost["guilds"][0]["ranks"] = ["Boss", "Deputy"]
-        rost["bots"][1]["rank"] = "Deputy"
+        rost["guilds"][0]["ranks"] = ["Boss", "Deputy", "Sergeant", "Member", "Recruit", "Ensign"]
         lines, sql, _ = t.plan(t.load_roster(rost), after, now=1)
         joined = "\n".join(sql)
         self.assertIn("DELETE FROM guild_rank WHERE guildid=1;", joined)
-        self.assertNotIn("`rank`>1", joined)   # nobody sat below the new lowest rank
+        self.assertIn("'Ensign'", joined)
 
     def test_card_removed_deletes_its_row(self):
         rost = roster()
@@ -369,6 +404,38 @@ class Attunements(unittest.TestCase):
         self.assertIn("quest IN (7848,7761,9378)", sql)
         self.assertIn("faction IN (529)", sql)
         self.assertIn("LIKE 'RNDBOT%'", sql)
+
+
+class ConfCommand(unittest.TestCase):
+    def run_conf(self, text, *args):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            src, out, sec = (os.path.join(d, n) for n in ("in.conf", "out.conf", "pw"))
+            with open(src, "w") as f:
+                f.write(text)
+            with open(sec, "w") as f:
+                f.write("Sup3rSecret\n")
+            import contextlib
+            import io
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                t.main(["conf", "--conf", src, "--out", out, "--secret-file", sec, *args])
+            with open(out) as f:
+                return f.read(), buf.getvalue()
+
+    def test_secret_goes_in_the_file_and_not_on_screen(self):
+        text, shown = self.run_conf('LoginDatabaseInfo = "x"\n', "--set", 'LoginDatabaseInfo="h;3307;mangos;@SECRET@;realmd"')
+        self.assertIn('"h;3307;mangos;Sup3rSecret;realmd"', text)
+        self.assertNotIn("Sup3rSecret", shown)
+        self.assertIn("****", shown)
+
+    def test_require_refuses_an_unknown_key(self):
+        with self.assertRaises(SystemExit):
+            self.run_conf("A = 1\n", "--require", "--set", "Renamed=2")
+
+    def test_require_accepts_a_commented_key(self):
+        text, _ = self.run_conf("# Ra.Enable = 0\n", "--require", "--set", "Ra.Enable=1")
+        self.assertEqual(text, "Ra.Enable = 1\n")
 
 
 if __name__ == "__main__":

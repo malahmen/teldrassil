@@ -227,8 +227,10 @@ def load_roster(data):
             if faction not in ("alliance", "horde"):
                 raise RosterError(f"{where}: faction must be alliance or horde")
             ranks = g.get("ranks") or ["Guild Master", "Officer", "Veteran", "Member", "Initiate"]
-            if not 2 <= len(ranks) <= 10:
-                raise RosterError(f"{where}: a guild has 2 to 10 ranks")
+            # cmangos replaces a guild's ranks with the defaults when it has
+            # fewer than 5 (GUILD_RANKS_MIN_COUNT), and the client allows 10.
+            if not 5 <= len(ranks) <= 10:
+                raise RosterError(f"{where}: a guild has 5 to 10 ranks (cmangos resets one with fewer)")
             for r in ranks:
                 if not 1 <= len(r) <= 15:
                     raise RosterError(f"{where}: rank name '{r}' must be 1-15 characters")
@@ -480,6 +482,8 @@ def plan(roster, state, now=None):
     for s in state["store"]:
         store.setdefault(s["guid"], []).append((s["key"], s["value"]))
     roster_names = {b["name"] for b in roster["bots"]}
+    roster_guild_ids = {g["id"] for g in state["guilds"]
+                        if g["name"].lower() in {rg["name"].lower() for rg in roster["guilds"]}}
     taken = set()
     errors = []
     failed = set()
@@ -505,15 +509,21 @@ def plan(roster, state, now=None):
     for b in roster["bots"]:
         if b["name"] in bound or b["name"] in failed:
             continue
+        # A free bot: same race and class, not already rostered, leading no
+        # guild, and in no guild - or, failing that, in one of playerbots'
+        # own random guilds (never a roster guild). A small population joins
+        # its random guilds within minutes, so the second kind is often all
+        # there is; the plan moves it out.
         free = [c for c in chars
                 if c["bot"] and c["guid"] not in taken and c["name"] not in roster_names
                 and (c["race"], c["class"]) == (b["race"], b["class"])
-                and c["guid"] not in member_of and c["guid"] not in leaders]
+                and c["guid"] not in leaders
+                and (c["guid"] not in member_of or member_of[c["guid"]]["guild"] not in roster_guild_ids)]
         if not free:
             errors.append(f"{b['name']}: no free bot of race {b['race']} class {b['class']} to take over; "
                           "apply with --fresh-population, or raise that pair's count")
             continue
-        c = min(free, key=lambda x: (x["level"], x["guid"]))
+        c = min(free, key=lambda x: (x["guid"] in member_of, x["level"], x["guid"]))
         taken.add(c["guid"])
         bound[b["name"]] = dict(c)
         lines.append(f"rename {c['name']} (guid {c['guid']}) to {b['name']}")
@@ -1049,14 +1059,30 @@ def cmd_conf(a):
             changes = conf_changes(_read_roster(a.roster), text, a.cards_in_server)
         except RosterError as e:
             raise SystemExit(str(e))
+    secret = None
+    if a.secret_file:
+        with open(a.secret_file, encoding="utf-8") as f:
+            secret = f.read().strip()
+    shown = {}
     for kv in a.set:
         k, sep, v = kv.partition("=")
         if not sep or not k.strip():
             raise SystemExit(f"--set wants KEY=VALUE, got '{kv}'")
-        if conf_get(text, k.strip()) != v.strip():
-            changes[k.strip()] = v.strip()
+        k, v = k.strip(), v.strip()
+        # @SECRET@ is replaced with --secret-file's content here, so a
+        # password never travels on a command line; it is shown masked.
+        shown[k] = v.replace("@SECRET@", "****")
+        if "@SECRET@" in v:
+            if secret is None:
+                raise SystemExit(f"{k}: @SECRET@ needs --secret-file")
+            v = v.replace("@SECRET@", secret)
+        if a.require and conf_get(text, k) is None and not re.search(rf"^#\s*{re.escape(k)}\s*=", text, re.M):
+            raise SystemExit(f"{k} is not in {a.conf}: a renamed setting?")
+        if conf_get(text, k) != v:
+            changes[k] = v
     for k, v in changes.items():
         text = conf_set(text, k, v)
+        v = shown.get(k, v)
         print(f"{k} = {v if len(v) < 90 else v[:87] + '...'}")
     with open(a.out, "w", encoding="utf-8") as f:
         f.write(text)
@@ -1147,6 +1173,8 @@ def main(argv=None):
     s.add_argument("--roster")
     s.add_argument("--cards-in-server", default="")
     s.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
+    s.add_argument("--secret-file", help="replaces @SECRET@ in --set values")
+    s.add_argument("--require", action="store_true", help="every --set key must already be in the conf")
     s.set_defaults(fn=cmd_conf)
 
     s = sub.add_parser("commands")

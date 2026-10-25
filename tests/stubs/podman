@@ -15,6 +15,7 @@ case "$1" in
     exec)
         if [[ "$*" == *mariadb-dump* ]]; then printf -- '-- stub dump\nCREATE TABLE t (a INT);\n'
         else cat >> "${STUB_SQL_IN:-/dev/null}"; printf '%s\n' "${STUB_SQL_REPLY:-0}"; fi ;;
+    image) [[ "${2:-}" == exists && -n "${STUB_IMAGE:-}" ]] ;;   # an image "exists" only when asked to
     start|stop) exit 0 ;;
     logs) echo "${STUB_LOG_LINE:-}" ;;
     *) exit 1 ;;
