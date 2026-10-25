@@ -29,9 +29,9 @@ runs every step not done yet, in order, then starts the server:
 
 | Step | What it does |
 | --- | --- |
-| `source` | checks out cmangos-classic, playerbots and classic-db at pinned commits (`MANGOS_REF`, `PLAYERBOTS_REF`, `CLASSICDB_REF`; `source --update` moves to new pins) |
+| `source` | checks out cmangos-classic, playerbots and classic-db at pinned commits (`MANGOS_REF`, `PLAYERBOTS_REF`, `CLASSICDB_REF`; `source --update` moves to new pins) - or, with `SOURCE_REPO` set, clones one repository holding all three (and `zlib/`), such as kalimdor, at `SOURCE_REF` |
 | `build-image` | the one image for building, tools and running (Ubuntu 24.04) |
-| `build` | applies teldrassil's playerbots patches (`templates/patches/playerbots/`), then compiles with playerbots and the extractors. The first build fetches zlib from GitHub |
+| `build` | applies teldrassil's playerbots patches (`templates/patches/playerbots/`; already-applied ones are recognised, in a subfolder too), then compiles with playerbots and the extractors. Sources with their own `zlib/` build with no network at all; otherwise zlib is fetched from GitHub |
 | `extract` | dbc, maps, vmaps and mmaps from the 1.12.1 client (~20 minutes on many cores, ~2.4 GB) |
 | `db-init --yes` | a MariaDB container on 127.0.0.1 only, the four databases from classic-db with playerbots' tables (replacing any that exist), the realm's name and address, a console account for teldrassil; it removes cmangos' default accounts |
 | `configure` | `mangosd.conf`, `realmd.conf`, `aiplayerbot.conf` and `ahbot.conf` from their templates: the database, ports, the remote console on 127.0.0.1, the bot count. An existing file is kept unless `--force`, since `roster apply` edits them |
