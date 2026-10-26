@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# A stand-in for ssh: the "remote" command runs here, through a second shell
+# parse as on a real host - so a quoting mistake breaks the tests, not a
+# server. Logged to $STUB_LOG as "ssh HOST <command>".
+while [[ $# -gt 0 ]]; do case "$1" in
+    -o|-W) shift 2 ;;
+    --) shift; break ;;
+    -*) shift ;;
+    *) break ;;
+esac; done
+host="$1"; shift
+echo "ssh ${host} $*" >> "${STUB_LOG:-/dev/null}"
+exec bash -c "$*"

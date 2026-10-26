@@ -123,8 +123,54 @@ lists every key with its default and what it is for. A typical setup:
 
 **Secrets never reach a command line.** SQL goes to the database container on
 stdin, and the database password is read *inside* that container from
-`DB_PASS_FILE`. The console password is read from `RA_PASS_FILE`, and an
-account's password from `--pass-file` or `--pass-stdin`.
+`DB_PASS_FILE`, or from the variable `DB_PASS_ENV` names. The console password
+is read from `RA_PASS_FILE`, and an account's password from `--pass-file` or
+`--pass-stdin`.
+
+### Profiles, and a server elsewhere
+
+One profile per server: `--profile NAME` before the command, or
+`$TELDRASSIL_PROFILE`. A profile is `~/.config/teldrassil/profiles/NAME.conf`,
+layered over `teldrassil.conf`: what it sets wins, the rest falls through, so
+the roster and other shared settings stay in one place. `set` writes to the
+active profile and creates it; every other command refuses a profile that does
+not exist, so a typo never acts on another server. `profiles` lists them.
+
+A profile can point at a server on another machine, and at one run in
+Kubernetes:
+
+- `SSH_HOST` runs podman, kubectl and the console's connection on that host,
+  over ssh (key-based, no prompts; a `~/.ssh/config` alias works). The console
+  is reached through `ssh -W`, so it can stay on the host's 127.0.0.1.
+- `SERVER_KIND=kube` runs the world server as the Deployment `SERVER_CONTAINER`
+  names, in `KUBE_NAMESPACE`. `stop` saves, scales it to 0 and waits until its
+  pod is gone - only then is the database written - and `start` scales it to 1
+  and waits for the log. Whatever deploys it must leave its replica count
+  alone (Argo CD: `ignoreDifferences` on `/spec/replicas`). The login server
+  is not teldrassil's to start there.
+- `BOT_SECRET` names the Secret holding `aiplayerbot.conf` and the card file.
+  `roster` and `llm` edit a copy and write the Secret back when it changed:
+  before the server starts, and when the command ends.
+
+kalimdor on meksha's cluster:
+
+```sh
+P="./teldrassil.sh --profile meksha"
+$P set SSH_HOST meksha
+$P set SERVER_KIND kube
+$P set KUBE_NAMESPACE kalimdor
+$P set SERVER_CONTAINER kalimdor-world
+$P set BOT_SECRET kalimdor-bots
+$P set DB_CONTAINER mariadb
+$P set DB_PASS_ENV MARIADB_ROOT_PASSWORD
+$P set WORLD_PORT 8086
+$P set CARDS_FILE_IN_SERVER /opt/kalimdor/etc/llm_character_card.txt
+$P console-account          # TELDRASSIL, level 3, password in ~/.config/teldrassil
+$P status
+```
+
+Provisioning (`install` and its steps) builds and runs a server on this host
+only, and is refused in such a profile.
 
 ## The roster
 
@@ -193,7 +239,9 @@ tests/run-all.sh
 ```
 
 No network, no database, no containers: the helper's roster logic is tested as
-plain functions, and `tests/stubs/podman` stands in for the runtime.
+plain functions, and `tests/stubs/` stands in for podman, ssh and kubectl. The
+ssh stub runs its command here after a second shell parse, as a real host
+would, so a quoting mistake fails a test rather than a server.
 
 ## License
 

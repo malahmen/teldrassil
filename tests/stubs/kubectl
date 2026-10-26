@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# A stand-in for kubectl, for one Deployment. $STUB_KUBE_PODS lists its pods
+# ("" = none), $STUB_SECRET_DIR holds the bot Secret's files, and an apply's
+# manifest is saved to $STUB_KUBE_APPLIED. Each call is logged to $STUB_LOG.
+echo "kubectl $*" >> "${STUB_LOG:-/dev/null}"
+args=(); while [[ $# -gt 0 ]]; do case "$1" in --namespace) shift 2 ;; *) args+=("$1"); shift ;; esac; done
+set -- "${args[@]}"
+case "$1 $2" in
+    "get deployment")
+        case "$*" in
+            *matchLabels*) printf 'app=world,' ;;
+            *spec.replicas*) printf '%s' "${STUB_KUBE_REPLICAS:-1}" ;;
+            *readyReplicas*) printf '%s' "${STUB_KUBE_REPLICAS:-1}" ;;
+        esac ;;
+    "get pods")
+        case "$*" in
+            *restartCount*) printf '0' ;;
+            *) for p in ${STUB_KUBE_PODS:-}; do echo "pod/$p"; done ;;
+        esac ;;
+    "get secret")
+        [[ -d "${STUB_SECRET_DIR:-/nonexistent}" ]] || exit 1
+        case "$*" in
+            *aiplayerbot*) base64 -w0 < "$STUB_SECRET_DIR/aiplayerbot.conf" ;;
+            *card*) [[ -f "$STUB_SECRET_DIR/llm_character_card.txt" ]] && base64 -w0 < "$STUB_SECRET_DIR/llm_character_card.txt" ;;
+        esac; exit 0 ;;
+    "apply --server-side") cat > "${STUB_KUBE_APPLIED:-/dev/null}" ;;
+    "scale deployment"|"wait --for=delete") exit 0 ;;
+    "logs deployment/"*) echo "${STUB_LOG_LINE:-}" ;;
+    *) exit 1 ;;
+esac
