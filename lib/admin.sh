@@ -25,7 +25,7 @@ cmd_rename_character() {
         || error_exit "The name ${to} is taken."
     # The world server holds an online character in memory and would write
     # the old name back.
-    if [[ "$online" == "1" ]] && _container_running "$SERVER_CONTAINER"; then
+    if [[ "$online" == "1" ]] && _server_running; then
         error_exit "${from} is online. Log it out first - or, for a bot, stop the server ('stop'), rename, then 'start'."
     fi
     printf '%s\n' "UPDATE ${DB_CHARACTERS}.characters SET name=$(_sql_str "$to") WHERE guid=${guid};" | _db_raw
@@ -66,7 +66,7 @@ cmd_apply_sql() {
         printf '%s\n' "REPLACE INTO ${DB_REALMD}.teldrassil_applied (sha256, file, db, applied_at) VALUES ('${hash}', $(_sql_str "$name"), $(_sql_str "$db"), NOW());" | _db_raw
     fi
     success "${name} applied to ${db}."
-    _container_running "$SERVER_CONTAINER" && warn "The world server is running: what it holds in memory (characters, guilds) may overwrite this, and world data takes a restart to load."
+    _server_running && warn "The world server is running: what it holds in memory (characters, guilds) may overwrite this, and world data takes a restart to load."
     return 0
 }
 
@@ -75,10 +75,7 @@ cmd_apply_sql() {
 # password read there; the dump comes out on stdout.
 # -----------------------------------------------------------------------------
 
-_db_dump() {
-    # shellcheck disable=SC2016
-    "$PODMAN" exec -i "$DB_CONTAINER" sh -c 'pw="$1"; u="$2"; shift 2; MYSQL_PWD="$(cat "$pw")" exec mariadb-dump -u"$u" --single-transaction --routines --events "$@"' _ "$DB_PASS_FILE" "$DB_USER" "$@"
-}
+_db_dump() { _db_in mariadb-dump --single-transaction --routines --events "$@"; }
 
 cmd_dump() {
     local all=0 db="" tables="" out="" gzip=1 stamp
@@ -132,7 +129,7 @@ cmd_restore() {
     [[ -r "$file" ]] || error_exit "Cannot read ${file}."
     (( yes )) || error_exit "restore REPLACES the data in the databases the dump names: add --yes."
     _require_db
-    _container_running "$SERVER_CONTAINER" && error_exit "Stop the world server first ('stop'): it would write its own state over the restored data."
+    _server_running && error_exit "Stop the world server first ('stop'): it would write its own state over the restored data."
     _cat_dump() { if [[ "$(head -c 2 -- "$file" | od -An -tx1 | tr -d ' ')" == "1f8b" ]]; then gzip -dc -- "$file"; else cat -- "$file"; fi; }
     # No CREATE DATABASE (a --tables dump) is an answer, not an error: grep
     # finding nothing must not end the script under pipefail.
@@ -150,22 +147,32 @@ cmd_restore() {
 }
 
 # -----------------------------------------------------------------------------
-# restart --graceful: mangosd warns players, saves and exits after SECS; the
-# container then stops (no restart policy here), and this starts it again.
+# restart --graceful: mangosd warns players, saves and exits after SECS. A
+# container then stops (no restart policy here) and this starts it again; a
+# Deployment's pod restarts the container itself, and this waits for it.
 # -----------------------------------------------------------------------------
 
 _restart_graceful() {
-    local secs="$1" deadline since
+    local secs="$1" deadline since restarts=0
     [[ "$secs" =~ ^[0-9]+$ ]] || error_exit "--graceful takes seconds (got '${secs}')."
-    _container_running "$SERVER_CONTAINER" || error_exit "The world server is not running."
+    _server_running || error_exit "The world server is not running."
+    _is_kube && restarts="$(_kube_restarts)"
     _ra --quiet "server restart ${secs}" >/dev/null
     info "Restart announced: players are warned, the world saves, and mangosd exits in ${secs}s."
     deadline=$((SECONDS + secs + STOP_TIMEOUT))
-    while _container_running "$SERVER_CONTAINER"; do
+    if _is_kube; then
+        until [[ "$(_kube_restarts)" -gt "$restarts" ]]; do
+            (( SECONDS < deadline )) || error_exit "The world server did not exit within $((secs + STOP_TIMEOUT))s."
+            sleep 3
+        done
+        _wait_world 0 "$((restarts + 1))"
+        return
+    fi
+    while _server_running; do
         (( SECONDS < deadline )) || error_exit "The world server did not exit within $((secs + STOP_TIMEOUT))s."
         sleep 3
     done
     since="$(date +%s)"
-    "$PODMAN" start "$SERVER_CONTAINER" >/dev/null
+    _server_start_raw
     _wait_world "$since"
 }

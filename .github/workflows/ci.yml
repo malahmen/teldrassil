@@ -35,7 +35,7 @@ jobs:
           shellcheck --version | sed -n 2p
 
       - name: shellcheck
-        run: shellcheck -x -S warning teldrassil.sh tests/run-all.sh tests/test-cli.sh tests/test-patching.sh tests/stubs/podman
+        run: shellcheck -x -S warning teldrassil.sh tests/run-all.sh tests/test-cli.sh tests/test-patching.sh tests/test-remote.sh tests/stubs/podman tests/stubs/ssh tests/stubs/kubectl
 
       - name: tests
         run: tests/run-all.sh

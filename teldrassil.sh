@@ -31,6 +31,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -d "${SCRIPT_DIR}/lib" ]] || { echo "[error] ${SCRIPT_DIR}/lib not found — teldrassil.sh runs from its checkout, next to lib/." >&2; exit 1; }
 source "${SCRIPT_DIR}/lib/common.sh"
 source "${SCRIPT_DIR}/lib/config.sh"
+source "${SCRIPT_DIR}/lib/target.sh"
 source "${SCRIPT_DIR}/lib/runtime.sh"
 source "${SCRIPT_DIR}/lib/accounts.sh"
 source "${SCRIPT_DIR}/lib/roster.sh"
@@ -44,7 +45,7 @@ usage() {
     cat >&2 <<'EOF'
 teldrassil — cmangos-classic + playerbots server engine (1.12.1)
 
-Usage: teldrassil.sh <command> [flags]
+Usage: teldrassil.sh [--profile NAME | --no-profile] <command> [flags]
 
 Provision (from nothing to a running server; files under WORK_DIR):
   install [--client PATH] --yes run every step below that is not done yet, then start
@@ -64,6 +65,9 @@ Provision (from nothing to a running server; files under WORK_DIR):
   remove --yes [--database]     delete the server's containers; --database also
                                 the database container and volume (everything)
 
+Provisioning builds and runs the server here, in podman; the commands below
+also manage one elsewhere (see Profiles).
+
 Server:
   start | stop                  stop saves the world first, then disconnects everyone
   restart [--graceful [SECS]]   stop and start here; --graceful asks mangosd to
@@ -76,6 +80,11 @@ Server:
                                 Refuses 'rndbot c' and 'rndbot do': a bot chat
                                 command from the console gets no answer and has
                                 crashed the server - send those in game.
+  console-account [--file F]    create teldrassil's console account (TELDRASSIL,
+                                level 3) with a new random password kept in F
+                                (default ~/.config/teldrassil/console-PROFILE.txt),
+                                and point RA_USER/RA_PASS_FILE at it. Replaces
+                                an existing TELDRASSIL account's password.
 
 Accounts:
   create-account --name N (--pass-file F | --pass-stdin) [--level 0-3]
@@ -139,19 +148,52 @@ Bots:
                                 bot act.
 
 Config:
-  set KEY VALUE | get KEY | config
+  set KEY VALUE | get KEY | config | profiles
+
+Profiles (one per server): --profile NAME before the command, or
+$TELDRASSIL_PROFILE. A profile is ~/.config/teldrassil/profiles/NAME.conf,
+layered over teldrassil.conf: what it sets wins, the rest falls through.
+'set' writes to the active profile and creates it; any other command refuses
+a profile that does not exist. --no-profile ignores $TELDRASSIL_PROFILE.
+
+  A server elsewhere: SSH_HOST runs podman, kubectl and the console's
+  connection there (an ssh destination, e.g. a ~/.ssh/config alias; key-based,
+  no prompts). SERVER_KIND=kube runs the world server as a Deployment: stop
+  and start scale it to 0 and 1 (its replica count must not be reverted by
+  whatever deploys it), and BOT_SECRET names the Secret that holds
+  aiplayerbot.conf and the card file, which roster and llm edit. Example, a
+  cluster's server reached over ssh:
+    --profile meksha set SSH_HOST meksha
+    --profile meksha set SERVER_KIND kube
+    --profile meksha set KUBE_NAMESPACE kalimdor
+    --profile meksha set SERVER_CONTAINER kalimdor-world
+    --profile meksha set BOT_SECRET kalimdor-bots
+    --profile meksha set DB_CONTAINER mariadb
+    --profile meksha set DB_PASS_ENV MARIADB_ROOT_PASSWORD
+    --profile meksha set WORLD_PORT 8086
+    --profile meksha set CARDS_FILE_IN_SERVER /opt/kalimdor/etc/llm_character_card.txt
+    --profile meksha console-account
 
   help | -h | --help
 EOF
 }
 
 main() {
+    [[ -n "$PROFILE" ]] && _profile_activate "$PROFILE"
+    while [[ $# -gt 0 ]]; do case "$1" in
+        --profile) _need_value "$@"; _profile_activate "$2"; shift 2 ;;
+        --no-profile) _profile_deactivate; shift ;;
+        -h|--help) usage; return 0 ;;
+        -*) error_exit "Unknown global flag: $1" ;;
+        *) break ;;
+    esac; done
     [[ $# -gt 0 ]] || { usage; exit 2; }
     local subcmd="$1"; shift
+    _profile_require "$subcmd"
     case "$subcmd" in
-        -h|--help|help) usage; return 0 ;;
-        set|get|config) ;;
-        *) _settings ;;
+        help) usage; return 0 ;;
+        set|get|config|profiles) ;;
+        *) _settings; _check_target "$subcmd" ;;
     esac
     case "$subcmd" in
         start)              cmd_start "$@" ;;
@@ -160,6 +202,7 @@ main() {
         status)             cmd_status "$@" ;;
         save)               cmd_save "$@" ;;
         console)            cmd_console "$@" ;;
+        console-account)    cmd_console_account "$@" ;;
         create-account)     cmd_create_account "$@" ;;
         set-account-level)  cmd_set_account_level "$@" ;;
         list-accounts)      cmd_list_accounts "$@" ;;
@@ -185,6 +228,7 @@ main() {
         set)                cmd_set "$@" ;;
         get)                cmd_get "$@" ;;
         config)             cmd_config "$@" ;;
+        profiles)           cmd_profiles "$@" ;;
         *) error_exit "Unknown command: $subcmd (run with --help for usage)" ;;
     esac
 }

@@ -38,7 +38,7 @@ cmd_attune() {
         return 0
     fi
 
-    _container_running "$SERVER_CONTAINER" && was_running=1
+    _server_running && was_running=1
     _stop
     _attune_plan
     if [[ -s "$d/attune.sql" ]]; then

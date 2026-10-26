@@ -25,7 +25,16 @@ tmp_dir() {
     fi
     printf '%s' "$TMP_DIR"
 }
-_cleanup() { [[ -n "$TMP_DIR" && -d "$TMP_DIR" ]] && rm -r -- "$TMP_DIR"; return 0; }
+# A bot config pulled from a cluster's Secret and changed is written back
+# first (lib/target.sh); a failure there is reported, and the files are kept.
+_cleanup() {
+    if declare -F _bots_push >/dev/null && ! ( _bots_push ); then
+        warn "The bot config was NOT written back; the changed files are in ${TMP_DIR}/bots."
+        return 0
+    fi
+    [[ -n "$TMP_DIR" && -d "$TMP_DIR" ]] && rm -r -- "$TMP_DIR"
+    return 0
+}
 trap _cleanup EXIT
 trap 'echo "" >&2; warn "Interrupted."; exit 130' INT TERM
 

@@ -1,6 +1,6 @@
 # shellcheck shell=bash
-# lib/config.sh — The key=value config store, its defaults, and the set, get
-# and config commands.
+# lib/config.sh — The key=value config store, its defaults, profiles, and the
+# set, get, config and profiles commands.
 #
 # Part of teldrassil.sh, which sources it; not meant to run on its own.
 
@@ -8,21 +8,35 @@ CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/teldrassil"
 CONFIG_FILE="${CONFIG_DIR}/teldrassil.conf"
 BACKUP_DIR="${CONFIG_DIR}/backups"
 DUMP_DIR="${CONFIG_DIR}/dumps"
+PROFILE_DIR="${CONFIG_DIR}/profiles"
+
+# Profiles, as nordrassil's: one per server. A profile is PROFILE_DIR/NAME.conf,
+# layered over teldrassil.conf - a key in the profile wins, anything absent
+# falls through - so shared settings (the roster, the console's timeouts) stay
+# in one place. --profile NAME or $TELDRASSIL_PROFILE picks one; 'set' writes
+# to it, and creates it.
+PROFILE="${TELDRASSIL_PROFILE:-}"
+PROFILE_FILE=""
 
 # Every setting, with its default and what it is for. The defaults describe a
 # server run by teldrassil itself; a prototype or another layout sets its own
 # names with 'set'.
 CONFIG_KEYS=(
     "PODMAN=podman|the container runtime (podman or docker)"
+    "SSH_HOST=|run the containers, kubectl and the console's connection on this ssh host (empty: here)"
+    "SERVER_KIND=podman|how the servers run: podman (containers) or kube (Deployments, through kubectl)"
+    "KUBE_NAMESPACE=|kube: the servers' namespace"
+    "BOT_SECRET=|kube: the Secret holding aiplayerbot.conf and the card file (teldrassil edits it)"
     "DB_CONTAINER=teldrassil-db|the MariaDB container"
     "DB_USER=root|the database user"
     "DB_PASS_FILE=/run/pw/root.pw|the database password file, INSIDE the database container"
+    "DB_PASS_ENV=|or: the variable holding the password, inside the database container (e.g. MARIADB_ROOT_PASSWORD)"
     "DB_WORLD=classicmangos|the world database"
     "DB_CHARACTERS=classiccharacters|the characters database"
     "DB_REALMD=classicrealmd|the realm (accounts) database"
     "DB_LOGS=classiclogs|the logs database"
-    "SERVER_CONTAINER=teldrassil-mangosd|the world server container"
-    "REALM_CONTAINER=teldrassil-realmd|the realm (login) server container"
+    "SERVER_CONTAINER=teldrassil-mangosd|the world server container (kube: its Deployment)"
+    "REALM_CONTAINER=teldrassil-realmd|the realm (login) server container (kube: not managed here)"
     "BOT_ACCOUNT_PREFIX=RNDBOT|playerbots' random-bot account names start with this"
     "RA_HOST=127.0.0.1|the remote console's address"
     "RA_PORT=3443|the remote console's port"
@@ -69,26 +83,65 @@ _cfg_default() {
     return 1
 }
 _cfg_known() { _cfg_default "$1" >/dev/null; }
-_cfg_read() { grep -E "^${1}=" "$CONFIG_FILE" 2>/dev/null | tail -1 | cut -d= -f2- | sed 's/^"\(.*\)"$/\1/' || true; }
+_cfg_has()  { grep -qE "^${2}=" "$1" 2>/dev/null; }
+_cfg_read() { grep -E "^${2}=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- | sed 's/^"\(.*\)"$/\1/' || true; }
+# _cfg_target — where 'set' writes: the active profile, or the base file.
+_cfg_target() { printf '%s' "${PROFILE_FILE:-$CONFIG_FILE}"; }
 
 cfg_get() {
-    if grep -qE "^${1}=" "$CONFIG_FILE" 2>/dev/null; then _cfg_read "$1"; else _cfg_default "$1" || true; fi
+    if [[ -n "$PROFILE_FILE" ]] && _cfg_has "$PROFILE_FILE" "$1"; then _cfg_read "$PROFILE_FILE" "$1"
+    elif _cfg_has "$CONFIG_FILE" "$1"; then _cfg_read "$CONFIG_FILE" "$1"
+    else _cfg_default "$1" || true; fi
+}
+
+# _profile_activate <name> — point the config at a profile. Only the name is
+# checked here: 'set' may create the file; _profile_require refuses the rest.
+_profile_activate() {
+    [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ && "$1" != *..* ]] \
+        || error_exit "profile: invalid name '${1}' (letters, digits, then . _ - )."
+    PROFILE="$1"; PROFILE_FILE="${PROFILE_DIR}/${1}.conf"
+}
+_profile_deactivate() { PROFILE=""; PROFILE_FILE=""; }
+
+# _profile_require <command> — a profile that does not exist is an error, so a
+# typo does not silently act on the base config's server.
+_profile_require() {
+    [[ -z "$PROFILE_FILE" || -f "$PROFILE_FILE" ]] && return 0
+    case "$1" in set|profiles|help|-h|--help) return 0 ;; esac
+    error_exit "No such profile: '${PROFILE}' (${PROFILE_FILE} does not exist). 'profiles' lists them; '--profile ${PROFILE} set KEY VALUE' creates it."
+}
+
+cmd_profiles() {
+    [[ $# -eq 0 ]] || error_exit "Usage: profiles"
+    local f n mark found=0
+    for f in "$PROFILE_DIR"/*.conf; do
+        [[ -e "$f" ]] || continue
+        found=1; n="$(basename "$f" .conf)"; mark=" "
+        [[ "$n" == "$PROFILE" ]] && mark="*"
+        printf '%s %s\n' "$mark" "$n"
+    done
+    (( found )) || info "No profiles yet: '--profile NAME set KEY VALUE' creates one."
+    [[ -n "$PROFILE" ]] && printf '\n* = active (%s)\n' "${TELDRASSIL_PROFILE:+from \$TELDRASSIL_PROFILE or }--profile"
+    return 0
 }
 
 cfg_set() {
-    local key="$1" val="$2" tmp
+    local key="$1" val="$2" tmp target; target="$(_cfg_target)"
     _cfg_known "$key" || error_exit "set: unknown key '${key}' (see 'config')."
     [[ "$val" != *$'\n'* ]] || error_exit "set: ${key}: the value must not contain a newline."
     case "$key" in
+        SERVER_KIND)
+            [[ "$val" == podman || "$val" == kube ]] || error_exit "set: SERVER_KIND is podman or kube (got '${val}')." ;;
         RA_PORT|WORLD_PORT|REALM_PORT|START_TIMEOUT|STOP_TIMEOUT|BOTS_TIMEOUT|DB_PORT|BUILD_JOBS|BOTS)
             [[ "$val" =~ ^[0-9]+$ ]] || error_exit "set: ${key} must be a number (got '${val}')." ;;
     esac
     _mkdir_private "$CONFIG_DIR"
-    tmp="$(mktemp "${CONFIG_DIR}/.conf.XXXXXX")"
-    grep -vE "^${key}=" "$CONFIG_FILE" 2>/dev/null > "$tmp" || true
+    _mkdir_private "$(dirname "$target")"
+    tmp="$(mktemp "$(dirname "$target")/.conf.XXXXXX")"
+    grep -vE "^${key}=" "$target" 2>/dev/null > "$tmp" || true
     printf '%s="%s"\n' "$key" "$val" >> "$tmp"
     chmod 600 "$tmp"
-    mv -f "$tmp" "$CONFIG_FILE"
+    mv -f "$tmp" "$target"
 }
 
 # _settings — read every setting into a shell variable of the same name.
@@ -111,7 +164,7 @@ _settings() {
 cmd_set() {
     [[ $# -eq 2 ]] || error_exit "Usage: set KEY VALUE"
     cfg_set "$1" "$2"
-    success "${1} set."
+    success "${1} set${PROFILE:+ in profile ${PROFILE}}."
 }
 
 cmd_get() {
@@ -122,11 +175,15 @@ cmd_get() {
 
 cmd_config() {
     local entry key val mark
-    printf 'Config file: %s\n\n' "$CONFIG_FILE"
+    printf 'Config file: %s\n' "$CONFIG_FILE"
+    [[ -n "$PROFILE" ]] && printf 'Profile:     %s (%s)\n' "$PROFILE" "$PROFILE_FILE"
+    echo
     for entry in "${CONFIG_KEYS[@]}"; do
         key="${entry%%=*}"; val="$(cfg_get "$key")"
-        mark=" "; grep -qE "^${key}=" "$CONFIG_FILE" 2>/dev/null && mark="*"
+        mark=" "
+        if [[ -n "$PROFILE_FILE" ]] && _cfg_has "$PROFILE_FILE" "$key"; then mark="P"
+        elif _cfg_has "$CONFIG_FILE" "$key"; then mark="*"; fi
         printf '%s %-22s %-40s %s\n' "$mark" "$key" "${val:-(empty)}" "${entry#*|}"
     done
-    printf '\n* = set in the config file; the rest are defaults.\n'
+    printf '\n* = set in the config file%s; the rest are defaults.\n' "${PROFILE:+, P = set in the profile}"
 }

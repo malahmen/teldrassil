@@ -20,6 +20,7 @@ import json
 import re
 import secrets
 import socket
+import subprocess
 import sys
 import time
 
@@ -160,8 +161,21 @@ def srp6_verifier(user, password, salt=None):
 # Remote console
 # ----------------------------------------------------------------------------
 
-def ra_send(host, port, user, password, commands, wait=1.5):
-    s = socket.create_connection((host, port), timeout=10)
+def _ra_connect(host, port, ssh=None):
+    """A socket to the console: directly, or through ssh to a host where it
+    listens only on loopback (ssh -W carries the bytes, nothing is opened on
+    either side). The ssh process ends when the socket closes."""
+    if not ssh:
+        return socket.create_connection((host, port), timeout=10)
+    mine, theirs = socket.socketpair()
+    subprocess.Popen(["ssh", "-o", "BatchMode=yes", "-W", f"{host}:{port}", "--", ssh],
+                     stdin=theirs, stdout=theirs, close_fds=True)
+    theirs.close()
+    return mine
+
+
+def ra_send(host, port, user, password, commands, wait=1.5, ssh=None):
+    s = _ra_connect(host, port, ssh)
 
     def read(pause=0.8):
         time.sleep(pause)
@@ -177,7 +191,7 @@ def ra_send(host, port, user, password, commands, wait=1.5):
             pass
         return out.decode("utf-8", "replace")
 
-    read()
+    read(2.0 if ssh else 0.8)     # ssh first has to connect and log in
     s.sendall(user.encode() + b"\r\n")
     read()
     s.sendall(password.encode() + b"\r\n")
@@ -781,7 +795,7 @@ def cmd_ra(a):
     user = a.user or read_user(a.pass_file)
     if not user:
         raise SystemExit("no console user: set RA_USER, or put an 'account:' line in the password file")
-    for cmd, out in ra_send(a.host, a.port, user, password, a.command, a.wait):
+    for cmd, out in ra_send(a.host, a.port, user, password, a.command, a.wait, a.ssh):
         if a.quiet:
             print(out)
         else:
@@ -1099,6 +1113,7 @@ def main(argv=None):
     s.add_argument("--pass-file", required=True)
     s.add_argument("--wait", type=float, default=1.5)
     s.add_argument("--quiet", action="store_true")
+    s.add_argument("--ssh", default="", help="reach the console through this ssh host")
     s.add_argument("command", nargs="+")
     s.set_defaults(fn=cmd_ra)
 

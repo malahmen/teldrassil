@@ -18,6 +18,7 @@ _roster_file() {
 }
 
 _require_bot_conf() {
+    _bots_pull
     [[ -n "$BOT_CONF" ]] || error_exit "Where is aiplayerbot.conf? Set ETC_DIR (or BOT_CONF)."
     [[ -r "$BOT_CONF" ]] || error_exit "Cannot read ${BOT_CONF}."
 }
@@ -139,7 +140,7 @@ _roster_cmd_apply() {
     _require_db; _require_bot_conf
     [[ -n "$CARDS_FILE" ]] || error_exit "Where does the card file go? Set ETC_DIR (or CARDS_FILE)."
     helper check "$roster" >/dev/null
-    _container_running "$SERVER_CONTAINER" && was_running=1
+    _server_running && was_running=1
 
     if (( ! R_YES )); then
         header "Plan (nothing is changed without --yes)"
