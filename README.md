@@ -189,6 +189,17 @@ See `examples/roster.example.json`. The rules it enforces:
   `apply` takes over a free random bot of the same race and class - one in no
   guild, or else one in playerbots' own random guilds, never a guild's leader
   - and renames it. It never touches a player's character.
+- **A roster guild never takes over a players' guild.** The first `apply`
+  creates it, or takes over an existing guild of its name only when that
+  guild's leader and every member are bots (`BOT_ACCOUNT_PREFIX` accounts) of
+  the roster guild's faction; anything else - a player leading it or in it,
+  the other faction, a leader that is no character - is a plan error naming
+  the guild and why, and nothing is applied (the server is not stopped).
+  Once applied, the roster guild is bound to that guild's id and creation
+  date in `~/.config/teldrassil/roster-guilds.json` (`roster-guilds-PROFILE.json`
+  in a profile), so a rename cannot point it at another guild; players may
+  join it since, but its leader must stay a bot of its faction. A binding
+  whose guild is gone or was replaced is dropped.
 - **Gender:** changing it resets the appearance to the race's first options,
   the only ones certain to exist for both genders.
 - **Professions** are stored for playerbots and applied with `rndbot upgrade`

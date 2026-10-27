@@ -5,8 +5,8 @@
 #   $STUB_STOPPED  containers that exist but are stopped (until 'start'): an
 #                  'exec' into one fails, as on a host after a reboot
 #   $STUB_VOLUMES  volumes that exist
-#   $STUB_STATE    a directory: 'start', 'run -d' and 'volume create' are
-#                  remembered there, so a later call sees them
+#   $STUB_STATE    a directory: 'start', 'stop', 'run -d' and 'volume create'
+#                  are remembered there, so a later call sees them
 #   $STUB_DB_SLOW  the first N 'exec' calls fail: a database still starting
 #   $STUB_SCHEMAS  the databases a query on information_schema.SCHEMATA sees
 #   $STUB_DUMP_FAIL  mariadb-dump fails: 1 at once, 'partial' after some
@@ -71,7 +71,7 @@ case "$1" in
         name=""; prev=""; for a in "$@"; do [[ "$prev" == --name ]] && name="$a"; prev="$a"; done
         mark exists "$name"; mark running "$name" ;;
     start) mark running "${*: -1}" ;;
-    stop) exit 0 ;;
+    stop) [[ -z "$S" ]] || rm -f -- "$S/running/${*: -1}" ;;
     logs) echo "${STUB_LOG_LINE:-}" ;;
     *) exit 1 ;;
 esac

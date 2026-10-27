@@ -129,6 +129,9 @@ Roster (one JSON file: shaped bots, guilds, ranks, tabards, cards, LLM, populati
                                 --fresh-population first replaces EVERY random
                                 bot (and every guild a bot leads) with a new
                                 population at the roster's counts.
+                                A roster guild takes over an existing guild only
+                                if all of it is bots of its faction; once applied
+                                it is bound to that guild's id
 
 Bots:
   attune plan|apply [--file ROSTER] [--yes]

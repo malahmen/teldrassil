@@ -1,9 +1,12 @@
 """Unit tests for lib/teldrassil.py: the roster, the plan, SRP6, the conf
 editor. No server, no database: the plan runs over hand-built state."""
+import contextlib
 import copy
+import io
 import json
 import os
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
@@ -270,6 +273,158 @@ class Plan(unittest.TestCase):
         rost["bots"][0]["note"] = "O'Brien \\ test"
         _, sql, _ = t.plan(t.load_roster(rost), empty_state(), now=1)
         self.assertIn("'O\\'Brien \\\\ test'", "\n".join(sql))
+
+
+def guild(gid, name, leader, created=100):
+    return {"id": gid, "name": name, "leader": leader, "created": created, "EmblemStyle": 0, "EmblemColor": 0,
+            "BorderStyle": 0, "BorderColor": 0, "BackgroundColor": 0, "info": "", "motd": ""}
+
+
+def member(gid, guid, rank):
+    return {"guild": gid, "guid": guid, "rank": rank, "pnote": "", "offnote": ""}
+
+
+class GuildBinding(unittest.TestCase):
+    """Kamino 164: a roster guild never takes over a guild with a player in
+    it, or of the other faction; once applied it is bound by id."""
+
+    def refused(self, st, *words, bindings=None):
+        with self.assertRaises(t.RosterError) as e:
+            t.plan(t.load_roster(roster()), st, now=1, **({"bindings": bindings} if bindings else {}))
+        for w in words:
+            self.assertIn(w, str(e.exception))
+        return str(e.exception)
+
+    def test_a_players_guild_of_the_same_name_is_refused(self):
+        # The reviewer's case: Playerone leads a guild with the roster's name.
+        st = empty_state()
+        st["guilds"] = [guild(5, "Test Guild", 20)]
+        st["members"] = [member(5, 20, 0)]
+        self.refused(st, "Test Guild", "Playerone", "player")
+
+    def test_a_guild_of_the_other_faction_is_refused(self):
+        st = empty_state()
+        st["characters"].append(char(13, "Allybot", 1, 1))   # a human bot
+        st["guilds"] = [guild(5, "Test Guild", 13)]
+        st["members"] = [member(5, 13, 0)]
+        self.refused(st, "Test Guild", "alliance")
+
+    def test_a_bot_guild_with_a_player_member_is_refused(self):
+        st = empty_state()
+        st["characters"].append(char(13, "Hordebot", 2, 1))
+        st["guilds"] = [guild(5, "Test Guild", 13)]
+        st["members"] = [member(5, 13, 0), member(5, 20, 4)]
+        self.refused(st, "Test Guild", "Playerone")
+
+    def test_an_unknown_leader_is_refused(self):
+        st = empty_state()
+        st["guilds"] = [guild(5, "Test Guild", 99)]
+        self.refused(st, "Test Guild", "99")
+
+    def test_an_all_bot_guild_of_the_faction_is_taken_and_bound(self):
+        st = empty_state()
+        st["characters"].append(char(13, "Hordebot", 2, 1))
+        st["guilds"] = [guild(5, "Test Guild", 13, created=55)]
+        st["members"] = [member(5, 13, 0)]
+        bound = {}
+        _, sql, _ = t.plan(t.load_roster(roster()), st, now=1, bound=bound)
+        joined = "\n".join(sql)
+        self.assertIn("UPDATE guild SET leaderguid=10", joined)
+        self.assertIn("WHERE guildid=5;", joined)
+        self.assertEqual(bound, {"test guild": {"id": 5, "created": 55}})
+
+    def test_a_new_guild_is_bound(self):
+        bound = {}
+        t.plan(t.load_roster(roster()), empty_state(), now=7, bound=bound)
+        self.assertEqual(bound, {"test guild": {"id": 1, "created": 7}})
+
+    def test_bound_by_id_a_rename_cannot_redirect_it(self):
+        # Applied as id 1; renamed since. A players' guild now carries the
+        # roster's name: it is not touched, and id 1 stays the roster's.
+        rost = roster()
+        st = apply_plan_to_state(rost, empty_state())
+        st["guilds"][0].update(name="Renamed", created=100)
+        st["guilds"].append(guild(9, "Test Guild", 20))
+        st["members"].append(member(9, 20, 0))
+        bound = {}
+        lines, sql, _ = t.plan(t.load_roster(rost), st, now=1, bindings={"test guild": {"id": 1, "created": 100}},
+                               bound=bound)
+        self.assertFalse([q for q in sql if "guildid=9" in q or "(9," in q], sql)
+        self.assertIn("Test Guild: bound to guild id 1, named 'Renamed' in the game", "\n".join(lines))
+        self.assertEqual(bound["test guild"]["id"], 1)
+
+    def test_bound_by_id_players_may_have_joined(self):
+        rost = roster()
+        st = apply_plan_to_state(rost, empty_state())
+        st["guilds"][0]["created"] = 100
+        st["members"].append(member(1, 20, 4))
+        _, sql, _ = t.plan(t.load_roster(rost), st, now=1, bindings={"test guild": {"id": 1, "created": 100}})
+        self.assertEqual(sql, [])
+
+    def test_bound_by_id_a_player_leader_is_refused(self):
+        rost = roster()
+        st = apply_plan_to_state(rost, empty_state())
+        st["guilds"][0].update(leader=20, created=100)
+        st["members"].append(member(1, 20, 0))
+        self.refused(st, "Test Guild", "Playerone", bindings={"test guild": {"id": 1, "created": 100}})
+
+    def test_a_stale_binding_is_dropped(self):
+        # Guild id 1 is another guild now (the database was recreated): a
+        # players' guild. It is not touched; the roster's guild is created.
+        st = empty_state()
+        st["guilds"] = [guild(1, "Players Only", 20, created=999)]
+        st["members"] = [member(1, 20, 0)]
+        bound = {}
+        lines, sql, _ = t.plan(t.load_roster(roster()), st, now=1, bindings={"test guild": {"id": 1, "created": 100}},
+                               bound=bound)
+        self.assertFalse([q for q in sql if "guildid=1" in q or q.startswith("INSERT INTO guild_rank (guildid,rid,rname,rights) VALUES (1,")])
+        self.assertIn("create guild Test Guild (id 2)", "\n".join(lines))
+        self.assertEqual(bound["test guild"], {"id": 2, "created": 1})
+
+    def test_a_guild_bound_to_one_roster_guild_is_not_another_s(self):
+        # Test Guild (id 1) was renamed to the name of a second roster guild:
+        # that one may not take it over by name.
+        rost = roster()
+        rost["guilds"].append({"name": "Second Guild", "faction": "horde", "leader": "Grunt",
+                               "ranks": ["A", "B", "C", "D", "E"]})
+        rost["bots"][1].update(guild="Second Guild")
+        del rost["bots"][1]["rank"]
+        st = empty_state()
+        st["characters"][0]["name"] = "Leadra"
+        st["guilds"] = [guild(1, "Second Guild", 10)]
+        st["members"] = [member(1, 10, 0)]
+        with self.assertRaises(t.RosterError) as e:
+            t.plan(t.load_roster(rost), st, now=1, bindings={"test guild": {"id": 1, "created": 100}})
+        self.assertIn("guild Second Guild: a guild of that name (id 1) is another roster guild's", str(e.exception))
+
+    def test_bindings_through_the_command_line(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = lambda n: os.path.join(d, n)   # noqa: E731
+            st = empty_state()
+            st["guilds"] = [guild(5, "Test Guild", 20)]
+            st["members"] = [member(5, 20, 0)]
+            for name, data in (("roster.json", roster()), ("state.json", st)):
+                with open(p(name), "w") as f:
+                    json.dump(data, f)
+            open(p("conf"), "w").close()
+            argv = ["plan", p("roster.json"), "--state", p("state.json"), "--conf", p("conf"), "--cards", p("none"),
+                    "--cards-in-server", "/x", "--out-sql", p("plan.sql"), "--bindings", p("b.json"),
+                    "--out-bindings", p("out.json")]
+            with self.assertRaises(SystemExit) as e, contextlib.redirect_stdout(io.StringIO()):
+                t.main(argv)
+            self.assertIn("Playerone", str(e.exception))
+            self.assertFalse(os.path.exists(p("out.json")))
+            st["guilds"], st["members"] = [], []
+            with open(p("state.json"), "w") as f:
+                json.dump(st, f)
+            with open(p("b.json"), "w") as f:
+                json.dump({"other guild": {"id": 3, "created": 4}}, f)
+            with contextlib.redirect_stdout(io.StringIO()):
+                t.main(argv)
+            with open(p("out.json")) as f:
+                out = json.load(f)
+            self.assertEqual(out["other guild"], {"id": 3, "created": 4})   # kept
+            self.assertEqual(out["test guild"]["id"], 1)
 
 
 class ConfAndCards(unittest.TestCase):
