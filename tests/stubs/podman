@@ -1,22 +1,77 @@
 #!/usr/bin/env bash
-# A stand-in for podman: no test may reach a real container. Containers named
-# in $STUB_RUNNING are "running"; every other one is missing. Each call is
-# logged to $STUB_LOG, and 'exec' answers SQL with $STUB_SQL_REPLY.
+# A stand-in for podman: no test may reach a real container. Each call is
+# logged to $STUB_LOG.
+#   $STUB_RUNNING  containers that are running
+#   $STUB_STOPPED  containers that exist but are stopped (until 'start'): an
+#                  'exec' into one fails, as on a host after a reboot
+#   $STUB_VOLUMES  volumes that exist
+#   $STUB_STATE    a directory: 'start', 'run -d' and 'volume create' are
+#                  remembered there, so a later call sees them
+#   $STUB_DB_SLOW  the first N 'exec' calls fail: a database still starting
+#   $STUB_SCHEMAS  the databases a query on information_schema.SCHEMATA sees
+#   $STUB_DUMP_FAIL  mariadb-dump fails: 1 at once, 'partial' after some
+#                  output, 'empty' succeeds with no output
+# Every other container or volume is missing. 'exec' answers any other SQL
+# with $STUB_SQL_REPLY; its input is appended to $STUB_SQL_IN.
 echo "podman $*" >> "${STUB_LOG:-/dev/null}"
+S="${STUB_STATE:-}"
+listed() { [[ " $1 " == *" $2 "* ]]; }
+mark() { [[ -n "$S" ]] && mkdir -p "$S/$1" && : > "$S/$1/$2"; return 0; }
+marked() { [[ -n "$S" && -e "$S/$1/$2" ]]; }
+running() { listed "${STUB_RUNNING:-}" "$1" || marked running "$1"; }
+exists() { running "$1" || listed "${STUB_STOPPED:-}" "$1" || marked exists "$1"; }
 case "$1" in
     container)
         [[ "$2" == "inspect" ]] || exit 1
         name="${*: -1}"
-        [[ " ${STUB_RUNNING:-} " == *" ${name} "* ]] || exit 125
+        exists "$name" || exit 125
         case "$*" in
-            *'{{.State.Running}}'*) echo true ;;
-            *'{{.State.Status}}'*) echo running ;;
+            *'{{.State.Running}}'*) if running "$name"; then echo true; else echo false; fi ;;
+            *'{{.State.Status}}'*) if running "$name"; then echo running; else echo exited; fi ;;
         esac ;;
     exec)
-        if [[ "$*" == *mariadb-dump* ]]; then printf -- '-- stub dump\nCREATE TABLE t (a INT);\n'
-        else cat >> "${STUB_SQL_IN:-/dev/null}"; printf '%s\n' "${STUB_SQL_REPLY:-0}"; fi ;;
+        shift; while [[ "$1" == -* ]]; do shift; done; name="$1"
+        if listed "${STUB_STOPPED:-}" "$name" && ! running "$name"; then
+            echo "Error: can only create exec sessions on running containers: container state improper" >&2; exit 255
+        fi
+        if [[ -n "${STUB_DB_SLOW:-}" && -n "$S" ]]; then
+            n=$(( $(cat "$S/slow" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$S/slow"
+            if (( n <= STUB_DB_SLOW )); then echo "ERROR 2002 (HY000): Can't connect to local server through socket" >&2; exit 1; fi
+        fi
+        if [[ "$*" == *mariadb-dump* ]]; then
+            case "${STUB_DUMP_FAIL:-}" in
+                "") printf -- '-- stub dump\nCREATE TABLE t (a INT);\n' ;;
+                empty) ;;
+                partial) printf -- '-- stub dump\n'; echo "mariadb-dump: Error 2013: Lost connection" >&2; exit 2 ;;
+                *) echo "mariadb-dump: Got error: 1045" >&2; exit 2 ;;
+            esac
+        else
+            sql="$(cat)"; printf '%s\n' "$sql" >> "${STUB_SQL_IN:-/dev/null}"
+            if [[ "$sql" == *SCHEMATA* && -n "${STUB_SCHEMAS+set}" ]]; then
+                if [[ "$sql" =~ COUNT.*SCHEMA_NAME=\'([^\']*)\' ]]; then
+                    if listed "$STUB_SCHEMAS" "${BASH_REMATCH[1]}"; then echo 1; else echo 0; fi
+                else
+                    for d in information_schema mysql performance_schema sys $STUB_SCHEMAS; do echo "$d"; done
+                fi
+            else
+                printf '%s\n' "${STUB_SQL_REPLY:-0}"
+            fi
+        fi ;;
     image) [[ "${2:-}" == exists && -n "${STUB_IMAGE:-}" ]] ;;   # an image "exists" only when asked to
-    start|stop) exit 0 ;;
+    volume)
+        case "${2:-}" in
+            exists) listed "${STUB_VOLUMES:-}" "$3" || marked volume "$3" ;;
+            create) mark volume "$3" ;;
+            *) exit 1 ;;
+        esac ;;
+    run)
+        # 'run -d --name X' creates and starts a container; a throwaway
+        # 'run --rm' (a build, the database installer) fails: nothing runs here.
+        [[ " $* " == *" -d "* ]] || exit 1
+        name=""; prev=""; for a in "$@"; do [[ "$prev" == --name ]] && name="$a"; prev="$a"; done
+        mark exists "$name"; mark running "$name" ;;
+    start) mark running "${*: -1}" ;;
+    stop) exit 0 ;;
     logs) echo "${STUB_LOG_LINE:-}" ;;
     *) exit 1 ;;
 esac

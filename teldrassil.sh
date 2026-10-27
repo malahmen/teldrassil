@@ -48,7 +48,10 @@ teldrassil — cmangos-classic + playerbots server engine (1.12.1)
 Usage: teldrassil.sh [--profile NAME | --no-profile] <command> [flags]
 
 Provision (from nothing to a running server; files under WORK_DIR):
-  install [--client PATH] --yes run every step below that is not done yet, then start
+  install [--client PATH] --yes run every step below that is not done yet, then start.
+                                A database that exists (its container or volume)
+                                is kept, never initialised: install starts it,
+                                and stops if one of the four databases is missing
   source [--update]             check out cmangos-classic, playerbots and classic-db
                                 at the pinned commits (MANGOS_REF, ...)
   build-image                   the build, tools and server image
@@ -56,7 +59,8 @@ Provision (from nothing to a running server; files under WORK_DIR):
   extract [--client PATH] [--force]
                                 maps, vmaps, mmaps and dbc from the 1.12.1 client
   db-init --yes                 the database container and the four databases
-                                (REPLACES existing ones), the realm's name and
+                                (REPLACES existing ones, after dumping them to
+                                the dumps folder), the realm's name and
                                 address, the console account; removes cmangos'
                                 default accounts
   configure [--force]           the server's config files from their templates;
