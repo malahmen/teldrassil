@@ -108,7 +108,7 @@ _profile_deactivate() { PROFILE=""; PROFILE_FILE=""; }
 # typo does not silently act on the base config's server.
 _profile_require() {
     [[ -z "$PROFILE_FILE" || -f "$PROFILE_FILE" ]] && return 0
-    case "$1" in set|profiles|help|-h|--help) return 0 ;; esac
+    case "$1" in set|profiles|profile-rename|profile-delete|help|-h|--help) return 0 ;; esac
     error_exit "No such profile: '${PROFILE}' (${PROFILE_FILE} does not exist). 'profiles' lists them; '--profile ${PROFILE} set KEY VALUE' creates it."
 }
 
@@ -160,6 +160,69 @@ _settings() {
     # Paths may be written with ~.
     RA_PASS_FILE="${RA_PASS_FILE/#\~/$HOME}"; ETC_DIR="${ETC_DIR/#\~/$HOME}"
     BOT_CONF="${BOT_CONF/#\~/$HOME}"; CARDS_FILE="${CARDS_FILE/#\~/$HOME}"; ROSTER_FILE="${ROSTER_FILE/#\~/$HOME}"; DBC_DIR="${DBC_DIR/#\~/$HOME}"
+}
+
+# cfg_unset <key> — drop a key from where 'set' writes, so the profile falls
+# through to the base config (or the base to the default).
+cfg_unset() {
+    local key="$1" tmp target; target="$(_cfg_target)"
+    _cfg_known "$key" || error_exit "unset: unknown key '${key}' (see 'config')."
+    _cfg_has "$target" "$key" || { info "${key} is not set${PROFILE:+ in profile ${PROFILE}}; nothing to do."; return 0; }
+    tmp="$(mktemp "$(dirname "$target")/.conf.XXXXXX")"
+    grep -vE "^${key}=" "$target" > "$tmp" || true
+    chmod 600 "$tmp"
+    mv -f "$tmp" "$target"
+    success "${key} unset${PROFILE:+ in profile ${PROFILE}}; it is now '$(cfg_get "$key")'."
+}
+
+cmd_unset() {
+    [[ $# -eq 1 ]] || error_exit "Usage: unset KEY"
+    cfg_unset "$1"
+}
+
+# _profile_file <name> — the file of an EXISTING profile.
+_profile_file() {
+    [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ && "$1" != *..* ]] || error_exit "Invalid profile name '${1}'."
+    [[ -f "${PROFILE_DIR}/${1}.conf" ]] || error_exit "No such profile: '${1}' ('profiles' lists them)."
+    printf '%s' "${PROFILE_DIR}/${1}.conf"
+}
+
+# profile-rename OLD NEW — the file, and the console password file that
+# console-account made for it (console-OLD.txt), with the setting pointing at it.
+cmd_profile_rename() {
+    [[ $# -eq 2 ]] || error_exit "Usage: profile-rename OLD NEW"
+    local old new
+    old="$(_profile_file "$1")"
+    [[ "$2" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ && "$2" != *..* ]] || error_exit "Invalid profile name '${2}'."
+    new="${PROFILE_DIR}/${2}.conf"
+    [[ ! -e "$new" ]] || error_exit "Profile '${2}' already exists."
+    mv -- "$old" "$new"
+    local c_old="${CONFIG_DIR}/console-${1}.txt" c_new="${CONFIG_DIR}/console-${2}.txt"
+    if [[ -f "$c_old" && ! -e "$c_new" ]] && [[ "$(_cfg_read "$new" RA_PASS_FILE)" == "$c_old" ]]; then
+        mv -- "$c_old" "$c_new"
+        PROFILE="$2"; PROFILE_FILE="$new"; cfg_set RA_PASS_FILE "$c_new"
+    fi
+    success "Profile '${1}' is now '${2}'."
+}
+
+# profile-delete NAME --yes — the profile's settings only. The server and its
+# accounts are untouched; a console password file console-account made for
+# it is kept, and named, since it is the only copy of that password.
+cmd_profile_delete() {
+    local name="" yes=0 f c
+    while [[ $# -gt 0 ]]; do case "$1" in
+        --yes) yes=1; shift ;;
+        -*) error_exit "profile-delete: unknown flag $1" ;;
+        *) [[ -z "$name" ]] || error_exit "Usage: profile-delete NAME --yes"; name="$1"; shift ;;
+    esac; done
+    [[ -n "$name" ]] || error_exit "Usage: profile-delete NAME --yes"
+    f="$(_profile_file "$name")"
+    (( yes )) || error_exit "profile-delete removes the profile's settings for good: add --yes."
+    c="$(_cfg_read "$f" RA_PASS_FILE)"
+    rm -f -- "$f"
+    success "Profile '${name}' deleted (the server it pointed at is untouched)."
+    [[ -n "$c" && -f "$c" ]] && info "Its console password file is kept: ${c}"
+    return 0
 }
 
 cmd_set() {
