@@ -448,7 +448,7 @@ STATE_SQL = """SELECT JSON_OBJECT(
    FROM {chars}.ai_playerbot_random_bots WHERE owner = 0 AND event IN ('firstSkill', 'secondSkill')),
  'store', (SELECT JSON_ARRAYAGG(JSON_OBJECT('guid', guid, 'key', `key`, 'value', value))
    FROM {chars}.ai_playerbot_db_store WHERE preset = ''),
- 'guilds', (SELECT JSON_ARRAYAGG(JSON_OBJECT('id', guildid, 'name', name, 'leader', leaderguid,
+ 'guilds', (SELECT JSON_ARRAYAGG(JSON_OBJECT('id', guildid, 'name', name, 'leader', leaderguid, 'created', createdate,
      'EmblemStyle', EmblemStyle, 'EmblemColor', EmblemColor, 'BorderStyle', BorderStyle,
      'BorderColor', BorderColor, 'BackgroundColor', BackgroundColor, 'info', info, 'motd', motd))
    FROM {chars}.guild),
@@ -476,17 +476,99 @@ def normalise_state(raw):
     return st
 
 
-def plan(roster, state, now=None):
+def bind_guilds(roster, state, bindings, lines, errors):
+    """The existing guild each roster guild is (by lower-case name), or None
+    for one to create.
+
+    A roster guild applied before is bound by the id (and creation date)
+    recorded then, so a rename cannot point it at another guild; its leader
+    must still be a bot of its faction (players may have joined it). One not
+    bound yet may take over an existing guild of its name only when that
+    guild's leader and every member are bots, of the roster guild's faction:
+    never a guild a player is in, and never one of the other faction. A
+    binding whose guild is gone, or was replaced (another creation date), is
+    dropped. Every refusal goes into errors, naming the guild and why."""
+    by_guid = {c["guid"]: c for c in state["characters"]}
+    by_id = {g["id"]: g for g in state["guilds"]}
+    members = {}
+    for m in state["members"]:
+        members.setdefault(m["guild"], []).append(m["guid"])
+    found, via_id = {}, set()
+    # First every recorded binding, so a name can never pull a guild away
+    # from the roster guild it is bound to.
+    for gd in roster["guilds"]:
+        key = gd["name"].lower()
+        b = (bindings or {}).get(key)
+        if not b:
+            continue
+        cur = by_id.get(b.get("id"))
+        if cur is None or (b.get("created") is not None and cur.get("created") != b["created"]):
+            lines.append(f"{gd['name']}: guild id {b.get('id')} is gone or was replaced; that binding is dropped")
+            continue
+        found[key] = cur
+        via_id.add(key)
+    taken = {g["id"] for g in found.values()}
+    for gd in roster["guilds"]:
+        key = gd["name"].lower()
+        if key in found:
+            continue
+        same = [g for g in state["guilds"] if g["name"].lower() == key]
+        free = [g for g in same if g["id"] not in taken]
+        if same and not free:
+            errors.append(f"guild {gd['name']}: a guild of that name (id {same[0]['id']}) is another roster guild's")
+        elif free:
+            found[key] = free[0]
+            taken.add(free[0]["id"])
+
+    resolved = {}
+    for gd in roster["guilds"]:
+        key = gd["name"].lower()
+        cur = found.get(key)
+        resolved[key] = None
+        if cur is None:
+            continue
+        problems = []
+        leader = by_guid.get(cur["leader"])
+        if leader is None:
+            problems.append(f"its leader (guid {cur['leader']}) is no character on this server")
+        elif not leader["bot"]:
+            problems.append(f"it is led by {leader['name']}, a player's character")
+        # A guild the roster made or took over may have players in it since;
+        # one it has not may not.
+        if key not in via_id:
+            players = sorted(by_guid[g]["name"] if g in by_guid else f"guid {g}"
+                             for g in members.get(cur["id"], [])
+                             if g != cur["leader"] and (g not in by_guid or not by_guid[g]["bot"]))
+            if players:
+                problems.append(f"players are in it ({', '.join(players)})")
+        people = ([leader] if leader else []) + [by_guid[g] for g in members.get(cur["id"], []) if g in by_guid]
+        wrong = {faction_of(c["race"]) for c in people} - {gd["faction"]}
+        if wrong:
+            problems.append(f"it is {' and '.join(sorted(wrong))}; the roster's guild is {gd['faction']}")
+        if problems:
+            errors.append(f"guild {gd['name']}: the server's guild '{cur['name']}' (id {cur['id']}"
+                          + (", bound to it by an earlier apply" if key in via_id else "")
+                          + ") is not the roster's to take over - " + "; ".join(problems)
+                          + ". Nothing is applied; rename the roster's guild")
+            continue
+        if key in via_id and cur["name"] != gd["name"]:
+            lines.append(f"{gd['name']}: bound to guild id {cur['id']}, named '{cur['name']}' in the game")
+        resolved[key] = cur
+    return resolved
+
+
+def plan(roster, state, now=None, bindings=None, bound=None):
     """What applying the roster would change.
 
     Returns (lines, sql, upgrade): human-readable lines, the SQL statements
     (empty when nothing changes), and the bots whose professions changed and
-    need 'rndbot upgrade' after the server starts."""
+    need 'rndbot upgrade' after the server starts. bindings maps a roster
+    guild's name (lower case) to the guild id and creation date it was bound
+    to by an earlier apply; the bindings after this plan go into bound."""
     now = int(now if now is not None else time.time())
     lines, sql, upgrade = [], [], []
     chars = state["characters"]
     by_name = {c["name"]: c for c in chars}
-    guilds_by_name = {g["name"].lower(): g for g in state["guilds"]}
     leaders = {g["leader"] for g in state["guilds"]}
     member_of = {m["guid"]: m for m in state["members"]}
     skills = {}
@@ -496,16 +578,16 @@ def plan(roster, state, now=None):
     for s in state["store"]:
         store.setdefault(s["guid"], []).append((s["key"], s["value"]))
     roster_names = {b["name"] for b in roster["bots"]}
-    roster_guild_ids = {g["id"] for g in state["guilds"]
-                        if g["name"].lower() in {rg["name"].lower() for rg in roster["guilds"]}}
-    taken = set()
     errors = []
+    existing = bind_guilds(roster, state, bindings, lines, errors)
+    roster_guild_ids = {g["id"] for g in existing.values() if g}
+    taken = set()
     failed = set()
 
     # 1. Bind each roster bot to a character: its name if it exists, else a
     #    free random bot of the same race and class (not rostered, in no
     #    guild, leading none).
-    bound = {}
+    bound_chars = {}
     for b in roster["bots"]:
         c = by_name.get(b["name"])
         if c is not None:
@@ -518,10 +600,10 @@ def plan(roster, state, now=None):
                               "rename it away or change the roster")
                 failed.add(b["name"])
                 continue
-            bound[b["name"]] = c
+            bound_chars[b["name"]] = c
             taken.add(c["guid"])
     for b in roster["bots"]:
-        if b["name"] in bound or b["name"] in failed:
+        if b["name"] in bound_chars or b["name"] in failed:
             continue
         # A free bot: same race and class, not already rostered, leading no
         # guild, and in no guild - or, failing that, in one of playerbots'
@@ -539,7 +621,7 @@ def plan(roster, state, now=None):
             continue
         c = min(free, key=lambda x: (x["guid"] in member_of, x["level"], x["guid"]))
         taken.add(c["guid"])
-        bound[b["name"]] = dict(c)
+        bound_chars[b["name"]] = dict(c)
         lines.append(f"rename {c['name']} (guid {c['guid']}) to {b['name']}")
         sql.append(f"UPDATE characters SET name={sql_str(b['name'])} WHERE guid={c['guid']};")
     if errors:
@@ -547,7 +629,7 @@ def plan(roster, state, now=None):
 
     # 2. Per bot: gender, professions, strategies, guild size, card row.
     for b in roster["bots"]:
-        c = bound[b["name"]]
+        c = bound_chars[b["name"]]
         g = c["guid"]
         n = b["name"]
         if c["gender"] != b["gender"]:
@@ -592,9 +674,12 @@ def plan(roster, state, now=None):
     # 3. Guilds: create or update, ranks, members.
     next_id = max([gd["id"] for gd in state["guilds"]] + [0]) + 1
     for gd in roster["guilds"]:
-        cur = guilds_by_name.get(gd["name"].lower())
-        leader = bound[gd["leader"]]["guid"]
+        cur = existing[gd["name"].lower()]
+        leader = bound_chars[gd["leader"]]["guid"]
         tab = gd["tabard"] or {k: 0 for k, _ in TABARD_FIELDS}
+        if bound is not None:
+            bound[gd["name"].lower()] = {"id": cur["id"] if cur else next_id,
+                                         "created": cur.get("created") if cur else now}
         if cur is None:
             gid = next_id
             next_id += 1
@@ -639,7 +724,7 @@ def plan(roster, state, now=None):
         for b in roster["bots"]:
             if b["guild"] != gd["name"]:
                 continue
-            g = bound[b["name"]]["guid"]
+            g = bound_chars[b["name"]]["guid"]
             roster_guids.add(g)
             rank = 0 if b["name"] == gd["leader"] else rank_index.get(b["rank"], None)
             m = member_of.get(g)
@@ -673,7 +758,7 @@ def plan(roster, state, now=None):
 
     # Bots the roster takes out of every guild.
     for b in roster["bots"]:
-        g = bound[b["name"]]["guid"]
+        g = bound_chars[b["name"]]["guid"]
         if b["guild"] is None and g in member_of:
             if g in leaders:
                 raise RosterError(f"{b['name']}: leads a guild the roster does not name; give it a guild or a new leader")
@@ -722,8 +807,18 @@ def cmd_plan(a):
     state = normalise_state(json.loads(raw) if raw else {})
     with open(a.conf, encoding="utf-8") as f:
         conf_text = f.read()
+    bindings = {}
+    if a.bindings:
+        try:
+            with open(a.bindings, encoding="utf-8") as f:
+                bindings = json.load(f)
+        except FileNotFoundError:
+            pass
+        except (OSError, json.JSONDecodeError) as e:
+            raise SystemExit(f"cannot read the guild bindings {a.bindings}: {e}")
+    bound = {}
     try:
-        lines, sql, upgrade = plan(r, state)
+        lines, sql, upgrade = plan(r, state, bindings=bindings, bound=bound)
         changes = conf_changes(r, conf_text, a.cards_in_server)
     except RosterError as e:
         raise SystemExit("cannot plan:\n  " + str(e).replace("\n", "\n  "))
@@ -758,6 +853,12 @@ def cmd_plan(a):
     if a.out_upgrade:
         with open(a.out_upgrade, "w", encoding="utf-8") as f:
             f.write("".join(n + "\n" for n in upgrade))
+    if a.out_bindings:
+        # Bindings of guilds the roster no longer names are kept: one put
+        # back later is still the same guild.
+        with open(a.out_bindings, "w", encoding="utf-8") as f:
+            json.dump({**bindings, **bound}, f, indent=1, sort_keys=True)
+            f.write("\n")
 
 
 def cmd_show(a):
@@ -1141,6 +1242,8 @@ def main(argv=None):
     s.add_argument("--out-conf")
     s.add_argument("--out-cards")
     s.add_argument("--out-upgrade")
+    s.add_argument("--bindings", help="the guild bindings recorded by earlier applies (JSON; absent: none)")
+    s.add_argument("--out-bindings", help="the bindings once this plan is applied")
     s.set_defaults(fn=cmd_plan)
 
     s = sub.add_parser("show")

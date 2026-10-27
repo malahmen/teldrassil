@@ -149,5 +149,41 @@ chk "an endpoint must be http(s)"                 '[[ $rc -ne 0 ]]'
 run llm on --model m
 chk "on needs an endpoint"                        '[[ $rc -ne 0 && "$out" == *"Usage: llm on"* ]]'
 
+hdr "roster apply never takes over a players' guild (Kamino 164)"
+# The database's answer to the plan's state query is $STUB_SQL_REPLY: Leadra
+# is a bot already, Playerone a player. The world server is stopped, the realm
+# server runs, and a start finds the ready line.
+state() {   # state <guild rows> <member rows>
+    printf '{"characters": [{"guid": 10, "name": "Leadra", "race": 5, "class": 5, "gender": 0, "level": 1, "online": 0, "bot": 1}, {"guid": 13, "name": "Hordebot", "race": 2, "class": 1, "gender": 0, "level": 1, "online": 0, "bot": 1}, {"guid": 20, "name": "Playerone", "race": 8, "class": 3, "gender": 0, "level": 1, "online": 0, "bot": 0}], "guilds": [%s], "members": [%s]}' "$1" "$2"
+}
+g() { printf '{"id": %s, "name": "%s", "leader": %s, "created": %s, "EmblemStyle": 0, "EmblemColor": 0, "BorderStyle": 0, "BorderColor": 0, "BackgroundColor": 0, "info": "", "motd": ""}' "$@"; }
+m() { printf '{"guild": %s, "guid": %s, "rank": %s, "pnote": "", "offnote": ""}' "$@"; }
+mkdir -p "$T/stub"
+export STUB_RUNNING="my-db teldrassil-realmd" STUB_STOPPED=teldrassil-mangosd STUB_SQL_IN="$T/sql.in" STUB_STATE="$T/stub" STUB_LOG_LINE="World initialized" STUB_SQL_REPLY
+run set CARDS_FILE "$T/cards.txt"
+BIND="$T/config/teldrassil/roster-guilds.json"
+: > "$T/sql.in"; : > "$T/podman.log"
+STUB_SQL_REPLY="$(state "$(g 5 "Test Guild" 20 100)" "$(m 5 20 0)")"
+run roster apply --file "$T/roster.json" --yes
+chk "a guild of the roster's name led by a player: refused" '[[ $rc -ne 0 && "$out" == *"Test Guild"* && "$out" == *"led by Playerone"* ]]'
+chk "  no SQL written to any guild"               '! grep -qE "(UPDATE|INSERT INTO|DELETE FROM) guild|START TRANSACTION" "$T/sql.in"'
+chk "  the server was not started (nor stopped)"  '! grep -qE "^podman (start|stop) teldrassil-mangosd" "$T/podman.log"'
+chk "  no binding recorded"                       '[[ ! -e "$BIND" ]]'
+STUB_SQL_REPLY="$(state "$(g 5 "Test Guild" 13 100)" "$(m 5 13 0),$(m 5 20 4)")"
+run roster apply --file "$T/roster.json" --yes
+chk "a bot guild with a player in it: refused, naming them" '[[ $rc -ne 0 && "$out" == *"players are in it (Playerone)"* ]] && ! grep -qE "(UPDATE|INSERT INTO|DELETE FROM) guild|START TRANSACTION" "$T/sql.in"'
+: > "$T/podman.log"
+STUB_RUNNING="my-db teldrassil-realmd teldrassil-mangosd" run roster apply --file "$T/roster.json" --yes
+chk "  refused before a running world server is stopped" '[[ $rc -ne 0 ]] && ! grep -q "^podman stop" "$T/podman.log"'
+STUB_SQL_REPLY="$(state "$(g 5 "Test Guild" 13 100)" "$(m 5 13 0)")"
+run roster apply --file "$T/roster.json" --yes
+chk "an all-bot guild of the faction: applied"    '[[ $rc -eq 0 ]] && grep -q "UPDATE guild SET leaderguid=10.* WHERE guildid=5;" "$T/sql.in"'
+chk "  and bound by id, privately"                'grep -q "\"id\": 5" "$BIND" && [[ "$(stat -c %a "$BIND")" == 600 ]]'
+: > "$T/sql.in"
+STUB_SQL_REPLY="$(state "$(g 5 "Renamed" 10 100),$(g 9 "Test Guild" 20 200)" "$(m 5 10 0),$(m 5 13 4),$(m 9 20 0)")"
+run roster apply --file "$T/roster.json" --yes
+chk "renamed since, with a players' guild of the old name: id 5 stays the roster's" '[[ $rc -eq 0 && "$out" == *"bound to guild id 5"* ]] && ! grep -qE "guildid=9|\(9," "$T/sql.in"'
+unset STUB_RUNNING STUB_STOPPED STUB_SQL_IN STUB_STATE STUB_LOG_LINE STUB_SQL_REPLY
+
 printf '\npass=%d fail=%d\n' "$pass" "$fail"
 (( fail == 0 ))

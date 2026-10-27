@@ -30,13 +30,34 @@ _roster_state() {
     helper state-sql --chars "$DB_CHARACTERS" --realmd "$DB_REALMD" --prefix "$BOT_ACCOUNT_PREFIX" | _db_raw > "$1"
 }
 
+# _roster_bindings — where the roster's guilds are bound to the server's guild
+# ids (one file per profile): written by 'roster apply', so a guild the roster
+# made or took over stays its own whatever it is renamed to, and a guild of
+# the same name never becomes the roster's.
+_roster_bindings() { printf '%s/roster-guilds%s.json' "$CONFIG_DIR" "${PROFILE:+-${PROFILE}}"; }
+
 # _roster_plan <roster> <dir> — run the plan; leaves plan.sql, plan.conf,
-# plan.cards and plan.upgrade in <dir> (each empty when there is nothing).
+# plan.cards, plan.upgrade (each empty when there is nothing) and the guild
+# bindings once applied (bindings.json) in <dir>.
 _roster_plan() {
     local roster="$1" d="$2"
     helper plan "$roster" --state "$d/state.json" --conf "$BOT_CONF" \
         --cards "${CARDS_FILE:-/nonexistent}" --cards-in-server "$CARDS_FILE_IN_SERVER" \
-        --out-sql "$d/plan.sql" --out-conf "$d/plan.conf" --out-cards "$d/plan.cards" --out-upgrade "$d/plan.upgrade"
+        --out-sql "$d/plan.sql" --out-conf "$d/plan.conf" --out-cards "$d/plan.cards" --out-upgrade "$d/plan.upgrade" \
+        --bindings "$(_roster_bindings)" --out-bindings "$d/bindings.json"
+}
+
+# _roster_bind <dir> — record the applied plan's guild bindings.
+_roster_bind() {
+    local f; f="$(_roster_bindings)"
+    [[ -s "$1/bindings.json" ]] || return 0
+    cmp -s -- "$1/bindings.json" "$f" && return 0
+    _mkdir_private "$CONFIG_DIR"
+    if (umask 077; cat -- "$1/bindings.json" > "${f}.tmp") && mv -f -- "${f}.tmp" "$f"; then
+        info "Roster guilds bound to their guild ids (${f})."
+    else
+        warn "Could not record the guild bindings in ${f}; the next apply matches guilds by name again (bot-only guilds only)."
+    fi
 }
 
 _roster_flags() {
@@ -152,6 +173,13 @@ _roster_cmd_apply() {
         return 0
     fi
 
+    # A plan that cannot be made (a guild that is not the roster's to take
+    # over, a missing bot) is found before anything stops.
+    if (( ! R_FRESH )); then
+        _roster_state "$d/state.json"
+        _roster_plan "$roster" "$d" >/dev/null || error_exit "Nothing was changed; the server was left as it was."
+    fi
+
     (( R_FRESH )) && _fresh_population "$roster"
 
     header "Stop, so the database can be written"
@@ -182,6 +210,7 @@ _roster_cmd_apply() {
         if [[ -s "$d/plan.conf" ]]; then _replace "$d/plan.conf" "$BOT_CONF"; success "aiplayerbot.conf updated (old copy in ${BACKUP_DIR})."; fi
         if [[ -s "$d/plan.cards" ]]; then _replace "$d/plan.cards" "$CARDS_FILE"; success "Card file written."; fi
     fi
+    _roster_bind "$d"
 
     if (( was_running || R_FRESH )) || [[ -s "$d/plan.sql" || -s "$d/plan.conf" || -s "$d/plan.cards" ]]; then
         header "Start"

@@ -261,20 +261,61 @@ cmd_extract() {
 _db_container_up() {
     local root; root="$(_secret root.pw)"
     if ! _container_exists "$DB_CONTAINER"; then
-        info "Creating the database container ${DB_CONTAINER} (127.0.0.1:${DB_PORT}, volume ${DB_VOLUME})..."
-        "$PODMAN" volume exists "$DB_VOLUME" || "$PODMAN" volume create "$DB_VOLUME" >/dev/null
+        if "$PODMAN" volume exists "$DB_VOLUME"; then
+            info "Creating the database container ${DB_CONTAINER} on the existing volume ${DB_VOLUME} (127.0.0.1:${DB_PORT})..."
+        else
+            info "Creating the database container ${DB_CONTAINER} (127.0.0.1:${DB_PORT}, volume ${DB_VOLUME})..."
+            "$PODMAN" volume create "$DB_VOLUME" >/dev/null
+        fi
         "$PODMAN" run -d --name "$DB_CONTAINER" --restart on-failure -p "127.0.0.1:${DB_PORT}:3306" \
             -v "${DB_VOLUME}:/var/lib/mysql" -v "${root}:${DB_PASS_FILE}:ro,z" \
             -e "MARIADB_ROOT_PASSWORD_FILE=${DB_PASS_FILE}" "$DB_IMAGE" >/dev/null
     elif ! _container_running "$DB_CONTAINER"; then
+        info "Starting the database container ${DB_CONTAINER}..."
         "$PODMAN" start "$DB_CONTAINER" >/dev/null
     fi
-    local deadline=$((SECONDS + 120))
+    # Bounded: a database that does not answer is an error, never "absent".
+    local deadline=$((SECONDS + DB_TIMEOUT))
+    info "Waiting for the database to answer (up to ${DB_TIMEOUT}s)..."
     until printf 'SELECT 1;\n' | _db_raw >/dev/null 2>&1; do
-        (( SECONDS < deadline )) || error_exit "The database did not answer within 120s: '${PODMAN} logs ${DB_CONTAINER}'."
+        (( SECONDS < deadline )) || error_exit "The database did not answer within ${DB_TIMEOUT}s; the databases were not touched. See '${PODMAN} logs ${DB_CONTAINER}'. (On a volume made earlier, MariaDB keeps that volume's root password: ${SECRETS}/root.pw must hold it.) DB_TIMEOUT sets the wait."
         sleep 2
     done
     success "Database ${DB_CONTAINER} is up."
+}
+
+# _db_schemas — the databases the server holds, one per line; fails when it
+# cannot ask, so a failed query is never read as "no databases".
+_db_schemas() { printf '%s\n' "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA;" | _db_raw; }
+
+# _db_exists — is a database already here: its container, or its volume?
+_db_exists() { _container_exists "$DB_CONTAINER" || "$PODMAN" volume exists "$DB_VOLUME"; }
+
+# _db_present <schemas> — which of the four databases those schemas hold:
+# sets DB_HAVE and DB_MISSING.
+_db_present() {
+    local d; DB_HAVE=(); DB_MISSING=()
+    for d in "$DB_WORLD" "$DB_CHARACTERS" "$DB_REALMD" "$DB_LOGS"; do
+        if grep -qxF -- "$d" <<<"$1"; then DB_HAVE+=("$d"); else DB_MISSING+=("$d"); fi
+    done
+}
+
+# _db_dump_before_init — a dump of the databases db-init is about to replace,
+# under DUMP_DIR; nothing is replaced if it cannot be taken.
+_db_dump_before_init() {
+    local schemas out
+    schemas="$(_db_schemas)" || error_exit "Could not list the databases in ${DB_CONTAINER}; nothing was replaced."
+    _db_present "$schemas"
+    (( ${#DB_HAVE[@]} )) || return 0
+    _mkdir_private "$DUMP_DIR"
+    out="${DUMP_DIR}/before-db-init-$(date +%Y%m%d-%H%M%S).sql.gz"
+    info "Dumping ${DB_HAVE[*]} to ${out} before they are replaced..."
+    if ! (umask 077; _db_dump --databases "${DB_HAVE[@]}" | gzip -c > "$out") \
+        || [[ -z "$(gzip -dc -- "$out" 2>/dev/null | head -c 1)" ]]; then
+        mv -f -- "$out" "${out}.incomplete" 2>/dev/null || true
+        error_exit "The dump of ${DB_HAVE[*]} failed (what was written is ${out}.incomplete); nothing was replaced."
+    fi
+    success "Dumped to ${out} ('restore --file' puts it back)."
 }
 
 cmd_db_init() {
@@ -288,6 +329,7 @@ cmd_db_init() {
     (( yes )) || error_exit "db-init creates the four databases and REPLACES any that exist (classic-db's DeleteAll): add --yes."
     if _container_running "$SERVER_CONTAINER"; then error_exit "Stop the world server first ('stop')."; fi
     _db_container_up
+    _db_dump_before_init
     local root mangos; root="$(_secret root.pw)"; mangos="$(_secret mangos.pw)"
 
     # classic-db's installer reads this file from its own folder; it holds no
@@ -471,19 +513,32 @@ cmd_install() {
     header "3/7 Build";        if [[ -x "${INSTALL}/bin/mangosd" ]]; then info "Already built (run 'build' to rebuild)."; else cmd_build; fi
     header "4/7 Client data";  if [[ -n "$client" ]]; then cmd_extract --client "$client"; else cmd_extract; fi
     header "5/7 Databases"
-    if _container_exists "$DB_CONTAINER" && _container_running "$DB_CONTAINER" \
-        && [[ "$(_db_value "SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='${DB_WORLD}';")" == "1" ]]; then
-        info "The databases exist; kept ('db-init --yes' recreates them)."
-        _db_finish
-    else
-        cmd_db_init --yes
-    fi
+    _install_databases
     _settings; _paths
     header "6/7 Configuration"; cmd_configure
     _settings; _paths
     header "7/7 Containers";   cmd_create
     header "Start";            _start
     success "Installed. 'status' shows it; the roster commands shape its bots."
+}
+
+# _install_databases — install's step 5. A database that exists is kept, never
+# initialised: install runs db-init only where there is no database container
+# and no volume. One that is stopped is started and waited for; if any of the
+# four databases is missing, install stops and says which.
+_install_databases() {
+    if ! _db_exists; then cmd_db_init --yes; return; fi
+    info "A database exists (container ${DB_CONTAINER} or volume ${DB_VOLUME}); install keeps it."
+    _db_container_up
+    local schemas others
+    schemas="$(_db_schemas)" || error_exit "Could not list the databases in ${DB_CONTAINER}; the databases were not touched."
+    _db_present "$schemas"
+    if (( ${#DB_MISSING[@]} )); then
+        others="$(grep -vxE 'information_schema|mysql|performance_schema|sys' <<<"$schemas" | paste -sd ' ' - || true)"
+        error_exit "The database ${DB_CONTAINER} has no ${DB_MISSING[*]} (it holds: ${others:-nothing}). install never replaces a database, so it stops here with the databases untouched. If DB_WORLD, DB_CHARACTERS, DB_REALMD or DB_LOGS should name what it holds, 'set' them. 'db-init --yes' would REPLACE all four databases - every account and character - after dumping the ones that exist."
+    fi
+    info "The databases exist; kept ('db-init --yes' recreates them)."
+    _db_finish
 }
 
 cmd_remove() {

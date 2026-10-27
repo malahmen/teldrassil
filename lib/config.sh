@@ -61,6 +61,7 @@ CONFIG_KEYS=(
     "DB_IMAGE=docker.io/library/mariadb:11.4|the database image"
     "DB_VOLUME=teldrassil-db|the database's volume"
     "DB_PORT=3307|the database's port, on 127.0.0.1 only"
+    "DB_TIMEOUT=120|seconds provisioning waits for the database to answer"
     "BUILD_JOBS=0|compile jobs (0: one per CPU)"
     "REALM_NAME=Teldrassil|the realm's name in the realm list"
     "REALM_ADDRESS=127.0.0.1|the address clients connect to after login (this host's LAN address for LAN play)"
@@ -132,7 +133,7 @@ cfg_set() {
     case "$key" in
         SERVER_KIND)
             [[ "$val" == podman || "$val" == kube ]] || error_exit "set: SERVER_KIND is podman or kube (got '${val}')." ;;
-        RA_PORT|WORLD_PORT|REALM_PORT|START_TIMEOUT|STOP_TIMEOUT|BOTS_TIMEOUT|DB_PORT|BUILD_JOBS|BOTS)
+        RA_PORT|WORLD_PORT|REALM_PORT|START_TIMEOUT|STOP_TIMEOUT|BOTS_TIMEOUT|DB_TIMEOUT|DB_PORT|BUILD_JOBS|BOTS)
             [[ "$val" =~ ^[0-9]+$ ]] || error_exit "set: ${key} must be a number (got '${val}')." ;;
     esac
     _mkdir_private "$CONFIG_DIR"
