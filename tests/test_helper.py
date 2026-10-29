@@ -593,5 +593,95 @@ class ConfCommand(unittest.TestCase):
         self.assertEqual(text, "Ra.Enable = 1\n")
 
 
+
+class Guarantees(unittest.TestCase):
+    """Kamino 192: guarantees no test held before."""
+
+    def test_a_free_bot_is_never_a_players_character(self):
+        # A player's troll hunter, in no guild and of the lowest level, is
+        # the only one of its pair: the plan must not rename it.
+        rost = {"bots": [{"name": "Hunta", "race": "troll", "class": "hunter"}]}
+        with self.assertRaises(t.RosterError) as e:
+            t.plan(t.load_roster(rost), empty_state(), now=1)
+        self.assertIn("Hunta: no free bot", str(e.exception))
+        st = empty_state()
+        st["characters"].append(char(21, "Botthree", 8, 3, level=9))
+        lines, sql, _ = t.plan(t.load_roster(rost), st, now=1)
+        self.assertIn("rename Botthree (guid 21) to Hunta", "\n".join(lines))
+        self.assertFalse(any("guid=20" in q for q in sql))
+
+    def test_a_free_bot_is_never_a_guild_leader(self):
+        # Both orc warriors are in random guilds; the lower one leads its own.
+        st = empty_state()
+        st["guilds"] = [guild(7, "Random One", 11), guild(8, "Random Two", 99)]
+        st["members"] = [member(7, 11, 0), member(8, 12, 3)]
+        rost = {"bots": [{"name": "Grunt", "race": "orc", "class": "warrior"}]}
+        lines, sql, _ = t.plan(t.load_roster(rost), st, now=1)
+        self.assertIn("rename Randomc (guid 12) to Grunt", "\n".join(lines))
+        self.assertIn("Grunt: leaves guild id 8", "\n".join(lines))
+        self.assertFalse(any("guid=11" in q for q in sql))
+
+    # SRP6: the accounts cmangos ships, from mangos-classic's sql/base/
+    # realmd.sql at the pinned commit (MANGOS_REF ff53dfc): each password is
+    # its name, and the salts are not palindromes, so either byte order
+    # wrong fails here.
+    CMANGOS_ACCOUNTS = [
+        ("ADMINISTRATOR", "312B99EEF1C0196BB73B79D114CE161C5D089319E6EF54FAA6117DAB8B672C14",
+         "8EB5DE915AA3D805FA7099CF61C0BB8A77990EA869078A0C5B9EEE55828F4505"),
+        ("GAMEMASTER", "681F5A7D4DE26DBFD3060EE37E03B79FD154875FB18F44DBF843963F193FC1AC",
+         "8873CD861DEFBF124232D6A29E4884E34C73385304A8AC44175976B1003DCFD7"),
+        ("MODERATOR", "2CA85C9853E44A6DCE09FC92EBDE57EF20975281EB7604326E25751AF8576859",
+         "AD68B088D7BCE5E4B734495A7A956F1D5DD1BAB61FB0FEE46C737D93EC166DF5"),
+        ("PLAYER", "3738EC7E7C731FD431C716990C6D97CA5C1D50EF0DA7DE9819076DE1D03AA891",
+         "EBA23AF194D89B8061CA7FEBA06D336B1C38D8FBDABA76F2C51D45141362D881"),
+    ]
+
+    def test_srp6_known_answers_from_cmangos(self):
+        for user, v, s in self.CMANGOS_ACCOUNTS:
+            self.assertEqual(t.srp6_verifier(user, user, int(s, 16)), (v, s), user)
+
+    def test_srp6_from_the_formula(self):
+        # x = SHA1(salt as little-endian bytes | SHA1("USER:PASS")), read as a
+        # little-endian number; v = g^x mod N. Written out here, apart from
+        # the helper, with a salt whose bytes run A1..C0 (a full 32 bytes, as
+        # the helper makes them).
+        import hashlib
+        salt = bytes(range(0xA1, 0xC1))
+        inner = hashlib.sha1(b"TESTER:SECRET").digest()
+        x = int(hashlib.sha1(salt[::-1] + inner).hexdigest(), 16)
+        x = int.from_bytes(x.to_bytes(20, "big"), "little")
+        want = format(pow(7, x, t.SRP_N), "X")
+        self.assertEqual(t.srp6_verifier("tester", "secret", int(salt.hex(), 16)), (want, salt.hex().upper()))
+
+    def run_main(self, *args):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            t.main(list(args))
+        return buf.getvalue()
+
+    def test_the_plan_sql_is_one_transaction(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = lambda n: os.path.join(d, n)   # noqa: E731
+            with open(p("roster.json"), "w") as f:
+                json.dump(roster(), f)
+            with open(p("state.json"), "w") as f:
+                json.dump({"characters": empty_state()["characters"]}, f)
+            with open(p("bot.conf"), "w") as f:
+                f.write("")
+            self.run_main("plan", p("roster.json"), "--state", p("state.json"), "--conf", p("bot.conf"),
+                          "--cards", p("none"), "--cards-in-server", "/x", "--out-sql", p("plan.sql"))
+            with open(p("plan.sql")) as f:
+                text = f.read()
+            self.assertTrue(text.startswith("START TRANSACTION;\n"), text[:40])
+            self.assertTrue(text.endswith("\nCOMMIT;\n"))
+            self.assertEqual(text.count("START TRANSACTION"), 1)
+            with open(p("attune.json"), "w") as f:
+                json.dump(Attunements.STATE, f)
+            self.run_main("attune-plan", "--state", p("attune.json"), "--out-sql", p("attune.sql"))
+            with open(p("attune.sql")) as f:
+                text = f.read()
+            self.assertTrue(text.startswith("START TRANSACTION;\n") and text.endswith("\nCOMMIT;\n"))
+
+
 if __name__ == "__main__":
     unittest.main()

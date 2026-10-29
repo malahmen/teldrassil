@@ -11,6 +11,7 @@ ENG="${TELDRASSIL:-${TEST_DIR}/../teldrassil.sh}"
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 export PATH="${TEST_DIR}/stubs:$PATH" XDG_CONFIG_HOME="$T/config" STUB_LOG="$T/podman.log" STUB_SQL_IN="$T/sql.in"
 unset TELDRASSIL_PROFILE
+umask 022   # what a login shell has: the files below must be private anyway
 pass=0; fail=0
 ok(){ printf '  \033[32mPASS\033[0m %s\n' "$1"; pass=$((pass+1)); }
 bad(){ printf '  \033[31mFAIL\033[0m %s\n' "$1"; fail=$((fail+1)); }
@@ -85,6 +86,7 @@ run install --yes
 chk "the volume and container are created"       'grep -q "^podman volume create teldrassil-db" "$T/podman.log" && grep -q "^podman run -d --name teldrassil-db" "$T/podman.log"'
 chk "  and the installer runs (DeleteAll on nothing)" 'grep -q "podman run --rm .*InstallFullDB.sh" "$T/podman.log" && grep -q DeleteAll "$T/podman.log"'
 chk "  with no dump (there is nothing to keep)"  '! grep -q mariadb-dump "$T/podman.log"'
+chk "  its database password is private (0600, in a 0700 folder)" '[[ "$(stat -c %a "$W/secrets/root.pw")" == 600 && "$(stat -c %a "$W/secrets")" == 700 ]]'
 
 hdr "db-init --yes over existing databases dumps them first"
 scenario; export STUB_RUNNING=teldrassil-db STUB_SCHEMAS="classicmangos classiccharacters classicrealmd"
@@ -100,6 +102,22 @@ for how in partial empty; do
     run db-init --yes
     chk "  so does a dump that fails part-way or is empty ($how)" '[[ $rc -ne 0 && "$out" == *"nothing was replaced"* ]] && no_delete_all'
 done
+
+hdr "configure: the config files hold the database password, so are 0600"
+E="$W/install/etc"; mkdir -p "$E"
+printf '%s = x\n' DataDir LogsDir LoginDatabaseInfo WorldDatabaseInfo CharacterDatabaseInfo LogsDatabaseInfo \
+    WorldServerPort Console.Enable Ra.Enable Ra.IP Ra.Port > "$E/mangosd.conf.dist"
+printf '%s = x\n' LoginDatabaseInfo LogsDir RealmServerPort > "$E/realmd.conf.dist"
+printf 'AiPlayerbot.%s = x\n' MinRandomBots MaxRandomBots RandomBotAccountCount DisableActivityPriorities \
+    DisableBotOptimizations RandomBotAutoJoinBG LLMEnabled RandomBotGuildCount > "$E/aiplayerbot.conf.dist"
+printf 'AuctionHouseBot.Seller.Enabled = 0\n' > "$E/ahbot.conf.dist"
+run configure
+chk "configure writes them"                      '[[ $rc -eq 0 && -f "$W/etc/mangosd.conf" ]] && grep -q "$(cat "$W/secrets/mangos.pw")" "$W/etc/mangosd.conf"'
+all_private() { local f; for f in mangosd realmd aiplayerbot ahbot; do [[ "$(stat -c %a "$W/etc/$f.conf")" == 600 ]] || return 1; done; }
+chk "  each 0600"                                'all_private'
+chmod 644 "$W/etc/mangosd.conf"
+run configure --force
+chk "  and --force makes an open one private again" '[[ $rc -eq 0 && "$(stat -c %a "$W/etc/mangosd.conf")" == 600 ]]'
 
 printf '\npass=%d fail=%d\n' "$pass" "$fail"
 (( fail == 0 ))
