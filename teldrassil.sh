@@ -75,8 +75,9 @@ also manage one elsewhere (see Profiles).
 Server:
   start | stop                  stop saves the world first, then disconnects everyone
   restart [--graceful [SECS]]   stop and start here; --graceful asks mangosd to
-                                warn players, save and exit in SECS (default 60),
-                                then starts it again
+                                warn players, save and exit in SECS (default 60);
+                                the container's restart policy, or this, starts
+                                it again
   status                        containers, ports, who is online, the LLM endpoint,
                                 and a warning while cmangos' default accounts exist
   save                          save every character now
@@ -125,7 +126,9 @@ Roster (one JSON file: shaped bots, guilds, ranks, tabards, cards, LLM, populati
   roster apply [--file F] [--fresh-population] --yes
                                 stop, write it all in one transaction, start, and
                                 apply changed professions ('rndbot upgrade').
-                                Without --yes it only shows the plan.
+                                Without --yes it only shows the plan. If a step
+                                fails after the stop, the server is started
+                                again (attune apply too).
                                 --fresh-population first replaces EVERY random
                                 bot (and every guild a bot leads) with a new
                                 population at the roster's counts.

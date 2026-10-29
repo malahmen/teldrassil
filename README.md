@@ -51,8 +51,10 @@ its volume - every account and character.
 ### Managing it
 
 - **The server:** `start`, `stop` (saves first), `restart` (or `--graceful`:
-  players warned, the world saved, mangosd exits and is started again),
-  `status`, `save`, and the remote console.
+  players warned, the world saved, mangosd exits and is started again - by
+  its container's restart policy when mangosd exits with a failure code,
+  else by teldrassil; the container's start time tells which, so a restart
+  that worked is reported as one), `status`, `save`, and the remote console.
 - **Accounts:** create one, set its GM level, list them, delete one.
 - **Characters:** rename one (refused while it is online: the world server
   would write the old name back).
@@ -236,6 +238,15 @@ overwritten. It saves the world, stops it, writes everything in one
 transaction, puts the new `aiplayerbot.conf` and card file in place (keeping
 the old ones under `~/.config/teldrassil/backups`), and starts it again.
 
+**A failed step leaves the realm as it found it.** Once `roster apply` or
+`attune apply` has stopped a running world server, whatever ends it early -
+the state query, the plan, a refused transaction, Ctrl-C - starts the server
+again on the way out. `--fresh-population` turns guild deletion on and random
+guilds off for its one start; if that start does not get through (it fails,
+an error, a signal), both settings go back to what they were and the pending
+"delete every random bot" request is withdrawn, so no later start deletes
+anything. The roster's population counts stay.
+
 ## Things to know about playerbots
 
 - **Talking to a bot is not commanding it.** Plain words go to the LLM, which
@@ -255,7 +266,8 @@ tests/run-all.sh
 ```
 
 No network, no database, no containers: the helper's roster logic is tested as
-plain functions, and `tests/stubs/` stands in for podman, ssh and kubectl. The
+plain functions, `tests/stubs/` stands in for podman, ssh and kubectl, and
+`tests/fake_ra.py` for the remote console, on a free port of 127.0.0.1. The
 ssh stub runs its command here after a second shell parse, as a real host
 would, so a quoting mistake fails a test rather than a server.
 

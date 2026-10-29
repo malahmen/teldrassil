@@ -116,6 +116,12 @@ _replace() {
 # itself once done) - stronger than DeleteRandomBotAccounts, which keeps any
 # bot that is in a guild or someone's friend. Bot guilds go too; the roster
 # recreates its own. Players' characters are on other accounts and untouched.
+#
+# Guild deletion is on, and random guilds off, for that one start only: if it
+# does not get through it (the start fails, an error, a signal), the exit hook
+# puts both settings back and withdraws a deletion request still pending, so
+# no later start deletes anything.
+FRESH_PENDING=0; FRESH_GUILDS=""; FRESH_DELETE=""
 _fresh_population() {
     local roster="$1" d; d="$(tmp_dir)"
     local total; total="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get("population",{}).get("bots",""))' "$roster")"
@@ -126,7 +132,8 @@ _fresh_population() {
     # No random guilds while the new bots are made: a bot that founds one in
     # the first minute leads it, and a leader cannot be taken over. They
     # form on the next start, from the bots the roster leaves.
-    local guilds; guilds="$(grep -E '^AiPlayerbot\.RandomBotGuildCount[[:space:]]*=' "$BOT_CONF" | tail -1 | cut -d= -f2 | tr -d '[:space:]' || true)"
+    FRESH_GUILDS="$(_bot_conf_value RandomBotGuildCount)"; FRESH_DELETE="$(_bot_conf_value DeleteRandomBotGuilds)"
+    FRESH_PENDING=1; _at_exit _fresh_on_exit
     helper conf --conf "$BOT_CONF" --out "$d/fresh.conf" --roster "$roster" --cards-in-server "$CARDS_FILE_IN_SERVER" \
         --set AiPlayerbot.DeleteRandomBotGuilds=1 --set AiPlayerbot.RandomBotGuildCount=0 >/dev/null
     _replace "$d/fresh.conf" "$BOT_CONF"
@@ -135,10 +142,31 @@ _fresh_population() {
     _start
     _wait_bot_characters "$total" || warn "Carrying on with the bots that were created."
     _stop
-    helper conf --conf "$BOT_CONF" --out "$d/after.conf" --set AiPlayerbot.DeleteRandomBotGuilds=0 \
-        --set "AiPlayerbot.RandomBotGuildCount=${guilds:-20}" >/dev/null
+    _fresh_conf_restore
+    FRESH_PENDING=0
+    success "New population created; guild deletion off and random guilds back on (${FRESH_GUILDS:-20})."
+}
+
+# _bot_conf_value <key> — an AiPlayerbot.<key> setting as aiplayerbot.conf has it.
+_bot_conf_value() {
+    grep -E "^AiPlayerbot\.${1}[[:space:]]*=" "$BOT_CONF" | tail -1 | cut -d= -f2 | tr -d '[:space:]' || true
+}
+
+# _fresh_conf_restore — guild deletion and random guilds as they were before.
+_fresh_conf_restore() {
+    local d; d="$(tmp_dir)"
+    helper conf --conf "$BOT_CONF" --out "$d/after.conf" --set "AiPlayerbot.DeleteRandomBotGuilds=${FRESH_DELETE:-0}" \
+        --set "AiPlayerbot.RandomBotGuildCount=${FRESH_GUILDS:-20}" >/dev/null
     cat -- "$d/after.conf" > "$BOT_CONF"
-    success "New population created; guild deletion off and random guilds back on (${guilds:-20})."
+}
+
+_fresh_on_exit() {
+    (( FRESH_PENDING )) || return 0
+    warn "The fresh population did not finish: putting aiplayerbot.conf's guild settings back and withdrawing the deletion request."
+    _fresh_conf_restore
+    info "aiplayerbot.conf: DeleteRandomBotGuilds=${FRESH_DELETE:-0}, RandomBotGuildCount=${FRESH_GUILDS:-20} again."
+    printf '%s\n' "DELETE FROM ${DB_CHARACTERS}.ai_playerbot_random_bots WHERE event='bot_delete';" | _db_raw
+    info "No 'delete every random bot' request is left for a later start."
 }
 
 # _wait_bot_characters <count> — until that many characters exist on bot
@@ -180,18 +208,17 @@ _roster_cmd_apply() {
         _roster_plan "$roster" "$d" >/dev/null || error_exit "Nothing was changed; the server was left as it was."
     fi
 
+    # From here the server is stopped: whatever fails - the state query, the
+    # plan, the transaction, a signal - one that was running is started again
+    # on the way out (and a fresh population's settings are put back first).
+    (( was_running )) && _restart_arm
     (( R_FRESH )) && _fresh_population "$roster"
 
     header "Stop, so the database can be written"
     _stop
     _roster_state "$d/state.json"
     header "Plan"
-    # A plan that cannot be made changes nothing - but the server is stopped
-    # by now, so it is started again before giving up.
-    if ! _roster_plan "$roster" "$d"; then
-        if (( was_running )); then _start; fi
-        error_exit "Nothing was changed."
-    fi
+    _roster_plan "$roster" "$d" || error_exit "Nothing was changed."
 
     if [[ ! -s "$d/plan.sql" && ! -s "$d/plan.conf" && ! -s "$d/plan.cards" ]]; then
         success "The server already matches the roster."
@@ -200,9 +227,8 @@ _roster_cmd_apply() {
         if [[ -s "$d/plan.sql" ]]; then
             # The plan names tables, not databases. A failed statement ends
             # the session, and MariaDB rolls the transaction back: nothing is
-            # half-written - and the server is started again before stopping.
+            # half-written - and the exit hook starts the server again.
             if ! { printf 'USE `%s`;\n' "$DB_CHARACTERS"; cat -- "$d/plan.sql"; } | _db_raw; then
-                if (( was_running )); then _start; fi
                 error_exit "The database refused the plan; nothing was written."
             fi
             success "Database written ($(grep -cvE '^(START TRANSACTION|COMMIT);$' "$d/plan.sql") statements, one transaction)."
@@ -214,6 +240,7 @@ _roster_cmd_apply() {
 
     if (( was_running || R_FRESH )) || [[ -s "$d/plan.sql" || -s "$d/plan.conf" || -s "$d/plan.cards" ]]; then
         header "Start"
+        _restart_disarm
         _start
     fi
     if [[ -s "$d/plan.upgrade" ]]; then

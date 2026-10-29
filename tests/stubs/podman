@@ -11,6 +11,12 @@
 #   $STUB_SCHEMAS  the databases a query on information_schema.SCHEMATA sees
 #   $STUB_DUMP_FAIL  mariadb-dump fails: 1 at once, 'partial' after some
 #                  output, 'empty' succeeds with no output
+#   $STUB_SQL_FAIL   SQL matching this regex fails, as the database would
+#   $STUB_DB_NEEDS   SQL fails while this container is not running: a database
+#                  step that breaks once the world server is stopped
+# A container's {{.State.StartedAt}} is a counter in $STUB_STATE/started,
+# moved on by every start of a stopped container (and by whatever a test does
+# to stand in for a restart policy).
 # Every other container or volume is missing. 'exec' answers any other SQL
 # with $STUB_SQL_REPLY; its input is appended to $STUB_SQL_IN.
 echo "podman $*" >> "${STUB_LOG:-/dev/null}"
@@ -28,6 +34,7 @@ case "$1" in
         case "$*" in
             *'{{.State.Running}}'*) if running "$name"; then echo true; else echo false; fi ;;
             *'{{.State.Status}}'*) if running "$name"; then echo running; else echo exited; fi ;;
+            *'{{.State.StartedAt}}'*) cat "$S/started/$name" 2>/dev/null || echo 0 ;;
         esac ;;
     exec)
         shift; while [[ "$1" == -* ]]; do shift; done; name="$1"
@@ -47,6 +54,9 @@ case "$1" in
             esac
         else
             sql="$(cat)"; printf '%s\n' "$sql" >> "${STUB_SQL_IN:-/dev/null}"
+            if [[ -n "${STUB_SQL_FAIL:-}" && "$sql" =~ $STUB_SQL_FAIL ]] || { [[ -n "${STUB_DB_NEEDS:-}" ]] && ! running "$STUB_DB_NEEDS"; }; then
+                echo "ERROR 1064 (42000): the stub refuses this" >&2; exit 1
+            fi
             if [[ "$sql" == *SCHEMATA* && -n "${STUB_SCHEMAS+set}" ]]; then
                 if [[ "$sql" =~ COUNT.*SCHEMA_NAME=\'([^\']*)\' ]]; then
                     if listed "$STUB_SCHEMAS" "${BASH_REMATCH[1]}"; then echo 1; else echo 0; fi
@@ -70,7 +80,12 @@ case "$1" in
         [[ " $* " == *" -d "* ]] || exit 1
         name=""; prev=""; for a in "$@"; do [[ "$prev" == --name ]] && name="$a"; prev="$a"; done
         mark exists "$name"; mark running "$name" ;;
-    start) mark running "${*: -1}" ;;
+    start)
+        name="${*: -1}"
+        if ! running "$name" && [[ -n "$S" ]]; then
+            mkdir -p "$S/started"; echo $(( $(cat "$S/started/$name" 2>/dev/null || echo 0) + 1 )) > "$S/started/$name"
+        fi
+        mark running "$name" ;;
     stop) [[ -z "$S" ]] || rm -f -- "$S/running/${*: -1}" ;;
     logs) echo "${STUB_LOG_LINE:-}" ;;
     *) exit 1 ;;

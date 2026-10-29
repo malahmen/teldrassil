@@ -107,6 +107,23 @@ _stop() {
     success "World server stopped."
 }
 
+# A command that stops a running world server to write the database arms
+# this first, and disarms it when it starts the server itself: whatever ends
+# the command before then - an error, a signal - the server is started again
+# on the way out, and the realm is left as it was found.
+RESTART_ON_EXIT=0; RESTART_HOOKED=0
+_restart_arm() {
+    (( RESTART_HOOKED )) || { _at_exit _restart_on_exit; RESTART_HOOKED=1; }
+    RESTART_ON_EXIT=1
+}
+_restart_disarm() { RESTART_ON_EXIT=0; }
+_restart_on_exit() {
+    (( RESTART_ON_EXIT )) || return 0
+    _server_running && return 0
+    warn "The world server was running before this command stopped it: starting it again."
+    _start
+}
+
 # restart [--graceful [SECS]]: by default stop and start here. --graceful asks
 # mangosd itself (players warned, world saved, default 60 s), then starts it
 # again when it has exited.

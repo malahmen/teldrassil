@@ -147,16 +147,29 @@ cmd_restore() {
 }
 
 # -----------------------------------------------------------------------------
-# restart --graceful: mangosd warns players, saves and exits after SECS. A
-# container then stops (no restart policy here) and this starts it again; a
-# Deployment's pod restarts the container itself, and this waits for it.
+# restart --graceful: mangosd warns players, saves and exits after SECS.
+#
+# A container made by 'create' has --restart on-failure: when mangosd exits
+# with a failure code (cmangos' restart code is not 0), podman starts it again
+# itself; on a clean exit it stays stopped. Which one happens is not assumed:
+# the container's StartedAt tells a restart podman made from one this has to
+# make, so a restart that worked is reported as one, and this never races
+# podman's. A Deployment's pod restarts the container itself; this waits for it.
 # -----------------------------------------------------------------------------
 
+# How long an exited world server gets for its restart policy to start it
+# again before this starts it.
+RESTART_GRACE=10
+
+_server_started_at() { _on_host "$PODMAN" container inspect -f '{{.State.StartedAt}}' "$SERVER_CONTAINER" 2>/dev/null || true; }
+
 _restart_graceful() {
-    local secs="$1" deadline since restarts=0
+    local secs="$1" deadline since restarts=0 started="" now=""
     [[ "$secs" =~ ^[0-9]+$ ]] || error_exit "--graceful takes seconds (got '${secs}')."
     _server_running || error_exit "The world server is not running."
     _is_kube && restarts="$(_kube_restarts)"
+    _is_kube || started="$(_server_started_at)"
+    since="$(date +%s)"
     _ra --quiet "server restart ${secs}" >/dev/null
     info "Restart announced: players are warned, the world saves, and mangosd exits in ${secs}s."
     deadline=$((SECONDS + secs + STOP_TIMEOUT))
@@ -168,11 +181,37 @@ _restart_graceful() {
         _wait_world 0 "$((restarts + 1))"
         return
     fi
-    while _server_running; do
+    while :; do
+        if _server_running; then
+            now="$(_server_started_at)"
+            if [[ -n "$now" && "$now" != "$started" ]]; then
+                info "mangosd exited and its container's restart policy started it again."
+                break
+            fi
+        else
+            info "mangosd exited."
+            _restart_after_exit "$started"
+            break
+        fi
         (( SECONDS < deadline )) || error_exit "The world server did not exit within $((secs + STOP_TIMEOUT))s."
         sleep 3
     done
-    since="$(date +%s)"
-    _server_start_raw
     _wait_world "$since"
+}
+
+# _restart_after_exit <started-at> — the container stopped: give its restart
+# policy RESTART_GRACE seconds to start it, then start it here. A start of a
+# container that is running already changes nothing, so a late policy restart
+# and this one cannot both happen.
+_restart_after_exit() {
+    local grace=$((SECONDS + RESTART_GRACE)) now
+    while (( SECONDS < grace )); do
+        sleep 2
+        if _server_running; then
+            now="$(_server_started_at)"
+            [[ "$now" == "$1" ]] || { info "Its container's restart policy started it again."; return 0; }
+        fi
+    done
+    info "Starting it again."
+    _server_start_raw
 }
