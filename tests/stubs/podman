@@ -12,12 +12,20 @@
 #   $STUB_SCHEMAS  the databases a query on information_schema.SCHEMATA sees
 #   $STUB_DUMP_FAIL  mariadb-dump fails: 1 at once, 'partial' after some
 #                  output, 'empty' succeeds with no output
+#   $STUB_SQL_MAP    a file of 'regex<TAB>reply' lines: SQL matching a regex
+#                  gets that reply (the first that matches; read at each call,
+#                  so a test can change the answers while a command runs)
 #   $STUB_SQL_FAIL   SQL matching this regex fails, as the database would
 #   $STUB_DB_NEEDS   SQL fails while this container is not running: a database
 #                  step that breaks once the world server is stopped
 # A container's {{.State.StartedAt}} is a counter in $STUB_STATE/started,
 # moved on by every start of a stopped container (and by whatever a test does
 # to stand in for a restart policy).
+# 'docker info' prints its SecurityOptions: $STUB_SECURITY (rootful docker's
+# by default; one with name=rootless is rootless docker; 'fail': docker cannot
+# answer - podman's docker shim, a daemon that is down). podman's 'info' has
+# no such field, and fails - unless $STUB_PODMAN_INFO gives it an answer.
+# 'create --name X' makes a stopped container.
 # Every other container or volume is missing. 'exec' answers any other SQL
 # with $STUB_SQL_REPLY; its input is appended to $STUB_SQL_IN.
 me="$(basename "$0")"
@@ -59,7 +67,14 @@ case "$1" in
             if [[ -n "${STUB_SQL_FAIL:-}" && "$sql" =~ $STUB_SQL_FAIL ]] || { [[ -n "${STUB_DB_NEEDS:-}" ]] && ! running "$STUB_DB_NEEDS"; }; then
                 echo "ERROR 1064 (42000): the stub refuses this" >&2; exit 1
             fi
-            if [[ "$sql" == *SCHEMATA* && -n "${STUB_SCHEMAS+set}" ]]; then
+            mapped=""
+            if [[ -n "${STUB_SQL_MAP:-}" && -r "$STUB_SQL_MAP" ]]; then
+                while IFS=$'\t' read -r re reply; do
+                    [[ -n "$re" && "$sql" =~ $re ]] && { mapped=1; printf '%s\n' "$reply"; break; }
+                done < "$STUB_SQL_MAP"
+            fi
+            if [[ -n "$mapped" ]]; then :
+            elif [[ "$sql" == *SCHEMATA* && -n "${STUB_SCHEMAS+set}" ]]; then
                 if [[ "$sql" =~ COUNT.*SCHEMA_NAME=\'([^\']*)\' ]]; then
                     if listed "$STUB_SCHEMAS" "${BASH_REMATCH[1]}"; then echo 1; else echo 0; fi
                 else
@@ -90,6 +105,16 @@ case "$1" in
         [[ " $* " == *" -d "* ]] || exit 1
         name=""; prev=""; for a in "$@"; do [[ "$prev" == --name ]] && name="$a"; prev="$a"; done
         mark exists "$name"; mark running "$name" ;;
+    info)
+        if [[ "$me" == podman ]]; then
+            [[ -n "${STUB_PODMAN_INFO:-}" ]] || { echo "Error: template: info: can't evaluate field SecurityOptions" >&2; exit 125; }
+            echo "$STUB_PODMAN_INFO"; exit 0
+        fi
+        [[ "${STUB_SECURITY:-}" != fail ]] || { echo "Error: template: info: can't evaluate field SecurityOptions" >&2; exit 125; }
+        echo "${STUB_SECURITY-[name=apparmor name=seccomp,profile=builtin name=cgroupns]}" ;;
+    create)
+        name=""; prev=""; for a in "$@"; do [[ "$prev" == --name ]] && name="$a"; prev="$a"; done
+        mark exists "$name" ;;
     start)
         name="${*: -1}"
         if ! running "$name" && [[ -n "$S" ]]; then

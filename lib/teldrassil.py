@@ -139,8 +139,16 @@ SRP_N = int("894B645E89E1535BBDAD5B8B290650530801B18EBFBF5E8FAB3C82872A3E9BB7", 
 SRP_G = 7
 
 
+def bn_hex(n):
+    """A number as OpenSSL's BN_bn2hex writes it, which cmangos stores v and
+    s with: upper-case hex, whole bytes - leading zero bytes dropped, but a
+    leading zero nibble kept (0A..., never A...)."""
+    h = f"{n:X}"
+    return "0" + h if len(h) % 2 else h
+
+
 def srp6_verifier(user, password, salt=None):
-    """(v, s) as the realm stores them: upper-case hex, no padding.
+    """(v, s) as the realm stores them: hex as BN_bn2hex writes it.
 
     The byte order is cmangos': the salt is used little-endian, and the
     SHA-1 of salt + H(USER:PASS) is read back little-endian. Account names
@@ -154,7 +162,7 @@ def srp6_verifier(user, password, salt=None):
     digest = hashlib.sha1(f"{user}:{password}".encode()).digest()
     s_le = salt.to_bytes(32, "big")[::-1]
     x = int.from_bytes(hashlib.sha1(s_le + digest).digest(), "little")
-    return f"{pow(SRP_G, x, SRP_N):X}", f"{salt:X}"
+    return bn_hex(pow(SRP_G, x, SRP_N)), bn_hex(salt)
 
 
 # ----------------------------------------------------------------------------

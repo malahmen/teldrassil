@@ -138,7 +138,14 @@ lists every key with its default and what it is for. A typical setup:
 are plain names, since they go into SQL; a config file edited by hand gets the
 same checks before any command runs. `PODMAN` may be `docker`: teldrassil
 asks only what both answer (`image inspect`, `volume ls`; docker has no
-`image exists` or `volume exists`).
+`image exists` or `volume exists`). Under rootful docker, the containers that
+write into `WORK_DIR` - the build, the extractors, the database installer and
+the realm and world servers (their logs) - run as you (`--user UID:GID`, with
+`HOME=/tmp`), so what they write is yours and `build --clean` can remove it;
+under rootless docker (`docker info` lists `rootless`) and podman, a
+container's root already is you, and nothing is added. Files a rootful docker
+wrote before this need `sudo chown -R "$(id -u):$(id -g)" WORK_DIR` once, and
+the server containers `create --force` (stopped first) to run as you.
 
 **Secrets never reach a command line.** SQL goes to the database container on
 stdin, and the database password is read *inside* that container from
@@ -262,7 +269,14 @@ again on the way out. `--fresh-population` turns guild deletion on and random
 guilds off for its one start; if that start does not get through (it fails,
 an error, a signal), both settings go back to what they were and the pending
 "delete every random bot" request is withdrawn, so no later start deletes
-anything. The roster's population counts stay.
+anything. The roster's population counts stay. If the world server was
+stopped before the command and the fresh population had already started it,
+it is stopped again (saved, then stopped) once the deletion is over - the
+request gone from `ai_playerbot_random_bots` and the count of bot characters
+no longer falling - waiting up to `FRESH_STOP_WAIT` (120 s). A deletion that
+takes longer is not cut short: the server is left running, and teldrassil
+says so and how to stop it (`stop`, a few minutes later). A server that was
+running before is left running.
 
 ## Things to know about playerbots
 

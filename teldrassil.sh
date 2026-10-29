@@ -135,7 +135,11 @@ Roster (one JSON file: shaped bots, guilds, ranks, tabards, cards, LLM, populati
                                 again (attune apply too).
                                 --fresh-population first replaces EVERY random
                                 bot (and every guild a bot leads) with a new
-                                population at the roster's counts.
+                                population at the roster's counts. Interrupted
+                                after starting a server that was stopped, it
+                                stops it again once the deletion is over (up to
+                                FRESH_STOP_WAIT s), or leaves it running and
+                                says so.
                                 A roster guild takes over an existing guild only
                                 if all of it is bots of its faction; once applied
                                 it is bound to that guild's id

@@ -3,7 +3,8 @@
 # graceful restart reports a restart that worked, whoever made it; attune and
 # roster apply start a server they stopped again, whatever fails after the
 # stop; a fresh population that does not finish puts aiplayerbot.conf's guild
-# settings back. podman is stubbed (tests/stubs/podman) and the remote console
+# settings back, and stops a server it started once its deletion is over.
+# podman is stubbed (tests/stubs/podman) and the remote console
 # is tests/fake_ra.py, on a free port of 127.0.0.1.
 # shellcheck disable=SC2034  # out/rc are read by the assertions chk evaluates
 set -uo pipefail
@@ -31,6 +32,7 @@ run set RA_PORT "$(cat "$T/ra.port")"
 run set RA_PASS_FILE "$T/console.txt"
 run set STOP_TIMEOUT 6
 run set START_TIMEOUT 20
+run set FRESH_STOP_WAIT 4
 
 S="$T/state"
 W=teldrassil-mangosd
@@ -135,6 +137,73 @@ chk "it is waiting for the new bots, with deletion on" 'grep -qx "AiPlayerbot.De
 kill -TERM "$pid"; wait "$pid"; rc=$?
 chk "a signal ends it"                            '[[ $rc -ne 0 ]] && grep -q "Interrupted" "$T/fresh.out"'
 chk "  and the guild settings are put back"       'grep -qx "AiPlayerbot.DeleteRandomBotGuilds = 0" "$T/aiplayerbot.conf" && grep -qx "AiPlayerbot.RandomBotGuildCount = 7" "$T/aiplayerbot.conf"'
+
+# An interrupted fresh population that started a server stopped before the
+# command (Kamino 226): it is stopped again once the deletion is over - the
+# 'bot_delete' request gone and the bot count no longer falling - or, if the
+# deletion outlasts FRESH_STOP_WAIT, left running with how to stop it. (A
+# signal lands once the 5 s poll's sleep ends, hence the 8 s below.) One
+# that was running before is left running, as it was found. The database's
+# answers come from $T/sqlmap; the bot count stays 3 of the 10 asked for, so
+# the run waits for the new bots until it is interrupted.
+# sqlmap <pending> [bots] — written whole, then moved into place: the stub
+# never reads half a file.
+sqlmap() { printf "COUNT.*event='bot_delete'\t%s\nCOUNT.*JOIN\t%s\n" "$1" "${2:-3}" > "$T/sqlmap.new"; mv -f "$T/sqlmap.new" "$T/sqlmap"; }
+# fresh_interrupted [script] — start one, kill it once it waits for the bots,
+# and run [script] alongside what follows the kill: the database's answers
+# changing as playerbots works. Sets out, rc, took and after (what podman was
+# asked after the kill).
+fresh_interrupted() {
+    printf 'AiPlayerbot.RandomBotGuildCount = 7\nAiPlayerbot.DeleteRandomBotGuilds = 0\n' > "$T/aiplayerbot.conf"
+    export STUB_SQL_REPLY=0 STUB_SQL_MAP="$T/sqlmap"; : > "$T/ra.log"
+    "$ENG" roster apply --file "$T/fresh.json" --fresh-population --yes > "$T/fresh.out" 2>&1 &
+    local pid=$! n t0 later=""
+    for _ in $(seq 1 40); do grep -q "Waiting for 10 bot characters" "$T/fresh.out" && break; sleep 0.5; done
+    n="$(wc -l < "$T/podman.log")"; t0=$SECONDS
+    if [[ -n "${1:-}" ]]; then ( eval "$1" ) & later=$!; fi
+    kill -TERM "$pid"; wait "$pid"; rc=$?
+    took=$((SECONDS - t0)); out="$(cat "$T/fresh.out")"
+    after="$(tail -n +"$((n + 1))" "$T/podman.log")"
+    [[ -z "$later" ]] || wait "$later"
+}
+stopped_after() { grep -qE "^podman stop .*$W\$" <<<"$after" && [[ ! -e "$S/running/$W" ]]; }
+
+hdr "--fresh-population interrupted, the server stopped before: the deletion finishes"
+run set FRESH_STOP_WAIT 20
+scenario stopped; sqlmap 1
+fresh_interrupted 'sleep 8; sqlmap 0'
+chk "it waits for the deletion"                   '[[ $rc -ne 0 && "$out" == *"waiting up to 20s for the random-bot deletion"* ]] && (( took >= 8 ))'
+chk "  then stops the server, saved first"        'stopped_after && [[ "$out" == *"deletion is over"* ]] && grep -qx saveall "$T/ra.log"'
+chk "  and the guild settings are back"           'grep -qx "AiPlayerbot.DeleteRandomBotGuilds = 0" "$T/aiplayerbot.conf" && grep -qx "AiPlayerbot.RandomBotGuildCount = 7" "$T/aiplayerbot.conf"'
+chk "  not left-running"                          '[[ "$out" != *"still RUNNING"* ]]'
+
+hdr "--fresh-population interrupted, the server stopped before: the deletion outlasts FRESH_STOP_WAIT"
+run set FRESH_STOP_WAIT 8
+scenario stopped; sqlmap 1
+fresh_interrupted
+chk "the server is left running"                  '[[ $rc -ne 0 && -e "$S/running/$W" ]] && ! grep -q "^podman stop" <<<"$after"'
+chk "  after the wait"                            '(( took >= 8 ))'
+chk "  and it says so, and how to stop it"        '[[ "$out" == *"still RUNNING"* && "$out" == *"after 8s"* && "$out" == *"teldrassil.sh stop"* ]]'
+chk "  the deletion request is withdrawn"         '[[ "$(grep "bot_delete" "$T/sql.in" | tail -1)" == "DELETE FROM"*"event='"'"'bot_delete'"'"';" ]]'
+
+hdr "--fresh-population interrupted: the request is gone, but the bots are still being deleted"
+run set FRESH_STOP_WAIT 6
+scenario stopped; sqlmap 1
+fresh_interrupted 'for i in $(seq 1 12); do sqlmap 0 $((100 - i)); sleep 1; done'
+chk "a falling bot count is a deletion not over: left running" '[[ $rc -ne 0 && -e "$S/running/$W" && "$out" == *"still RUNNING"* ]] && ! grep -q "^podman stop" <<<"$after"'
+
+hdr "--fresh-population interrupted, the server running before: it stays running"
+scenario running; sqlmap 0
+fresh_interrupted
+chk "it is not stopped, nor waited on"            '[[ $rc -ne 0 && -e "$S/running/$W" ]] && ! grep -q "^podman stop" <<<"$after" && [[ "$out" != *"waiting up to"* && "$out" != *"still RUNNING"* ]]'
+
+hdr "FRESH_STOP_WAIT is a number of seconds above 0"
+for v in 0 -1 abc 1.5; do
+    run set FRESH_STOP_WAIT "$v"
+    chk "  '$v' is refused"                       '[[ $rc -ne 0 && "$out" == *"FRESH_STOP_WAIT must be"* ]]'
+done
+run set FRESH_STOP_WAIT 1
+chk "  1 is taken"                                '[[ $rc -eq 0 ]]'
 
 printf '\npass=%d fail=%d\n' "$pass" "$fail"
 (( fail == 0 ))
