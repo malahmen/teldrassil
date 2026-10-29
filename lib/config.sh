@@ -54,6 +54,7 @@ CONFIG_KEYS=(
     "START_TIMEOUT=300|seconds to wait for the world server to come up"
     "STOP_TIMEOUT=120|seconds the world server gets to save and stop"
     "BOTS_TIMEOUT=600|seconds to wait for bots to log in"
+    "FRESH_STOP_WAIT=120|an interrupted --fresh-population that started a stopped server: seconds to wait for the bot deletion before stopping it again"
     "WORK_DIR=|where provisioning keeps sources, the build, client data, configs, logs and secrets (empty: ~/.local/share/teldrassil)"
     "SOURCE_DIR=|the source checkouts: mangos-classic/, playerbots/, classic-db/ (empty: WORK_DIR/src)"
     "CLIENT_DIR=|the 1.12.1 client, for 'extract' (holds Data/)"
@@ -85,6 +86,8 @@ _cfg_bad() {
             [[ "$2" == podman || "$2" == kube ]] || printf "SERVER_KIND is podman or kube (got '%s')." "$2" ;;
         RA_PORT|WORLD_PORT|REALM_PORT|START_TIMEOUT|STOP_TIMEOUT|BOTS_TIMEOUT|DB_TIMEOUT|DB_PORT|BUILD_JOBS|BOTS)
             [[ "$2" =~ ^[0-9]+$ ]] || printf "%s must be a number (got '%s')." "$1" "$2" ;;
+        FRESH_STOP_WAIT)
+            [[ "$2" =~ ^[1-9][0-9]*$ ]] || printf "%s must be a number of seconds above 0 (got '%s')." "$1" "$2" ;;
         DB_WORLD|DB_CHARACTERS|DB_REALMD|DB_LOGS)
             [[ "$2" =~ ^[A-Za-z0-9_]{1,64}$ ]] || printf "%s is a database name: letters, digits and underscores (got '%s')." "$1" "$2" ;;
         BOT_ACCOUNT_PREFIX)
@@ -167,7 +170,7 @@ _settings() {
     done
     # A config file edited by hand gets the checks 'set' makes.
     local bad
-    for key in SERVER_KIND RA_PORT WORLD_PORT REALM_PORT START_TIMEOUT STOP_TIMEOUT BOTS_TIMEOUT DB_TIMEOUT DB_PORT \
+    for key in SERVER_KIND RA_PORT WORLD_PORT REALM_PORT START_TIMEOUT STOP_TIMEOUT BOTS_TIMEOUT FRESH_STOP_WAIT DB_TIMEOUT DB_PORT \
                BUILD_JOBS BOTS DB_WORLD DB_CHARACTERS DB_REALMD DB_LOGS BOT_ACCOUNT_PREFIX; do
         bad="$(_cfg_bad "$key" "${!key}")"
         [[ -z "$bad" ]] || error_exit "${bad} Fix it with 'set ${key} VALUE'."

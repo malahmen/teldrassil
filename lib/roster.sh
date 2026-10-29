@@ -120,8 +120,11 @@ _replace() {
 # Guild deletion is on, and random guilds off, for that one start only: if it
 # does not get through it (the start fails, an error, a signal), the exit hook
 # puts both settings back and withdraws a deletion request still pending, so
-# no later start deletes anything.
-FRESH_PENDING=0; FRESH_GUILDS=""; FRESH_DELETE=""
+# no later start deletes anything. A server that was stopped before the
+# command and is running when it ends that way is stopped again, once the
+# deletion it started is over (FRESH_STOP_WAIT bounds the wait); one the
+# deletion outlasts is left running, and the user is told how to stop it.
+FRESH_PENDING=0; FRESH_GUILDS=""; FRESH_DELETE=""; FRESH_STARTED=0; FRESH_STOP_AFTER=0
 _fresh_population() {
     local roster="$1" d; d="$(tmp_dir)"
     local total; total="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get("population",{}).get("bots",""))' "$roster")"
@@ -139,6 +142,7 @@ _fresh_population() {
     _replace "$d/fresh.conf" "$BOT_CONF"
     printf '%s\n' "DELETE FROM ${DB_CHARACTERS}.ai_playerbot_random_bots WHERE event='bot_delete';" \
         "INSERT INTO ${DB_CHARACTERS}.ai_playerbot_random_bots (owner, bot, \`time\`, validIn, event, \`value\`) VALUES (0, 0, UNIX_TIMESTAMP(), 0, 'bot_delete', 2);" | _db_raw
+    FRESH_STARTED=1
     _start
     _wait_bot_characters "$total" || warn "Carrying on with the bots that were created."
     _stop
@@ -162,11 +166,43 @@ _fresh_conf_restore() {
 
 _fresh_on_exit() {
     (( FRESH_PENDING )) || return 0
+    local left=0
     warn "The fresh population did not finish: putting aiplayerbot.conf's guild settings back and withdrawing the deletion request."
     _fresh_conf_restore
     info "aiplayerbot.conf: DeleteRandomBotGuilds=${FRESH_DELETE:-0}, RandomBotGuildCount=${FRESH_GUILDS:-20} again."
+    if (( FRESH_STARTED && FRESH_STOP_AFTER )) && _server_running; then _fresh_settle_stop || left=1; fi
     printf '%s\n' "DELETE FROM ${DB_CHARACTERS}.ai_playerbot_random_bots WHERE event='bot_delete';" | _db_raw
     info "No 'delete every random bot' request is left for a later start."
+    (( left )) || return 0
+    warn "The world server is still RUNNING. It was stopped before this command, which started it to delete every random bot; the deletion had not finished after ${FRESH_STOP_WAIT}s, and stopping the server in the middle of it could leave the population half deleted. Until its next start it runs with guild deletion on and random guilds off (aiplayerbot.conf has the old settings back for that start). Give it a few minutes, then stop it: teldrassil.sh${PROFILE:+ --profile ${PROFILE}} stop  (FRESH_STOP_WAIT sets how long this waits.)"
+}
+
+# _fresh_settle_stop — the server this fresh population started, when it was
+# stopped before: wait, up to FRESH_STOP_WAIT, until playerbots' deletion is
+# over, then stop it as 'stop' does (saved, then stopped). Over means both:
+# the 'bot_delete' request is gone (playerbots removes it itself when it has
+# deleted the bots), and the count of characters on bot accounts did not fall
+# between two looks, FRESH_POLL seconds apart (a deletion still running
+# lowers it; new bots being made raise it). Anything that cannot be read is
+# "not over"; it looks at least twice, however short the wait. Fails, leaving
+# the server running, if the wait runs out (or the stop fails).
+FRESH_POLL=3
+_fresh_settle_stop() {
+    local deadline=$((SECONDS + FRESH_STOP_WAIT)) pending n prev="" looks=0
+    info "The world server was stopped before this command, and the fresh population started it: waiting up to ${FRESH_STOP_WAIT}s for the random-bot deletion to finish, then stopping it again."
+    while :; do
+        pending="$(_db_value "SELECT COUNT(*) FROM ${DB_CHARACTERS}.ai_playerbot_random_bots WHERE event='bot_delete';" 2>/dev/null || true)"
+        n="$(_db_value "SELECT COUNT(*) FROM ${DB_CHARACTERS}.characters c JOIN ${DB_REALMD}.account a ON a.id=c.account WHERE a.username LIKE '${BOT_ACCOUNT_PREFIX}%';" 2>/dev/null || true)"
+        if [[ "$pending" == 0 && "$n" =~ ^[0-9]+$ && "$prev" =~ ^[0-9]+$ ]] && (( n >= prev )); then
+            success "The random-bot deletion is over (${n} bot characters now)."
+            ( _stop ) && return 0
+            warn "Could not stop it."
+            return 1
+        fi
+        prev="$n"; looks=$((looks + 1))
+        (( looks < 2 || SECONDS + FRESH_POLL <= deadline )) || return 1
+        sleep "$FRESH_POLL"
+    done
 }
 
 # _wait_bot_characters <count> — until that many characters exist on bot
@@ -212,6 +248,7 @@ _roster_cmd_apply() {
     # plan, the transaction, a signal - one that was running is started again
     # on the way out (and a fresh population's settings are put back first).
     (( was_running )) && _restart_arm
+    (( was_running )) || FRESH_STOP_AFTER=1
     (( R_FRESH )) && _fresh_population "$roster"
 
     header "Stop, so the database can be written"

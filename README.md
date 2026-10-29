@@ -269,7 +269,14 @@ again on the way out. `--fresh-population` turns guild deletion on and random
 guilds off for its one start; if that start does not get through (it fails,
 an error, a signal), both settings go back to what they were and the pending
 "delete every random bot" request is withdrawn, so no later start deletes
-anything. The roster's population counts stay.
+anything. The roster's population counts stay. If the world server was
+stopped before the command and the fresh population had already started it,
+it is stopped again (saved, then stopped) once the deletion is over - the
+request gone from `ai_playerbot_random_bots` and the count of bot characters
+no longer falling - waiting up to `FRESH_STOP_WAIT` (120 s). A deletion that
+takes longer is not cut short: the server is left running, and teldrassil
+says so and how to stop it (`stop`, a few minutes later). A server that was
+running before is left running.
 
 ## Things to know about playerbots
 
