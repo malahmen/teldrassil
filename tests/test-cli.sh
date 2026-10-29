@@ -28,6 +28,20 @@ run set NOT_A_KEY x;         chk "unknown key refused"    '[[ $rc -ne 0 && "$out
 run set RA_PORT abc;         chk "a port must be a number" '[[ $rc -ne 0 ]]'
 chk "the config file is private" '[[ "$(stat -c %a "$T/config/teldrassil/teldrassil.conf")" == 600 ]]'
 run config;                  chk "config marks what is set" '[[ "$out" == *"* DB_CONTAINER"* ]]'
+CONF="$T/config/teldrassil/teldrassil.conf"
+run set DB_USER $'root\nDB_WORLD=x'
+chk "a value with a newline is refused"          '[[ $rc -ne 0 && "$out" == *"must not contain a newline"* ]] && ! grep -q "^DB_USER=" "$CONF"'
+run set DB_WORLD 'world`; DROP DATABASE x; -- '
+chk "a database name is a name"                  '[[ $rc -ne 0 && "$out" == *"DB_WORLD is a database name"* ]] && ! grep -q "^DB_WORLD=" "$CONF"'
+run set BOT_ACCOUNT_PREFIX "RND%"
+chk "so is the bot account prefix"               '[[ $rc -ne 0 && "$out" == *"BOT_ACCOUNT_PREFIX is 1-16 letters"* ]]'
+run set DB_CHARACTERS my_chars2;  chk "a plain database name is taken" '[[ $rc -eq 0 ]]'
+cp "$CONF" "$T/conf.saved"
+printf 'DB_REALMD="realmd`.account; DROP TABLE x; -- "\n' >> "$CONF"
+: > "$T/podman.log"
+run list-accounts
+chk "a config file edited by hand: refused before any SQL" '[[ $rc -ne 0 && "$out" == *"DB_REALMD is a database name"* && "$out" == *"set DB_REALMD"* && ! -s "$T/podman.log" ]]'
+cp "$T/conf.saved" "$CONF"; run set DB_CHARACTERS classiccharacters
 
 hdr "console refusals (never reach the server)"
 : > "$T/podman.log"
@@ -36,6 +50,11 @@ for c in "rndbot c Bob talents" "rndbot do Bob stats" ".rndbot c x y" "RNDBOT C 
     chk "refused: $c" '[[ $rc -ne 0 && "$out" == *"Refused"* ]]'
 done
 chk "nothing was sent anywhere" '[[ ! -s "$T/podman.log" ]]'
+for c in $'saveall\rrndbot c Bob talents' $'saveall\nrndbot do Bob stats' $'saveall\r\nsaveall'; do
+    run console "$c"
+    chk "refused: a line break in an argument ($(printf '%q' "$c"))" '[[ $rc -ne 0 && "$out" == *"one line"* ]]'
+done
+chk "nothing was sent anywhere"   '[[ ! -s "$T/podman.log" ]]'
 run console "rndbot upgrade Bob"
 chk "rndbot upgrade is not refused (stops at: server not running)" '[[ "$out" != *"Refused"* && "$out" == *"not running"* ]]'
 
@@ -46,6 +65,12 @@ run create-account --name Bob
 chk "no password given: refused"       '[[ $rc -ne 0 && "$out" == *"never taken as an argument"* ]]'
 run create-account --name "b!" --pass-stdin
 chk "bad account name"                 '[[ $rc -ne 0 && "$out" == *"3-16 letters"* ]]'
+for n in RNDBOT42 rndbotme Rndbot; do
+    out="$(printf 'abcdef\n' | "$ENG" create-account --name "$n" --pass-stdin 2>&1)"; rc=$?
+    chk "a name with BOT_ACCOUNT_PREFIX is refused ($n)" '[[ $rc -ne 0 && "$out" == *"starts with BOT_ACCOUNT_PREFIX"* ]]'
+done
+STUB_RUNNING=my-db run delete-account --name rndbot1 --yes
+chk "  and delete-account refuses one, in any case" '[[ $rc -ne 0 && "$out" == *"bot account"* ]]'
 run delete-account --name Bob
 chk "delete needs --yes"               '[[ $rc -ne 0 && "$out" == *"--yes"* ]]'
 run set-account-level --name Bob --level 9
@@ -77,6 +102,21 @@ run dump --db classiccharacters --tables "guild guild_rank" --no-gzip --out "$T/
 chk "dump --tables to a path, uncompressed"       '[[ $rc -eq 0 && -s "$T/t.sql" && "$out" == *"restore it with --db"* ]]'
 run dump --tables guild
 chk "--tables without --db refused"              '[[ $rc -ne 0 ]]'
+printf 'precious\n' > "$T/keep.sql"
+run dump --db classiccharacters --no-gzip --out "$T/keep.sql"
+chk "dump --out over an existing file: refused"  '[[ $rc -ne 0 && "$out" == *"--force replaces it"* && "$(cat "$T/keep.sql")" == precious ]]'
+run dump --db classiccharacters --no-gzip --out "$T/keep.sql" --force
+chk "  --force replaces it"                      '[[ $rc -eq 0 ]] && grep -q "CREATE TABLE t" "$T/keep.sql"'
+for how in partial 1 empty; do
+    mkdir -p "$T/d-$how"
+    STUB_DUMP_FAIL=$how run dump --all --out "$T/d-$how/all.sql.gz"
+    chk "a dump that fails ($how) leaves no file"  '[[ $rc -ne 0 && "$out" == *"nothing was written"* && -z "$(ls -A "$T/d-$how")" ]]'
+done
+STUB_DUMP_FAIL=partial run dump --db classiccharacters --no-gzip --out "$T/keep.sql" --force
+chk "  and --force over a good one keeps the good one" '[[ $rc -ne 0 ]] && grep -q "CREATE TABLE t" "$T/keep.sql"'
+n_before="$(ls "$T"/config/teldrassil/dumps | wc -l)"
+STUB_DUMP_FAIL=partial run dump --all
+chk "  in the dumps folder too"                  '[[ $rc -ne 0 && "$(ls "$T"/config/teldrassil/dumps | wc -l)" == "$n_before" ]]'
 run restore --file "$T/t.sql" --yes
 chk "a dump with no CREATE DATABASE needs --db (no silent exit)" '[[ $rc -ne 0 && "$out" == *"give --db"* ]]'
 : > "$T/sql.in"

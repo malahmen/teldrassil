@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # A stand-in for podman: no test may reach a real container. Each call is
-# logged to $STUB_LOG.
+# logged to $STUB_LOG. Called as docker (tests/stubs/docker links here), it
+# has no 'image exists' or 'volume exists', as docker has none.
 #   $STUB_RUNNING  containers that are running
 #   $STUB_STOPPED  containers that exist but are stopped (until 'start'): an
 #                  'exec' into one fails, as on a host after a reboot
@@ -19,7 +20,8 @@
 # to stand in for a restart policy).
 # Every other container or volume is missing. 'exec' answers any other SQL
 # with $STUB_SQL_REPLY; its input is appended to $STUB_SQL_IN.
-echo "podman $*" >> "${STUB_LOG:-/dev/null}"
+me="$(basename "$0")"
+echo "${me} $*" >> "${STUB_LOG:-/dev/null}"
 S="${STUB_STATE:-}"
 listed() { [[ " $1 " == *" $2 "* ]]; }
 mark() { [[ -n "$S" ]] && mkdir -p "$S/$1" && : > "$S/$1/$2"; return 0; }
@@ -67,11 +69,19 @@ case "$1" in
                 printf '%s\n' "${STUB_SQL_REPLY:-0}"
             fi
         fi ;;
-    image) [[ "${2:-}" == exists && -n "${STUB_IMAGE:-}" ]] ;;   # an image "exists" only when asked to
+    image)   # an image "exists" only when asked to
+        case "${2:-}" in
+            exists) [[ "$me" == podman && -n "${STUB_IMAGE:-}" ]] ;;
+            inspect) [[ -n "${STUB_IMAGE:-}" ]] ;;
+            *) exit 1 ;;
+        esac ;;
     volume)
         case "${2:-}" in
-            exists) listed "${STUB_VOLUMES:-}" "$3" || marked volume "$3" ;;
+            exists) [[ "$me" == podman ]] && { listed "${STUB_VOLUMES:-}" "$3" || marked volume "$3"; } ;;
+            ls) for v in ${STUB_VOLUMES:-}; do echo "$v"; done
+                [[ -z "$S" || ! -d "$S/volume" ]] || ls -1 "$S/volume" ;;
             create) mark volume "$3" ;;
+            rm) [[ -z "$S" ]] || rm -f -- "$S/volume/$3" ;;
             *) exit 1 ;;
         esac ;;
     run)
@@ -87,6 +97,7 @@ case "$1" in
         fi
         mark running "$name" ;;
     stop) [[ -z "$S" ]] || rm -f -- "$S/running/${*: -1}" ;;
+    rm) [[ -z "$S" ]] || rm -f -- "$S/running/${*: -1}" "$S/exists/${*: -1}" ;;
     logs) echo "${STUB_LOG_LINE:-}" ;;
     *) exit 1 ;;
 esac

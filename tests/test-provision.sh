@@ -103,6 +103,18 @@ for how in partial empty; do
     chk "  so does a dump that fails part-way or is empty ($how)" '[[ $rc -ne 0 && "$out" == *"nothing was replaced"* ]] && no_delete_all'
 done
 
+hdr "PODMAN=docker (docker has no 'image exists' or 'volume exists')"
+run set PODMAN docker
+scenario; export STUB_VOLUMES=teldrassil-db STUB_SCHEMAS="$ALL"
+run install --yes
+chk "the image is found: not rebuilt"            '[[ "$out" == *"present"* ]] && ! grep -q "^docker build" "$T/podman.log"'
+chk "the volume is found: a container on it, no DeleteAll" 'grep -q "^docker run -d --name teldrassil-db .*-v teldrassil-db:/var/lib/mysql" "$T/podman.log" && no_delete_all'
+chk "  and no 'exists' was asked"                '! grep -qE "^docker (image|volume) exists" "$T/podman.log"'
+scenario; mkdir -p "$T/state/volume"; : > "$T/state/volume/teldrassil-db"
+run remove --yes --database
+chk "remove --database removes the volume"       '[[ $rc -eq 0 ]] && grep -q "^docker volume rm teldrassil-db" "$T/podman.log" && [[ ! -e "$T/state/volume/teldrassil-db" ]]'
+run set PODMAN podman
+
 hdr "configure: the config files hold the database password, so are 0600"
 E="$W/install/etc"; mkdir -p "$E"
 printf '%s = x\n' DataDir LogsDir LoginDatabaseInfo WorldDatabaseInfo CharacterDatabaseInfo LogsDatabaseInfo \

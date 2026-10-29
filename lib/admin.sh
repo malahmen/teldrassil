@@ -78,16 +78,17 @@ cmd_apply_sql() {
 _db_dump() { _db_in mariadb-dump --single-transaction --routines --events "$@"; }
 
 cmd_dump() {
-    local all=0 db="" tables="" out="" gzip=1 stamp
+    local all=0 db="" tables="" out="" gzip=1 force=0 stamp
     while [[ $# -gt 0 ]]; do case "$1" in
         --all) all=1; shift ;;
         --db) _need_value "$@"; db="$2"; shift 2 ;;
         --tables) _need_value "$@"; tables="$2"; shift 2 ;;
         --out) _need_value "$@"; out="$2"; shift 2 ;;
         --no-gzip) gzip=0; shift ;;
+        --force) force=1; shift ;;
         *) error_exit "dump: unknown flag $1" ;;
     esac; done
-    (( all )) || [[ -n "$db" ]] || error_exit "Usage: dump --all | --db NAME [--tables \"a b c\"] [--out PATH] [--no-gzip]"
+    (( all )) || [[ -n "$db" ]] || error_exit "Usage: dump --all | --db NAME [--tables \"a b c\"] [--out PATH [--force]] [--no-gzip]"
     (( all )) && [[ -n "$db" ]] && error_exit "dump: --all or --db, not both."
     [[ -z "$tables" || -n "$db" ]] || error_exit "dump: --tables needs --db."
     _require_db
@@ -109,13 +110,26 @@ cmd_dump() {
         out="${DUMP_DIR}/${base}${suffix}-${stamp}.sql"
         if (( gzip )); then out+=".gz"; fi
     fi
+    [[ ! -e "$out" ]] || (( force )) || error_exit "${out} exists; --force replaces it."
+    # Written next to it under a temporary name and moved into place only
+    # once whole: a dump that fails leaves no file that looks like a backup.
+    DUMP_TMP="$(mktemp "$(dirname -- "$out")/.$(basename -- "$out").XXXXXX")" || error_exit "Cannot write in $(dirname -- "$out")."
+    _at_exit _dump_tmp_remove
     _save_world || true
-    (umask 077
-     if (( gzip )); then _db_dump "${args[@]}" | gzip -c > "$out"; else _db_dump "${args[@]}" > "$out"; fi)
+    if ! (umask 077
+          if (( gzip )); then _db_dump "${args[@]}" | gzip -c > "$DUMP_TMP"; else _db_dump "${args[@]}" > "$DUMP_TMP"; fi) \
+        || [[ -z "$(if (( gzip )); then gzip -dc -- "$DUMP_TMP" 2>/dev/null; else cat -- "$DUMP_TMP"; fi | head -c 1)" ]]; then
+        error_exit "The dump failed or was empty; nothing was written to ${out}."
+    fi
+    chmod 600 -- "$DUMP_TMP"
+    mv -f -- "$DUMP_TMP" "$out"; DUMP_TMP=""
     success "Dumped to ${out} ($(du -h -- "$out" | cut -f1))."
     [[ -n "$tables" ]] && info "A --tables dump carries no CREATE DATABASE: restore it with --db ${db}."
     return 0
 }
+
+DUMP_TMP=""
+_dump_tmp_remove() { [[ -z "$DUMP_TMP" ]] || rm -f -- "$DUMP_TMP"; }
 
 cmd_restore() {
     local file="" yes=0 db="" names

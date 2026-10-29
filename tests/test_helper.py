@@ -593,7 +593,6 @@ class ConfCommand(unittest.TestCase):
         self.assertEqual(text, "Ra.Enable = 1\n")
 
 
-
 class Guarantees(unittest.TestCase):
     """Kamino 192: guarantees no test held before."""
 
@@ -620,6 +619,36 @@ class Guarantees(unittest.TestCase):
         self.assertIn("rename Randomc (guid 12) to Grunt", "\n".join(lines))
         self.assertIn("Grunt: leaves guild id 8", "\n".join(lines))
         self.assertFalse(any("guid=11" in q for q in sql))
+
+    def test_a_roster_bot_leading_another_guild_is_not_moved_out(self):
+        # Leadra exists and leads a random guild; the roster puts her in its
+        # own. Moving her would leave that guild with no leader in it.
+        st = empty_state()
+        st["characters"][0]["name"] = "Leadra"
+        st["guilds"] = [guild(7, "Random Bots", 10)]
+        st["members"] = [member(7, 10, 0)]
+        with self.assertRaises(t.RosterError) as e:
+            t.plan(t.load_roster(roster()), st, now=1)
+        self.assertIn("Leadra: leads guild 'Random Bots' (id 7)", str(e.exception))
+        # Nor out of every guild, for a roster bot with none.
+        rost = {"bots": [{"name": "Leadra", "race": "undead", "class": "priest"}]}
+        with self.assertRaises(t.RosterError) as e:
+            t.plan(t.load_roster(rost), st, now=1)
+        self.assertIn("Leadra: leads guild 'Random Bots' (id 7)", str(e.exception))
+
+    def test_leading_the_roster_guild_it_moves_out_of_is_fine(self):
+        # A roster guild gets the roster's leader: its old leader, a roster
+        # bot of no guild, may leave it.
+        st = empty_state()
+        st["characters"][0]["name"] = "Leadra"
+        st["characters"].append(char(13, "Grunt", 2, 1))
+        st["guilds"] = [guild(7, "Test Guild", 13)]
+        st["members"] = [member(7, 13, 0), member(7, 10, 1)]
+        rost = roster()
+        rost["bots"][1].pop("guild"); rost["bots"][1].pop("rank"); rost["bots"][1].pop("farm")
+        lines, sql, _ = t.plan(t.load_roster(rost), st, now=1)
+        self.assertIn("UPDATE guild SET leaderguid=10", "\n".join(sql))
+        self.assertIn("Grunt: leaves guild id 7", "\n".join(lines))
 
     # SRP6: the accounts cmangos ships, from mangos-classic's sql/base/
     # realmd.sql at the pinned commit (MANGOS_REF ff53dfc): each password is
@@ -681,6 +710,23 @@ class Guarantees(unittest.TestCase):
             with open(p("attune.sql")) as f:
                 text = f.read()
             self.assertTrue(text.startswith("START TRANSACTION;\n") and text.endswith("\nCOMMIT;\n"))
+
+    def test_llm_values_are_one_line(self):
+        for k, v in (("pre_prompt", "Be nice.\nAiPlayerbot.LLMApiKey = stolen"),
+                     ("endpoint", "http://x/v1\rAiPlayerbot.X = 1"), ("model", "m\nx")):
+            with self.assertRaises(t.RosterError, msg=k) as e:
+                t.load_roster(roster(llm={k: v}))
+            self.assertIn(f"llm.{k}: one line only", str(e.exception))
+        with self.assertRaises(t.RosterError) as e:
+            t.load_roster(roster(llm={"endpoint": "ftp://x"}))
+        self.assertIn("llm.endpoint: a URL", str(e.exception))
+        t.load_roster(roster(llm={"endpoint": "https://x/v1/chat/completions", "pre_prompt": "One line."}))
+
+    def test_a_conf_setting_is_one_line(self):
+        with self.assertRaises(ValueError):
+            t.conf_set("A = 1\n", "A", "2\nB = 3")
+        with self.assertRaises(SystemExit):
+            ConfCommand().run_conf("A = 1\n", "--set", "A=2\nB=3")
 
 
 if __name__ == "__main__":

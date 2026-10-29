@@ -4,7 +4,7 @@
 # playerbots is its own checkout or a subfolder of a bigger repository
 # (kalimdor). In a subfolder, plain `git apply` skips every file outside it, so
 # the patch became empty and an unpatched tree read as "already applied".
-# Then _patch's own report.
+# Then _patch's own report, and 'source --update' over a patched tree.
 # shellcheck disable=SC2034  # out/rc and PATCH_DIR are read by the code chk evaluates
 set -uo pipefail
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -47,8 +47,8 @@ chk "after applying, the file really changed" 'grep -qx "line 2" "$T/kal/playerb
 chk "and it reads applied"                 '[[ "$(state "$T/kal/playerbots")" == applied ]]'
 chk "nothing outside the subfolder moved"  '[[ "$(cat "$T/kal/other/y")" == x ]]'
 
-# _patch, with the messages it prints kept.
-eval "$(sed -n -e '/^_patch() {/,/^}/p' "$SRC")"
+# _patch, _unpatch and _checkout_repo, with the messages they print kept.
+eval "$(sed -n -e '/^_patch() {/,/^}/p' -e '/^_unpatch() {/,/^}/p' -e '/^_checkout_repo() {/,/^}/p' "$SRC")"
 info() { echo "info: $*"; }; success() { echo "ok: $*"; }; warn() { echo "warn: $*"; }
 error_exit() { echo "error: $*"; exit 1; }
 mkdir -p "$T/patches/playerbots"; cp "$T/fix.patch" "$T/patches/playerbots/0001-fix.patch"
@@ -63,6 +63,7 @@ mk_origin() {   # mk_origin <dir> [committed] — with the patch committed, or n
         g -C "$1/playerbots" apply --directory=playerbots "$T/fix.patch"; g -C "$1" commit -qam "teldrassil's patches"
     fi
 }
+upstream_moves() { echo "$RANDOM" > "$1/classic-db/new.sql"; g -C "$1" add -A; g -C "$1" commit -qm more; }
 mk_origin "$T/kal-origin"
 g clone -q "$T/kal-origin" "$T/src"
 SRC_PB="$T/src/playerbots"
@@ -75,6 +76,25 @@ printf 'line one\nsomething else\n' > "$SRC_PB/playerbot/x.cpp"
 out="$( (_patch) 2>&1)"; rc=$?
 chk "a tree it does not fit: an error, not 'applied'" '[[ $rc -ne 0 && "$out" == *"does not apply"* && "$out" != *"applied."* ]]'
 g -C "$T/src" checkout -q -- .
+
+printf '\n== source --update over a patched tree (one repository)\n'
+_patch >/dev/null; upstream_moves "$T/kal-origin"
+out="$( (_checkout_repo "$T/src" "$T/kal-origin" main 1) 2>&1)"; rc=$?
+chk "the patches are not local changes: it moves"   '[[ $rc -eq 0 ]] && [[ "$(g -C "$T/src" rev-parse HEAD)" == "$(g -C "$T/kal-origin" rev-parse HEAD)" ]]'
+chk "  and the tree is clean (build patches it again)" '[[ -z "$(g -C "$T/src" status --porcelain)" ]]'
+_patch >/dev/null; echo "mine" > "$T/src/classic-db/local.txt"; upstream_moves "$T/kal-origin"
+out="$( (_checkout_repo "$T/src" "$T/kal-origin" main 1) 2>&1)"; rc=$?
+chk "a real local change: refused"                  '[[ $rc -ne 0 && "$out" == *"has local changes"* ]]'
+chk "  the change is kept, the patch back on"       '[[ -f "$T/src/classic-db/local.txt" ]] && grep -qx "line 2" "$SRC_PB/playerbot/x.cpp"'
+
+printf '\n== source --update where the repository commits the patches\n'
+rm -rf "$T/src"; mk_origin "$T/kal-origin" committed
+g clone -q "$T/kal-origin" "$T/src"
+out="$(_patch 2>&1)"
+chk "they read 'already applied'; the tree stays clean" '[[ "$out" == *"already applied"* && -z "$(g -C "$T/src" status --porcelain)" ]]'
+upstream_moves "$T/kal-origin"
+out="$( (_checkout_repo "$T/src" "$T/kal-origin" main 1) 2>&1)"; rc=$?
+chk "it moves, and the committed patch is not taken off" '[[ $rc -eq 0 && -z "$(g -C "$T/src" status --porcelain)" ]] && grep -qx "line 2" "$SRC_PB/playerbot/x.cpp"'
 
 printf '\npass=%d fail=%d\n' "$pass" "$fail"
 (( fail == 0 ))

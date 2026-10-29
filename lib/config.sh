@@ -22,7 +22,7 @@ PROFILE_FILE=""
 # server run by teldrassil itself; a prototype or another layout sets its own
 # names with 'set'.
 CONFIG_KEYS=(
-    "PODMAN=podman|the container runtime (podman or docker)"
+    "PODMAN=podman|the container runtime: podman, or docker"
     "SSH_HOST=|run the containers, kubectl and the console's connection on this ssh host (empty: here)"
     "SERVER_KIND=podman|how the servers run: podman (containers) or kube (Deployments, through kubectl)"
     "KUBE_NAMESPACE=|kube: the servers' namespace"
@@ -75,6 +75,23 @@ CONFIG_KEYS=(
     "CLASSICDB_REPO=https://github.com/cmangos/classic-db.git|classic-db's repository"
     "CLASSICDB_REF=2f5b31bc32e80f121d78656817fbc5d6c3b1e99c|the classic-db commit 'source' checks out"
 )
+
+# _cfg_bad <key> <value> — what is wrong with that value, or nothing. Database
+# names and the bot account prefix go into SQL (and InstallFullDB.config)
+# unquoted, so they are names, nothing more.
+_cfg_bad() {
+    case "$1" in
+        SERVER_KIND)
+            [[ "$2" == podman || "$2" == kube ]] || printf "SERVER_KIND is podman or kube (got '%s')." "$2" ;;
+        RA_PORT|WORLD_PORT|REALM_PORT|START_TIMEOUT|STOP_TIMEOUT|BOTS_TIMEOUT|DB_TIMEOUT|DB_PORT|BUILD_JOBS|BOTS)
+            [[ "$2" =~ ^[0-9]+$ ]] || printf "%s must be a number (got '%s')." "$1" "$2" ;;
+        DB_WORLD|DB_CHARACTERS|DB_REALMD|DB_LOGS)
+            [[ "$2" =~ ^[A-Za-z0-9_]{1,64}$ ]] || printf "%s is a database name: letters, digits and underscores (got '%s')." "$1" "$2" ;;
+        BOT_ACCOUNT_PREFIX)
+            [[ "$2" =~ ^[A-Za-z0-9]{1,16}$ ]] || printf "BOT_ACCOUNT_PREFIX is 1-16 letters or digits (got '%s')." "$2" ;;
+    esac
+    return 0
+}
 
 _cfg_default() {
     local entry
@@ -129,13 +146,9 @@ cmd_profiles() {
 cfg_set() {
     local key="$1" val="$2" tmp target; target="$(_cfg_target)"
     _cfg_known "$key" || error_exit "set: unknown key '${key}' (see 'config')."
-    [[ "$val" != *$'\n'* ]] || error_exit "set: ${key}: the value must not contain a newline."
-    case "$key" in
-        SERVER_KIND)
-            [[ "$val" == podman || "$val" == kube ]] || error_exit "set: SERVER_KIND is podman or kube (got '${val}')." ;;
-        RA_PORT|WORLD_PORT|REALM_PORT|START_TIMEOUT|STOP_TIMEOUT|BOTS_TIMEOUT|DB_TIMEOUT|DB_PORT|BUILD_JOBS|BOTS)
-            [[ "$val" =~ ^[0-9]+$ ]] || error_exit "set: ${key} must be a number (got '${val}')." ;;
-    esac
+    [[ "$val" != *[$'\r\n']* ]] || error_exit "set: ${key}: the value must not contain a newline."
+    local bad; bad="$(_cfg_bad "$key" "$val")"
+    [[ -z "$bad" ]] || error_exit "set: ${bad}"
     _mkdir_private "$CONFIG_DIR"
     _mkdir_private "$(dirname "$target")"
     tmp="$(mktemp "$(dirname "$target")/.conf.XXXXXX")"
@@ -151,6 +164,13 @@ _settings() {
     for entry in "${CONFIG_KEYS[@]}"; do
         key="${entry%%=*}"
         printf -v "$key" '%s' "$(cfg_get "$key")"
+    done
+    # A config file edited by hand gets the checks 'set' makes.
+    local bad
+    for key in SERVER_KIND RA_PORT WORLD_PORT REALM_PORT START_TIMEOUT STOP_TIMEOUT BOTS_TIMEOUT DB_TIMEOUT DB_PORT \
+               BUILD_JOBS BOTS DB_WORLD DB_CHARACTERS DB_REALMD DB_LOGS BOT_ACCOUNT_PREFIX; do
+        bad="$(_cfg_bad "$key" "${!key}")"
+        [[ -z "$bad" ]] || error_exit "${bad} Fix it with 'set ${key} VALUE'."
     done
     WORK_DIR="${WORK_DIR/#\~/$HOME}"; SOURCE_DIR="${SOURCE_DIR/#\~/$HOME}"; CLIENT_DIR="${CLIENT_DIR/#\~/$HOME}"
     [[ -n "$WORK_DIR" ]] || WORK_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/teldrassil"

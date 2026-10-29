@@ -61,8 +61,19 @@ _run_tools() {
     fi
 }
 
+# Whether an image or a volume exists, asked the way podman and docker both
+# answer: docker has no 'image exists' or 'volume exists' (they fail there, so
+# every install rebuilt the image and 'remove --database' kept the volume). A
+# volume list that cannot be had is an error, never "no volume".
+_image_exists() { "$PODMAN" image inspect "$1" >/dev/null 2>&1; }
+_volume_exists() {
+    local names
+    names="$("$PODMAN" volume ls -q)" || error_exit "Could not list ${PODMAN}'s volumes; nothing was changed."
+    grep -qxF -- "$1" <<<"$names"
+}
+
 _require_image() {
-    "$PODMAN" image exists "$BUILD_IMAGE" || error_exit "No image ${BUILD_IMAGE}: run 'build-image' first."
+    _image_exists "$BUILD_IMAGE" || error_exit "No image ${BUILD_IMAGE}: run 'build-image' first."
 }
 
 # -----------------------------------------------------------------------------
@@ -108,7 +119,17 @@ _checkout_repo() {
         return 0
     fi
     if (( ! update )); then info "Sources: ${dir} at $(git -C "$dir" rev-parse --short HEAD) ('source --update' fetches ${ref})."; return 0; fi
-    [[ -z "$(git -C "$dir" status --porcelain)" ]] || error_exit "${dir} has local changes; commit or remove them first."
+    # teldrassil's playerbots patches, applied by 'build', are not local
+    # changes: taken off first. Where the repository commits them itself the
+    # tree is clean and nothing is taken off. Anything else left is a local
+    # change: the patches go back on, and nothing moves.
+    if [[ -n "$(git -C "$dir" status --porcelain)" ]]; then
+        _unpatch "$SRC_PB"
+        if [[ -n "$(git -C "$dir" status --porcelain)" ]]; then
+            ( _patch ) >/dev/null 2>&1 || true
+            error_exit "${dir} has local changes; commit or remove them first."
+        fi
+    fi
     git -C "$dir" fetch -q origin "$ref" || error_exit "Could not fetch ${ref} from ${repo}."
     git -C "$dir" checkout -q --detach FETCH_HEAD
     success "Sources: ${repo} at $(git -C "$dir" rev-parse --short HEAD)."
@@ -261,7 +282,7 @@ cmd_extract() {
 _db_container_up() {
     local root; root="$(_secret root.pw)"
     if ! _container_exists "$DB_CONTAINER"; then
-        if "$PODMAN" volume exists "$DB_VOLUME"; then
+        if _volume_exists "$DB_VOLUME"; then
             info "Creating the database container ${DB_CONTAINER} on the existing volume ${DB_VOLUME} (127.0.0.1:${DB_PORT})..."
         else
             info "Creating the database container ${DB_CONTAINER} (127.0.0.1:${DB_PORT}, volume ${DB_VOLUME})..."
@@ -289,7 +310,7 @@ _db_container_up() {
 _db_schemas() { printf '%s\n' "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA;" | _db_raw; }
 
 # _db_exists — is a database already here: its container, or its volume?
-_db_exists() { _container_exists "$DB_CONTAINER" || "$PODMAN" volume exists "$DB_VOLUME"; }
+_db_exists() { _container_exists "$DB_CONTAINER" || _volume_exists "$DB_VOLUME"; }
 
 # _db_present <schemas> — which of the four databases those schemas hold:
 # sets DB_HAVE and DB_MISSING.
@@ -509,7 +530,7 @@ cmd_install() {
     (( yes )) || error_exit "install builds and starts a whole server, and creates its databases: add --yes."
     _paths
     header "1/7 Sources";      cmd_source
-    header "2/7 Build image";  if "$PODMAN" image exists "$BUILD_IMAGE"; then info "${BUILD_IMAGE}: present."; else cmd_build_image; fi
+    header "2/7 Build image";  if _image_exists "$BUILD_IMAGE"; then info "${BUILD_IMAGE}: present."; else cmd_build_image; fi
     header "3/7 Build";        if [[ -x "${INSTALL}/bin/mangosd" ]]; then info "Already built (run 'build' to rebuild)."; else cmd_build; fi
     header "4/7 Client data";  if [[ -n "$client" ]]; then cmd_extract --client "$client"; else cmd_extract; fi
     header "5/7 Databases"
@@ -555,7 +576,7 @@ cmd_remove() {
     done
     if (( database )); then
         if _container_exists "$DB_CONTAINER"; then "$PODMAN" rm -f "$DB_CONTAINER" >/dev/null; success "${DB_CONTAINER} removed."; fi
-        if "$PODMAN" volume exists "$DB_VOLUME"; then "$PODMAN" volume rm "$DB_VOLUME" >/dev/null; success "Volume ${DB_VOLUME} (every account and character) removed."; fi
+        if _volume_exists "$DB_VOLUME"; then "$PODMAN" volume rm "$DB_VOLUME" >/dev/null; success "Volume ${DB_VOLUME} (every account and character) removed."; fi
     fi
     info "Files under ${WORK_DIR} are kept: sources, the build, client data, configs, secrets."
 }

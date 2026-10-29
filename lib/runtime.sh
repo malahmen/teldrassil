@@ -166,6 +166,9 @@ cmd_console() {
     [[ $# -gt 0 ]] || error_exit "Usage: console COMMAND [COMMAND...]   (each argument is one console command)"
     local c
     for c in "$@"; do
+        # The console reads a line break as the end of a command: one inside
+        # an argument would send a second command past the refusals below.
+        [[ "$c" != *[$'\r\n']* ]] || error_exit "Refused: a console command is one line (an argument held a line break). Give each command as its own argument."
         _console_refused "$c" && error_exit "Refused: '${c}'. A bot chat command from the console gets no answer and has crashed the world server. Send it in game, as the bot's master."
     done
     _server_running || error_exit "The world server is not running."

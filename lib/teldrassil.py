@@ -339,7 +339,18 @@ def load_roster(data):
         except (RosterError, KeyError, ValueError, TypeError) as e:
             errors.append(str(e) if isinstance(e, RosterError) else f"population: {e!r}")
     if "llm" in data:
-        out["llm"] = dict(data["llm"])
+        try:
+            llm = dict(data["llm"])
+            # Each value becomes one line of aiplayerbot.conf: a line break
+            # would start a setting of its own.
+            for k, v in llm.items():
+                if isinstance(v, str) and ("\n" in v or "\r" in v):
+                    raise RosterError(f"llm.{k}: one line only (a line break would write a setting of its own into aiplayerbot.conf)")
+            if "endpoint" in llm and not re.match(r"https?://\S+$", str(llm["endpoint"])):
+                raise RosterError("llm.endpoint: a URL, http://... or https://..., without spaces")
+            out["llm"] = llm
+        except (RosterError, ValueError, TypeError) as e:
+            errors.append(str(e) if isinstance(e, RosterError) else f"llm: {e!r}")
 
     if errors:
         raise RosterError("\n".join(errors))
@@ -382,6 +393,8 @@ def population_counts(roster, total):
 
 def conf_set(text, key, value):
     """Set 'key = value' in a mangos-style conf, uncommenting it if needed."""
+    if any(c in str(key) + str(value) for c in "\r\n"):
+        raise ValueError(f"{key}: a setting is one line")
     pat = re.compile(rf"^#?\s*{re.escape(key)}\s*=.*$", re.M)
     line = f"{key} = {value}"
     if pat.search(text):
@@ -624,6 +637,19 @@ def plan(roster, state, now=None, bindings=None, bound=None):
         bound_chars[b["name"]] = dict(c)
         lines.append(f"rename {c['name']} (guid {c['guid']}) to {b['name']}")
         sql.append(f"UPDATE characters SET name={sql_str(b['name'])} WHERE guid={c['guid']};")
+    # A roster bot the plan would move out of a guild it leads, where that
+    # guild is not the roster's (whose leader the plan sets): the guild would
+    # be left with a leader who is not in it. Refused; a new leader is the
+    # players' or playerbots' choice, not the roster's.
+    for b in roster["bots"]:
+        c = bound_chars.get(b["name"])
+        if c is None or (b["guild"] is None and c["guid"] not in member_of):
+            continue
+        for g in state["guilds"]:
+            if g["leader"] == c["guid"] and g["id"] not in roster_guild_ids:
+                errors.append(f"{b['name']}: leads guild '{g['name']}' (id {g['id']}), which the roster does not name; "
+                              "moving it would leave that guild without its leader - give the guild a new leader "
+                              "in game first, or leave the bot out of the roster")
     if errors:
         raise RosterError("\n".join(errors))
 
@@ -760,8 +786,6 @@ def plan(roster, state, now=None, bindings=None, bound=None):
     for b in roster["bots"]:
         g = bound_chars[b["name"]]["guid"]
         if b["guild"] is None and g in member_of:
-            if g in leaders:
-                raise RosterError(f"{b['name']}: leads a guild the roster does not name; give it a guild or a new leader")
             lines.append(f"{b['name']}: leaves guild id {member_of[g]['guild']}")
             sql.append(f"DELETE FROM guild_member WHERE guid={g};")
 
@@ -1184,12 +1208,16 @@ def cmd_conf(a):
         if not sep or not k.strip():
             raise SystemExit(f"--set wants KEY=VALUE, got '{kv}'")
         k, v = k.strip(), v.strip()
+        if any(c in k + v for c in "\r\n"):
+            raise SystemExit(f"--set {k}: a setting is one line")
         # @SECRET@ is replaced with --secret-file's content here, so a
         # password never travels on a command line; it is shown masked.
         shown[k] = v.replace("@SECRET@", "****")
         if "@SECRET@" in v:
             if secret is None:
                 raise SystemExit(f"{k}: @SECRET@ needs --secret-file")
+            if any(c in secret for c in "\r\n"):
+                raise SystemExit(f"{k}: the secret file holds more than one line")
             v = v.replace("@SECRET@", secret)
         if a.require and conf_get(text, k) is None and not re.search(rf"^#\s*{re.escape(k)}\s*=", text, re.M):
             raise SystemExit(f"{k} is not in {a.conf}: a renamed setting?")
