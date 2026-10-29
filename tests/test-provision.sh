@@ -131,5 +131,70 @@ chmod 644 "$W/etc/mangosd.conf"
 run configure --force
 chk "  and --force makes an open one private again" '[[ $rc -eq 0 && "$(stat -c %a "$W/etc/mangosd.conf")" == 600 ]]'
 
+hdr "rootful docker: the build image's containers run as the user (Kamino 225)"
+# Each container that writes into WORK_DIR: build, extract, the database
+# installer, the realm and world servers. Under rootful docker they run as the
+# user, so what they write is the user's; never under rootless docker or
+# podman, whose container root already is the user.
+# A playerbots tree the shipped patches apply to: each file holds what their
+# hunks expect to find (CRLF kept), so 'build' gets past _patch.
+python3 -I - "$W/src/playerbots" "${TEST_DIR}"/../templates/patches/playerbots/*.patch <<'PY'
+import os, sys
+root = sys.argv[1]
+for p in sys.argv[2:]:
+    cur, hunk = None, False
+    for line in open(p, newline=""):
+        if line.startswith("--- a/"):
+            cur = os.path.join(root, line[6:].strip()); os.makedirs(os.path.dirname(cur), exist_ok=True)
+            open(cur, "a").close(); hunk = False
+        elif line.startswith(("+++ ", "diff ")):
+            hunk = False
+        elif line.startswith("@@"):
+            hunk = True
+        elif hunk and line[:1] in (" ", "-"):
+            with open(cur, "a", newline="") as f:
+                f.write(line[1:])
+PY
+mkdir -p "$W/install/bin/tools" "$T/client/Data"; : > "$W/install/bin/tools/ExtractResources.sh"
+printf '#!/bin/sh\n' > "$W/install/bin/realmd"; chmod +x "$W/install/bin/realmd"
+ME="--user $(id -u):$(id -g) -e HOME=/tmp"
+# containers <rt> — every 'run --rm' and 'create' the commands below make.
+containers() {
+    scenario; export STUB_RUNNING=teldrassil-db STUB_SCHEMAS="$ALL"
+    run build;                       out_build="$out"
+    run extract --client "$T/client" --force
+    run db-init --yes
+    run create
+    grep -E "^$1 (run --rm|create) " "$T/podman.log" > "$T/containers"
+}
+# as_user <0|1> — each of the five carries the user (1), or none does (0).
+as_user() {
+    local w n; n=0
+    for w in ":/build:z" "ExtractResources.sh" "InstallFullDB.sh" "./realmd" "./mangosd"; do
+        grep -qF -- "$w" "$T/containers" || return 1
+        grep -F -- "$w" "$T/containers" | grep -qF -- "$ME" && n=$((n+1))
+    done
+    if (( $1 )); then (( n == 5 )); else (( n == 0 )) && ! grep -q -- "--user" "$T/containers"; fi
+}
+run set PODMAN docker
+unset STUB_SECURITY
+containers docker
+chk "rootful docker: build, extract, db install, realmd and mangosd run as $(id -u):$(id -g)" 'as_user 1'
+chk "  the build got past the patches to its container" '[[ "$out_build" == *"Patch 0001"* ]] && grep -qF ":/build:z" "$T/containers"'
+export STUB_SECURITY="[name=seccomp,profile=builtin name=rootless name=cgroupns]"
+containers docker
+chk "rootless docker: none of them gets --user"   'as_user 0'
+export STUB_SECURITY=fail
+containers docker
+chk "docker that cannot say (podman's docker shim): none gets --user" 'as_user 0'
+unset STUB_SECURITY
+run set PODMAN podman
+containers podman
+chk "podman: none of them gets --user"            'as_user 0'
+export STUB_PODMAN_INFO="[name=seccomp]"
+containers podman
+chk "  not even a podman whose 'info' answered as rootful docker would" 'as_user 0'
+unset STUB_PODMAN_INFO
+
 printf '\npass=%d fail=%d\n' "$pass" "$fail"
 (( fail == 0 ))

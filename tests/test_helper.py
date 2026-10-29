@@ -682,6 +682,25 @@ class Guarantees(unittest.TestCase):
         want = format(pow(7, x, t.SRP_N), "X")
         self.assertEqual(t.srp6_verifier("tester", "secret", int(salt.hex(), 16)), (want, salt.hex().upper()))
 
+    def test_srp6_keeps_a_leading_zero_nibble(self):
+        # cmangos writes v and s with BN_bn2hex: whole bytes, so a number
+        # whose top byte is 0x0A is written 0A..., not A... (Kamino 225).
+        # Salt bytes 0A..29; for TESTER/PASS6 the verifier's top byte is 04.
+        # The expected values are worked out here, apart from the helper.
+        import hashlib
+        salt = bytes(range(0x0A, 0x2A))
+        inner = hashlib.sha1(b"TESTER:PASS6").digest()
+        x = int.from_bytes(hashlib.sha1(salt[::-1] + inner).digest(), "little")
+        v = pow(7, x, t.SRP_N)
+        want_v = v.to_bytes((v.bit_length() + 7) // 8, "big").hex().upper()
+        self.assertEqual(want_v[0], "0")
+        got = t.srp6_verifier("tester", "pass6", int(salt.hex(), 16))
+        self.assertEqual(got, (want_v, salt.hex().upper()))
+        self.assertEqual(got[1][:2], "0A")
+        # Leading zero bytes are dropped, as BN_bn2hex drops them.
+        self.assertEqual(t.bn_hex(0x00ABCD), "ABCD")
+        self.assertEqual(t.bn_hex(0xABCDE), "0ABCDE")
+
     def run_main(self, *args):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):

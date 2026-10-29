@@ -138,7 +138,14 @@ lists every key with its default and what it is for. A typical setup:
 are plain names, since they go into SQL; a config file edited by hand gets the
 same checks before any command runs. `PODMAN` may be `docker`: teldrassil
 asks only what both answer (`image inspect`, `volume ls`; docker has no
-`image exists` or `volume exists`).
+`image exists` or `volume exists`). Under rootful docker, the containers that
+write into `WORK_DIR` - the build, the extractors, the database installer and
+the realm and world servers (their logs) - run as you (`--user UID:GID`, with
+`HOME=/tmp`), so what they write is yours and `build --clean` can remove it;
+under rootless docker (`docker info` lists `rootless`) and podman, a
+container's root already is you, and nothing is added. Files a rootful docker
+wrote before this need `sudo chown -R "$(id -u):$(id -g)" WORK_DIR` once, and
+the server containers `create --force` (stopped first) to run as you.
 
 **Secrets never reach a command line.** SQL goes to the database container on
 stdin, and the database password is read *inside* that container from

@@ -22,7 +22,7 @@ PROFILE_FILE=""
 # server run by teldrassil itself; a prototype or another layout sets its own
 # names with 'set'.
 CONFIG_KEYS=(
-    "PODMAN=podman|the container runtime: podman, or docker"
+    "PODMAN=podman|the container runtime: podman, or docker (rootful docker: the build image's containers run as you)"
     "SSH_HOST=|run the containers, kubectl and the console's connection on this ssh host (empty: here)"
     "SERVER_KIND=podman|how the servers run: podman (containers) or kube (Deployments, through kubectl)"
     "KUBE_NAMESPACE=|kube: the servers' namespace"

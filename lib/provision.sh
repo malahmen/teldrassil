@@ -50,12 +50,34 @@ _secret() {
 
 _log_tail() { tail -"${2:-15}" -- "$1" | sed 's/^/    /' >&2; }
 
+# Who the build image's containers run as. Under rootful docker a container's
+# root is the host's root, so whatever the build, the extractors, the database
+# installer or the servers write into WORK_DIR (the build tree, client data,
+# logs) would be root's, and the user could not clean it up ('build --clean').
+# There they run as the user instead: the image needs no root - every tool
+# writes only to the mounted folders, which are the user's, and HOME points at
+# /tmp. Rootless docker and podman map the container's root to the user, so
+# they need nothing (and docker's --user there would be another subuid).
+# Under podman's docker shim, 'docker info' has no SecurityOptions and fails:
+# nothing is added. Sets RUN_AS, once.
+RUN_AS=(); RUN_AS_SET=0
+_run_as() {
+    (( RUN_AS_SET )) && return 0
+    RUN_AS_SET=1; RUN_AS=()
+    [[ "$(basename -- "$PODMAN")" == docker ]] || return 0
+    local opts
+    opts="$("$PODMAN" info --format '{{.SecurityOptions}}' 2>/dev/null)" || return 0
+    [[ "$opts" == *rootless* ]] && return 0
+    RUN_AS=(--user "$(id -u):$(id -g)" -e HOME=/tmp)
+}
+
 # _run_tools <log> <podman run args...> -- <command> — a throwaway container
 # from the build image; output to the log, and its tail shown on failure.
 _run_tools() {
     local log="$1"; shift
     mkdir -p "$LOGS"
-    if ! "$PODMAN" run --rm "$@" > "$log" 2>&1 </dev/null; then
+    _run_as
+    if ! "$PODMAN" run --rm "${RUN_AS[@]}" "$@" > "$log" 2>&1 </dev/null; then
         _log_tail "$log"
         error_exit "Failed; the full log is ${log}."
     fi
@@ -503,13 +525,14 @@ cmd_create() {
             _container_running "$c" && error_exit "${c} is running: 'stop' first."
             "$PODMAN" rm "$c" >/dev/null
         fi
-        _server_mounts
-        # on-failure: a crash restarts it; a stop does not.
+        _server_mounts; _run_as
+        # on-failure: a crash restarts it; a stop does not. They write their
+        # logs to LOGS: under rootful docker, as the user (see _run_as).
         if [[ "$c" == "$REALM_CONTAINER" ]]; then
-            "$PODMAN" create --name "$c" --network host --restart on-failure "${SERVER_MOUNTS[@]}" -w /install/bin \
+            "$PODMAN" create --name "$c" --network host --restart on-failure "${RUN_AS[@]}" "${SERVER_MOUNTS[@]}" -w /install/bin \
                 "$BUILD_IMAGE" ./realmd -c /install/etc/realmd.conf >/dev/null
         else
-            "$PODMAN" create --name "$c" --network host --restart on-failure "${SERVER_MOUNTS[@]}" -w /install/bin \
+            "$PODMAN" create --name "$c" --network host --restart on-failure "${RUN_AS[@]}" "${SERVER_MOUNTS[@]}" -w /install/bin \
                 "$BUILD_IMAGE" ./mangosd -c /install/etc/mangosd.conf -a /install/etc/ahbot.conf >/dev/null
         fi
         success "${c} created."
