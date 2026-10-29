@@ -38,18 +38,19 @@ cmd_attune() {
         return 0
     fi
 
-    _server_running && was_running=1
+    # Whatever fails from here on - the state query, the plan, the grants, a
+    # signal - a server that was running is started again on the way out.
+    if _server_running; then was_running=1; _restart_arm; fi
     _stop
     _attune_plan
     if [[ -s "$d/attune.sql" ]]; then
         if ! { printf 'USE `%s`;\n' "$DB_CHARACTERS"; cat -- "$d/attune.sql"; } | _db_raw; then
-            if (( was_running )); then _start; fi
             error_exit "The database refused the grants; nothing was written."
         fi
         success "Granted ($(grep -c '^INSERT' "$d/attune.sql") attunement(s), one transaction)."
     else
         success "No bot is due an attunement."
     fi
-    (( was_running )) && _start
+    if (( was_running )); then _restart_disarm; _start; fi
     return 0
 }

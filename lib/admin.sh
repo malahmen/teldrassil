@@ -78,16 +78,17 @@ cmd_apply_sql() {
 _db_dump() { _db_in mariadb-dump --single-transaction --routines --events "$@"; }
 
 cmd_dump() {
-    local all=0 db="" tables="" out="" gzip=1 stamp
+    local all=0 db="" tables="" out="" gzip=1 force=0 stamp
     while [[ $# -gt 0 ]]; do case "$1" in
         --all) all=1; shift ;;
         --db) _need_value "$@"; db="$2"; shift 2 ;;
         --tables) _need_value "$@"; tables="$2"; shift 2 ;;
         --out) _need_value "$@"; out="$2"; shift 2 ;;
         --no-gzip) gzip=0; shift ;;
+        --force) force=1; shift ;;
         *) error_exit "dump: unknown flag $1" ;;
     esac; done
-    (( all )) || [[ -n "$db" ]] || error_exit "Usage: dump --all | --db NAME [--tables \"a b c\"] [--out PATH] [--no-gzip]"
+    (( all )) || [[ -n "$db" ]] || error_exit "Usage: dump --all | --db NAME [--tables \"a b c\"] [--out PATH [--force]] [--no-gzip]"
     (( all )) && [[ -n "$db" ]] && error_exit "dump: --all or --db, not both."
     [[ -z "$tables" || -n "$db" ]] || error_exit "dump: --tables needs --db."
     _require_db
@@ -109,13 +110,26 @@ cmd_dump() {
         out="${DUMP_DIR}/${base}${suffix}-${stamp}.sql"
         if (( gzip )); then out+=".gz"; fi
     fi
+    [[ ! -e "$out" ]] || (( force )) || error_exit "${out} exists; --force replaces it."
+    # Written next to it under a temporary name and moved into place only
+    # once whole: a dump that fails leaves no file that looks like a backup.
+    DUMP_TMP="$(mktemp "$(dirname -- "$out")/.$(basename -- "$out").XXXXXX")" || error_exit "Cannot write in $(dirname -- "$out")."
+    _at_exit _dump_tmp_remove
     _save_world || true
-    (umask 077
-     if (( gzip )); then _db_dump "${args[@]}" | gzip -c > "$out"; else _db_dump "${args[@]}" > "$out"; fi)
+    if ! (umask 077
+          if (( gzip )); then _db_dump "${args[@]}" | gzip -c > "$DUMP_TMP"; else _db_dump "${args[@]}" > "$DUMP_TMP"; fi) \
+        || [[ -z "$(if (( gzip )); then gzip -dc -- "$DUMP_TMP" 2>/dev/null; else cat -- "$DUMP_TMP"; fi | head -c 1)" ]]; then
+        error_exit "The dump failed or was empty; nothing was written to ${out}."
+    fi
+    chmod 600 -- "$DUMP_TMP"
+    mv -f -- "$DUMP_TMP" "$out"; DUMP_TMP=""
     success "Dumped to ${out} ($(du -h -- "$out" | cut -f1))."
     [[ -n "$tables" ]] && info "A --tables dump carries no CREATE DATABASE: restore it with --db ${db}."
     return 0
 }
+
+DUMP_TMP=""
+_dump_tmp_remove() { [[ -z "$DUMP_TMP" ]] || rm -f -- "$DUMP_TMP"; }
 
 cmd_restore() {
     local file="" yes=0 db="" names
@@ -147,16 +161,29 @@ cmd_restore() {
 }
 
 # -----------------------------------------------------------------------------
-# restart --graceful: mangosd warns players, saves and exits after SECS. A
-# container then stops (no restart policy here) and this starts it again; a
-# Deployment's pod restarts the container itself, and this waits for it.
+# restart --graceful: mangosd warns players, saves and exits after SECS.
+#
+# A container made by 'create' has --restart on-failure: when mangosd exits
+# with a failure code (cmangos' restart code is not 0), podman starts it again
+# itself; on a clean exit it stays stopped. Which one happens is not assumed:
+# the container's StartedAt tells a restart podman made from one this has to
+# make, so a restart that worked is reported as one, and this never races
+# podman's. A Deployment's pod restarts the container itself; this waits for it.
 # -----------------------------------------------------------------------------
 
+# How long an exited world server gets for its restart policy to start it
+# again before this starts it.
+RESTART_GRACE=10
+
+_server_started_at() { _on_host "$PODMAN" container inspect -f '{{.State.StartedAt}}' "$SERVER_CONTAINER" 2>/dev/null || true; }
+
 _restart_graceful() {
-    local secs="$1" deadline since restarts=0
+    local secs="$1" deadline since restarts=0 started="" now=""
     [[ "$secs" =~ ^[0-9]+$ ]] || error_exit "--graceful takes seconds (got '${secs}')."
     _server_running || error_exit "The world server is not running."
     _is_kube && restarts="$(_kube_restarts)"
+    _is_kube || started="$(_server_started_at)"
+    since="$(date +%s)"
     _ra --quiet "server restart ${secs}" >/dev/null
     info "Restart announced: players are warned, the world saves, and mangosd exits in ${secs}s."
     deadline=$((SECONDS + secs + STOP_TIMEOUT))
@@ -168,11 +195,37 @@ _restart_graceful() {
         _wait_world 0 "$((restarts + 1))"
         return
     fi
-    while _server_running; do
+    while :; do
+        if _server_running; then
+            now="$(_server_started_at)"
+            if [[ -n "$now" && "$now" != "$started" ]]; then
+                info "mangosd exited and its container's restart policy started it again."
+                break
+            fi
+        else
+            info "mangosd exited."
+            _restart_after_exit "$started"
+            break
+        fi
         (( SECONDS < deadline )) || error_exit "The world server did not exit within $((secs + STOP_TIMEOUT))s."
         sleep 3
     done
-    since="$(date +%s)"
-    _server_start_raw
     _wait_world "$since"
+}
+
+# _restart_after_exit <started-at> — the container stopped: give its restart
+# policy RESTART_GRACE seconds to start it, then start it here. A start of a
+# container that is running already changes nothing, so a late policy restart
+# and this one cannot both happen.
+_restart_after_exit() {
+    local grace=$((SECONDS + RESTART_GRACE)) now
+    while (( SECONDS < grace )); do
+        sleep 2
+        if _server_running; then
+            now="$(_server_started_at)"
+            [[ "$now" == "$1" ]] || { info "Its container's restart policy started it again."; return 0; }
+        fi
+    done
+    info "Starting it again."
+    _server_start_raw
 }

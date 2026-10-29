@@ -107,6 +107,23 @@ _stop() {
     success "World server stopped."
 }
 
+# A command that stops a running world server to write the database arms
+# this first, and disarms it when it starts the server itself: whatever ends
+# the command before then - an error, a signal - the server is started again
+# on the way out, and the realm is left as it was found.
+RESTART_ON_EXIT=0; RESTART_HOOKED=0
+_restart_arm() {
+    (( RESTART_HOOKED )) || { _at_exit _restart_on_exit; RESTART_HOOKED=1; }
+    RESTART_ON_EXIT=1
+}
+_restart_disarm() { RESTART_ON_EXIT=0; }
+_restart_on_exit() {
+    (( RESTART_ON_EXIT )) || return 0
+    _server_running && return 0
+    warn "The world server was running before this command stopped it: starting it again."
+    _start
+}
+
 # restart [--graceful [SECS]]: by default stop and start here. --graceful asks
 # mangosd itself (players warned, world saved, default 60 s), then starts it
 # again when it has exited.
@@ -149,6 +166,9 @@ cmd_console() {
     [[ $# -gt 0 ]] || error_exit "Usage: console COMMAND [COMMAND...]   (each argument is one console command)"
     local c
     for c in "$@"; do
+        # The console reads a line break as the end of a command: one inside
+        # an argument would send a second command past the refusals below.
+        [[ "$c" != *[$'\r\n']* ]] || error_exit "Refused: a console command is one line (an argument held a line break). Give each command as its own argument."
         _console_refused "$c" && error_exit "Refused: '${c}'. A bot chat command from the console gets no answer and has crashed the world server. Send it in game, as the bot's master."
     done
     _server_running || error_exit "The world server is not running."
