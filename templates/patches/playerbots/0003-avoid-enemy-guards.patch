@@ -1,0 +1,57 @@
+diff --git a/playerbot/TravelNode.cpp b/playerbot/TravelNode.cpp
+index c15cfc4..4a0e415 100644
+--- a/playerbot/TravelNode.cpp
++++ b/playerbot/TravelNode.cpp
+@@ -202,6 +202,16 @@ float TravelNodePath::getCost(Unit* unit, uint32 cGold)
+                 modifier += 0.1 * mobAnnoyance;     //For each level the whole path takes 10% longer.
+             if (factionAnnoyance > 0)
+                 modifier += 0.3 * factionAnnoyance; //For each level the whole path takes 30% longer.
++
++            // kalimdor: below the level cap, the other faction's creatures on
++            // a link - their guards, towns and outposts - make it dear whatever
++            // their level (Kamino 210). The rule above charges them only past
++            // 10 levels over the bot, so a level-55 bot paid nothing to walk
++            // past level-55 guards. Five times the cost: routes go around when
++            // there is a way around, and through when there is not.
++            int const enemyLevel = isAlliance ? maxLevelCreature[2] : maxLevelCreature[1];
++            if (enemyLevel > 0 && level < sWorld.getConfig(CONFIG_UINT32_MAX_PLAYER_LEVEL))
++                modifier += 4.0f;
+         }
+     }
+     else if (getPathType() == TravelNodePathType::flightPath)
+diff --git a/playerbot/strategy/actions/SetAvoidAreaAction.cpp b/playerbot/strategy/actions/SetAvoidAreaAction.cpp
+index 67a9af4..d3be651 100644
+--- a/playerbot/strategy/actions/SetAvoidAreaAction.cpp
++++ b/playerbot/strategy/actions/SetAvoidAreaAction.cpp
+@@ -28,6 +28,31 @@ bool SetAvoidAreaAction::Execute(Event& event)
+         if (!cInfo)
+             continue;
+ 
++        // kalimdor: the other faction's guards and NPCs (Kamino 210). The
++        // rule below skips anything friendly to either faction, because these
++        // marks are shared by every bot on the map - so guards were never
++        // avoided, and a level-30 bot walked into level-55 town guards. A
++        // creature friendly to exactly one side is marked with the area for
++        // the side it is dangerous to (15 Alliance, 16 Horde); the core's
++        // pathfinder costs it by the bot's team. Before the NPC and level
++        // filters: guards often have a gossip flag, and are high level.
++        {
++            FactionTemplateEntry const* fe = sFactionTemplateStore.LookupEntry(cInfo->Faction);
++            bool const aFriend = PlayerbotAI::GetFactionReaction(humanFaction, fe) >= REP_NEUTRAL;
++            bool const hFriend = PlayerbotAI::GetFactionReaction(orcFaction, fe) >= REP_NEUTRAL;
++            if (aFriend != hFriend)
++            {
++                Unit* guard = ai->GetUnit(target);
++                if (guard && guard->IsAlive())
++                {
++                    WorldPosition point(guard);
++                    pathfinder.setArea(point.getMapId(), point.getX(), point.getY(), point.getZ(), aFriend ? 16 : 15,
++                        guard->GetAttackDistance(bot) + 10.0f);
++                }
++                continue;
++            }
++        }
++
+         if (cInfo->NpcFlags > 0) //Ignore npcs.
+             continue;
+ 

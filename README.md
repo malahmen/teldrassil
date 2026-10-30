@@ -251,8 +251,8 @@ See `examples/roster.example.json`. The rules it enforces:
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries two changes to playerbots (`templates/patches/playerbots/`)
-and one to the core (`templates/patches/mangos-classic/`), applied before
+teldrassil carries three changes to playerbots (`templates/patches/playerbots/`)
+and two to the core (`templates/patches/mangos-classic/`), applied before
 every build:
 
 - **0001:** stored strategies are written as `nc+`/`co+` rows that *add to*
@@ -270,6 +270,15 @@ every build:
   spell, which it dereferenced: the world server segfaulted (core dump,
   2026-10-29). No spell now counts as prevented. kalimdor commits the same
   change.
+- **playerbots 0003 and mangos-classic 0002, together:** bots avoid the other
+  faction's guards and towns below the level cap. `avoid mobs` marked the
+  shared navmesh around hostile mobs but skipped anything friendly to either
+  faction, and long routes charged for the other faction's creatures only past
+  10 levels over the bot - a level-30 bot routed past Southshore died to its
+  guards. Now a creature friendly to exactly one side is marked with navmesh
+  area 15 (dangerous to Alliance) or 16 (to Horde), the core's pathfinder costs
+  those by the bot's team, and below the cap a route past the other faction's
+  creatures costs five times as much. The two only work as a pair.
 
 `roster apply` writes the database only while the world server is stopped:
 guilds and characters live in its memory, and a change made under it is
