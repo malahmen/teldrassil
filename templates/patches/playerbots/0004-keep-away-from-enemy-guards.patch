@@ -1,0 +1,428 @@
+diff --git a/playerbot/strategy/actions/ActionContext.h b/playerbot/strategy/actions/ActionContext.h
+index 6d3e20b..ac04c6c 100644
+--- a/playerbot/strategy/actions/ActionContext.h
++++ b/playerbot/strategy/actions/ActionContext.h
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include "GenericActions.h"
++#include "MoveAwayFromEnemyGuardAction.h"
+ #include "EmoteAction.h"
+ #include "AddLootAction.h"
+ #include "LootAction.h"
+@@ -429,6 +430,7 @@ namespace ai
+             creators["move away from raging flames"] = [](PlayerbotAI* ai) { return new RagingFlamesMoveAwayAction(ai); };
+ 
+             creators["move away from specific creatures"] = [](PlayerbotAI* ai) { return new MoveAwayFromSpecificCreatures(ai); };
++            creators["move away from enemy guard"] = [](PlayerbotAI* ai) { return new MoveAwayFromEnemyGuardAction(ai); };
+ 
+ #ifdef GenerateBotTests
+             creators["test"] = [](PlayerbotAI* ai) { return new TestAction(ai); };
+diff --git a/playerbot/strategy/actions/MoveAwayFromEnemyGuardAction.cpp b/playerbot/strategy/actions/MoveAwayFromEnemyGuardAction.cpp
+new file mode 100644
+index 0000000..45e7f0a
+--- /dev/null
++++ b/playerbot/strategy/actions/MoveAwayFromEnemyGuardAction.cpp
+@@ -0,0 +1,81 @@
++#include "playerbot/playerbot.h"
++#include "MoveAwayFromEnemyGuardAction.h"
++#include "playerbot/strategy/values/EnemyGuards.h"
++
++using namespace ai;
++
++bool MoveAwayFromEnemyGuardAction::isPossible()
++{
++    return MovementAction::isPossible() && ai->CanMove();
++}
++
++bool MoveAwayFromEnemyGuardAction::Execute(Event& event)
++{
++    std::list<Creature*> guards = EnemyGuards::Near(bot, 80.0f);
++
++    Creature* nearest = nullptr;
++    float nearestDistance = 0.0f;
++    for (Creature* guard : guards)
++    {
++        float const distance = bot->GetDistance(guard);
++        if (distance < EnemyGuards::Reach(guard, bot) && (!nearest || distance < nearestDistance))
++        {
++            nearest = guard;
++            nearestDistance = distance;
++        }
++    }
++
++    if (!nearest)
++        return false;
++
++    // Points around the nearest guard, just outside its reach, starting
++    // straight away from it and widening left and right (as the dungeon
++    // actions' MoveAwayFromCreature does). A point must be out of every
++    // guard's reach, in line of sight and reachable on foot.
++    WorldPosition const botPosition(bot);
++    WorldPosition const guardPosition(nearest);
++    float const distance = EnemyGuards::Reach(nearest, bot) + 5.0f;
++    float angleLeft = guardPosition.getAngleTo(botPosition);
++    float angleRight = angleLeft;
++    uint8 const halfAttempts = 10;
++    float const angleIncrement = float(M_PI) / halfAttempts;
++
++    for (uint8 i = 0; i < halfAttempts; ++i)
++    {
++        for (float angle : { angleLeft, angleRight })
++        {
++            WorldPosition point = guardPosition + WorldPosition(0, distance * cos(angle), distance * sin(angle), 1.0f);
++            point.setZ(point.getHeight());
++
++            bool covered = false;
++            for (Creature* guard : guards)
++            {
++                if (guard->GetDistance(point.getX(), point.getY(), point.getZ()) < EnemyGuards::Reach(guard, bot))
++                {
++                    covered = true;
++                    break;
++                }
++            }
++            if (covered)
++                continue;
++
++            if (!bot->IsWithinLOS(point.getX(), point.getY(), point.getZ() + bot->GetCollisionHeight()))
++                continue;
++
++            if (!botPosition.canPathTo(point, bot))
++                continue;
++
++            if (MoveTo(bot->GetMapId(), point.getX(), point.getY(), point.getZ(), false, IsReaction(), false, true))
++            {
++                if (!IsReaction())
++                    WaitForReach(point.distance(botPosition));
++                return true;
++            }
++        }
++
++        angleLeft += angleIncrement;
++        angleRight -= angleIncrement;
++    }
++
++    return false;
++}
+diff --git a/playerbot/strategy/actions/MoveAwayFromEnemyGuardAction.h b/playerbot/strategy/actions/MoveAwayFromEnemyGuardAction.h
+new file mode 100644
+index 0000000..6768f6f
+--- /dev/null
++++ b/playerbot/strategy/actions/MoveAwayFromEnemyGuardAction.h
+@@ -0,0 +1,28 @@
++#pragma once
++#include "MovementActions.h"
++
++namespace ai
++{
++    // kalimdor: step out of the reach of the other faction's guards when they
++    // are well above the bot's level (Kamino 210; values/EnemyGuards.h). Out of
++    // combat it keeps a roaming bot away; in combat it gets one out when such
++    // a guard has aggroed.
++    class MoveAwayFromEnemyGuardAction : public MovementAction
++    {
++    public:
++        MoveAwayFromEnemyGuardAction(PlayerbotAI* ai) : MovementAction(ai, "move away from enemy guard") {}
++        bool Execute(Event& event) override;
++        bool isPossible() override;
++
++#ifdef GenerateBotHelp
++        virtual std::string GetHelpName() { return "move away from enemy guard"; }
++        virtual std::string GetHelpDescription()
++        {
++            return "This action moves the bot out of the reach of the other faction's guards\n"
++                   "and NPCs that are well above its level, while it is below the level cap.";
++        }
++        virtual std::vector<std::string> GetUsedActions() { return {}; }
++        virtual std::vector<std::string> GetUsedValues() { return {}; }
++#endif
++    };
++}
+diff --git a/playerbot/strategy/generic/AvoidMobsStrategy.cpp b/playerbot/strategy/generic/AvoidMobsStrategy.cpp
+index 12e01f8..c400cea 100644
+--- a/playerbot/strategy/generic/AvoidMobsStrategy.cpp
++++ b/playerbot/strategy/generic/AvoidMobsStrategy.cpp
+@@ -9,6 +9,14 @@ void AvoidMobsStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
+     triggers.push_back(new TriggerNode(
+         "very often",
+         NextAction::array(0, new NextAction("set avoid area", ACTION_NORMAL), NULL)));
++
++    // kalimdor: keep out of the reach of the other faction's guards well
++    // above the bot's level, and get out if one has aggroed - in combat too,
++    // since InitCombatTriggers adds these (Kamino 210). Above attacking,
++    // below fleeing at critical health (ACTION_EMERGENCY + 9).
++    triggers.push_back(new TriggerNode(
++        "enemy guard near",
++        NextAction::array(0, new NextAction("move away from enemy guard", ACTION_EMERGENCY + 5), NULL)));
+ }
+ 
+ void AvoidMobsStrategy::InitCombatTriggers(std::list<TriggerNode*>& triggers)
+diff --git a/playerbot/strategy/triggers/GenericTriggers.cpp b/playerbot/strategy/triggers/GenericTriggers.cpp
+index ff1956c..be2af1d 100644
+--- a/playerbot/strategy/triggers/GenericTriggers.cpp
++++ b/playerbot/strategy/triggers/GenericTriggers.cpp
+@@ -1,6 +1,7 @@
+ 
+ #include "playerbot/playerbot.h"
+ #include "GenericTriggers.h"
++#include "playerbot/strategy/values/EnemyGuards.h"
+ #include "playerbot/LootObjectStack.h"
+ #include "playerbot/PlayerbotAIConfig.h"
+ #include "playerbot/ServerFacade.h"
+@@ -762,6 +763,20 @@ bool HasNearestAddsTrigger::IsActive()
+     return targets.size();
+ }
+ 
++bool EnemyGuardNearTrigger::IsActive()
++{
++    if (bot->GetInstanceId())
++        return false;
++
++    for (Creature* guard : EnemyGuards::Near(bot, 80.0f))
++    {
++        if (bot->GetDistance(guard) < EnemyGuards::Reach(guard, bot))
++            return true;
++    }
++
++    return false;
++}
++
+ bool HasItemForSpellTrigger::IsActive()
+ {
+     std::string spell = getName();
+diff --git a/playerbot/strategy/triggers/GenericTriggers.h b/playerbot/strategy/triggers/GenericTriggers.h
+index 4bd504b..792add4 100644
+--- a/playerbot/strategy/triggers/GenericTriggers.h
++++ b/playerbot/strategy/triggers/GenericTriggers.h
+@@ -785,6 +785,16 @@ namespace ai
+         virtual bool IsActive() override;
+     };
+ 
++    // kalimdor: the other faction's guards well above the bot's level are
++    // within their reach of it (Kamino 210; values/EnemyGuards.h). Outside
++    // instances only.
++    class EnemyGuardNearTrigger : public Trigger
++    {
++    public:
++        EnemyGuardNearTrigger(PlayerbotAI* ai) : Trigger(ai, "enemy guard near", 2) {}
++        virtual bool IsActive() override;
++    };
++
+     class HasItemForSpellTrigger : public Trigger
+     {
+     public:
+diff --git a/playerbot/strategy/triggers/TriggerContext.h b/playerbot/strategy/triggers/TriggerContext.h
+index df76b99..34d6bea 100644
+--- a/playerbot/strategy/triggers/TriggerContext.h
++++ b/playerbot/strategy/triggers/TriggerContext.h
+@@ -82,6 +82,7 @@ namespace ai
+             creators["not dps target active"] = [](PlayerbotAI* ai) { return new NotDpsTargetActiveTrigger(ai); };
+             creators["not dps aoe target active"] = [](PlayerbotAI* ai) { return new NotDpsAoeTargetActiveTrigger(ai); };
+             creators["has nearest adds"] = [](PlayerbotAI* ai) { return new HasNearestAddsTrigger(ai); };
++            creators["enemy guard near"] = [](PlayerbotAI* ai) { return new EnemyGuardNearTrigger(ai); };
+             creators["enemy player near"] = [](PlayerbotAI* ai) { return new EnemyPlayerNear(ai); };
+ 
+             creators["combat start"] = [](PlayerbotAI* ai) { return new CombatStartTrigger(ai); };
+diff --git a/playerbot/strategy/values/DeadValues.cpp b/playerbot/strategy/values/DeadValues.cpp
+index 81e247f..43cc73c 100644
+--- a/playerbot/strategy/values/DeadValues.cpp
++++ b/playerbot/strategy/values/DeadValues.cpp
+@@ -1,5 +1,6 @@
+ 
+ #include "playerbot/playerbot.h"
++#include "EnemyGuards.h"
+ #include "DeadValues.h"
+ #include "playerbot/TravelMgr.h"
+ 
+@@ -214,6 +215,16 @@ bool ShouldSpiritHealerValue::Calculate()
+         return true;
+     }
+ 
++    // kalimdor: a corpse inside the reach of the other faction's guards well
++    // above the bot's level - one that died in or by their town - is not
++    // gone back to: reviving there is dying again, and the ghost wandered
++    // round it, looking for a safe spot the guards' patrol never left, until
++    // the 20-minute rule below. The spirit healer instead; once revived, the
++    // bot is weak and leaves the guards' reach at once (Kamino 210).
++    if (!bot->GetInstanceId() && EnemyGuards::Covers(EnemyGuards::Near(bot, sPlayerbotAIConfig.sightDistance + 60.0f),
++            corpse->GetPositionX(), corpse->GetPositionY(), corpse->GetPositionZ(), bot))
++        return true;
++
+     uint32 deadTime = time(nullptr) - corpse->GetGhostTime();
+ 
+     //Dead for a long time
+diff --git a/playerbot/strategy/values/EnemyGuards.cpp b/playerbot/strategy/values/EnemyGuards.cpp
+new file mode 100644
+index 0000000..0b23e7d
+--- /dev/null
++++ b/playerbot/strategy/values/EnemyGuards.cpp
+@@ -0,0 +1,79 @@
++#include "playerbot/playerbot.h"
++#include "EnemyGuards.h"
++#include "Grids/GridNotifiers.h"
++#include "Grids/GridNotifiersImpl.h"
++#include "Grids/CellImpl.h"
++
++using namespace ai;
++
++bool EnemyGuards::IsDangerous(Creature* creature, Player* bot)
++{
++    if (!creature || !bot || !creature->IsAlive() || creature->IsPet())
++        return false;
++
++    if (bot->GetLevel() >= sWorld.getConfig(CONFIG_UINT32_MAX_PLAYER_LEVEL))
++        return false;
++
++    if (creature->GetLevel() < bot->GetLevel() + LevelsAbove)
++        return false;
++
++    FactionTemplateEntry const* faction = creature->GetFactionTemplateEntry();
++    if (!faction)
++        return false;
++
++    bool const aFriend = PlayerbotAI::friendToAlliance(faction);
++    bool const hFriend = PlayerbotAI::friendToHorde(faction);
++    if (aFriend == hFriend)
++        return false;
++
++    return bot->GetTeam() == ALLIANCE ? hFriend : aFriend;
++}
++
++float EnemyGuards::Reach(Creature* creature, Player* bot)
++{
++    bool const weak = bot->HasAura(ResurrectionSickness) || bot->GetHealthPercent() < 50.0f;
++    return creature->GetAttackDistance(bot) + (weak ? WeakMargin : Margin);
++}
++
++std::list<Creature*> EnemyGuards::Near(Player* bot, float range)
++{
++    std::list<Unit*> units;
++    MaNGOS::AnyUnitInObjectRangeCheck check(bot, range);
++    MaNGOS::UnitListSearcher<MaNGOS::AnyUnitInObjectRangeCheck> searcher(units, check);
++    Cell::VisitAllObjects(bot, searcher, range);
++
++    std::list<Creature*> guards;
++    for (Unit* unit : units)
++    {
++        if (unit->GetTypeId() != TYPEID_UNIT)
++            continue;
++
++        Creature* creature = (Creature*)unit;
++        if (IsDangerous(creature, bot))
++            guards.push_back(creature);
++    }
++
++    return guards;
++}
++
++bool EnemyGuards::Covers(const std::list<Creature*>& guards, float x, float y, float z, Player* bot)
++{
++    for (Creature* guard : guards)
++    {
++        if (guard->GetDistance(x, y, z) < Reach(guard, bot))
++            return true;
++    }
++
++    return false;
++}
++
++bool EnemyGuards::Covers(const std::list<Creature*>& guards, Unit* unit, Player* bot)
++{
++    for (Creature* guard : guards)
++    {
++        if (guard->GetDistance(unit) < Reach(guard, bot))
++            return true;
++    }
++
++    return false;
++}
+diff --git a/playerbot/strategy/values/EnemyGuards.h b/playerbot/strategy/values/EnemyGuards.h
+new file mode 100644
+index 0000000..298f12b
+--- /dev/null
++++ b/playerbot/strategy/values/EnemyGuards.h
+@@ -0,0 +1,45 @@
++#pragma once
++
++#include <list>
++
++class Creature;
++class Player;
++class Unit;
++
++namespace ai
++{
++    // kalimdor: the other faction's guards and NPCs, when they are well above a
++    // bot's level (Kamino 210). Bots roam freely, enemy territory included;
++    // what they must not do below the level cap is walk into, or fight next
++    // to, guards they cannot survive. One definition for the trigger that
++    // keeps them away, the action that moves them, and the grind target
++    // choice that skips mobs standing under such guards.
++    class EnemyGuards
++    {
++    public:
++        // At least this many levels above the bot.
++        static constexpr unsigned int LevelsAbove = 5;
++        // Yards kept beyond the guard's aggro range...
++        static constexpr float Margin = 10.0f;
++        // ...and while the bot is weakened - resurrection sickness, or below
++        // half health. A bot the spirit healer revives in a hostile graveyard
++        // (Razor Hill's lies inside its grunts' patrol) came back weak and was
++        // caught by a roaming guard before the normal margin moved it: weak,
++        // it leaves for safety at once, before it rests (owner, 2026-10-30).
++        static constexpr float WeakMargin = 40.0f;
++        static constexpr unsigned int ResurrectionSickness = 15007;
++
++        // Friendly to exactly one faction - the bot's enemy - alive, not a
++        // pet, LevelsAbove or more over the bot, and the bot below the cap.
++        static bool IsDangerous(Creature* creature, Player* bot);
++        // How far the bot keeps from it: its aggro range on the bot + Margin,
++        // or + WeakMargin while the bot is weakened.
++        static float Reach(Creature* creature, Player* bot);
++        // The dangerous ones within range of the bot.
++        static std::list<Creature*> Near(Player* bot, float range);
++        // Whether a unit stands within the reach of any of them.
++        static bool Covers(const std::list<Creature*>& guards, Unit* unit, Player* bot);
++        // Whether a point does.
++        static bool Covers(const std::list<Creature*>& guards, float x, float y, float z, Player* bot);
++    };
++}
+diff --git a/playerbot/strategy/values/GrindTargetValue.cpp b/playerbot/strategy/values/GrindTargetValue.cpp
+index 744c350..e3480f9 100644
+--- a/playerbot/strategy/values/GrindTargetValue.cpp
++++ b/playerbot/strategy/values/GrindTargetValue.cpp
+@@ -1,6 +1,7 @@
+ 
+ #include "playerbot/playerbot.h"
+ #include "GrindTargetValue.h"
++#include "EnemyGuards.h"
+ #include "playerbot/PlayerbotAIConfig.h"
+ #include "playerbot/RandomPlayerbotMgr.h"
+ #include "playerbot/ServerFacade.h"
+@@ -90,6 +91,11 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
+ 
+     std::unordered_map<uint32, bool> needForQuestCache;
+ 
++    // kalimdor: mobs standing within the reach of the other faction's guards
++    // well above the bot's level are not pulled - the guards would join in
++    // (Kamino 210). Found once here, not per target.
++    std::list<Creature*> const enemyGuards = bot->GetInstanceId() ? std::list<Creature*>() : EnemyGuards::Near(bot, sPlayerbotAIConfig.sightDistance + 60.0f);
++
+     for (std::list<ObjectGuid>::iterator tIter = targets.begin(); tIter != targets.end(); tIter++)
+     {
+         Unit* unit = ai->GetUnit(*tIter);
+@@ -183,6 +189,13 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
+             continue;
+         }
+ 
++        if (!enemyGuards.empty() && EnemyGuards::Covers(enemyGuards, unit, bot))
++        {
++            if (ai->HasStrategy("debug grind", BotState::BOT_STATE_NON_COMBAT))
++                ai->TellPlayer(GetMaster(), chat->formatWorldobject(unit) + " ignored (under enemy guards).");
++            continue;
++        }
++
+         Creature* creature = dynamic_cast<Creature*>(unit);
+         if (creature && creature->GetCreatureInfo() && creature->GetCreatureInfo()->Rank > CREATURE_ELITE_NORMAL && !AI_VALUE(bool, "can fight elite") &&
+             !AI_VALUE2(bool, "trigger active", "in vehicle"))

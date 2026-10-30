@@ -251,7 +251,7 @@ See `examples/roster.example.json`. The rules it enforces:
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries three changes to playerbots (`templates/patches/playerbots/`)
+teldrassil carries four changes to playerbots (`templates/patches/playerbots/`)
 and two to the core (`templates/patches/mangos-classic/`), applied before
 every build:
 
@@ -279,6 +279,15 @@ every build:
   area 15 (dangerous to Alliance) or 16 (to Horde), the core's pathfinder costs
   those by the bot's team, and below the cap a route past the other faction's
   creatures costs five times as much. The two only work as a pair.
+- **playerbots 0004:** bots keep away from the other faction's guards well
+  above their level (5+), below the cap. Routes alone do not help a bot whose
+  destination is beside the guards, so a trigger ("enemy guard near") and an
+  action ("move away from enemy guard") in `avoid mobs` keep it outside their
+  aggro range + 10 yards - and get it out if one aggroes - and grind targets
+  standing in that range are skipped. Weakened (resurrection sickness, or
+  below half health) the margin is 40 yards, so a bot revived at a hostile
+  graveyard leaves at once; and a ghost whose corpse lies in that range takes
+  the spirit healer rather than going back for it. Bots still roam anywhere.
 
 `roster apply` writes the database only while the world server is stopped:
 guilds and characters live in its memory, and a change made under it is
