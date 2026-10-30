@@ -75,12 +75,14 @@ also manage one elsewhere (see Profiles).
 Server:
   start | stop                  stop saves the world first, then disconnects everyone
   restart [--graceful [SECS]]   stop and start here; --graceful asks mangosd to
-                                warn players, save and exit in SECS (default 60),
-                                then starts it again
+                                warn players, save and exit in SECS (default 60);
+                                the container's restart policy, or this, starts
+                                it again
   status                        containers, ports, who is online, the LLM endpoint,
                                 and a warning while cmangos' default accounts exist
   save                          save every character now
-  console COMMAND...            remote-console commands, one per argument.
+  console COMMAND...            remote-console commands, one per argument (an
+                                argument with a line break is refused).
                                 Refuses 'rndbot c' and 'rndbot do': a bot chat
                                 command from the console gets no answer and has
                                 crashed the server - send those in game.
@@ -92,6 +94,7 @@ Server:
 
 Accounts:
   create-account --name N (--pass-file F | --pass-stdin) [--level 0-3]
+                                not a name starting with BOT_ACCOUNT_PREFIX
   set-account-level --name N --level 0-3     takes effect at the next full login
   list-accounts [--bots]
   delete-account --name N --yes              only an account with no characters
@@ -111,9 +114,11 @@ Administration:
   apply-sql --file PATH --db NAME [--force] [--no-record]
                                 run a .sql file; tracked by content hash, so an
                                 unchanged file runs once
-  dump --all | --db NAME [--tables "a b c"] [--out PATH] [--no-gzip]
+  dump --all | --db NAME [--tables "a b c"] [--out PATH [--force]] [--no-gzip]
                                 gzipped, 0600, to ~/.config/teldrassil/dumps by
                                 default. Carries CREATE DATABASE, except --tables.
+                                An existing file is replaced only with --force;
+                                a dump that fails leaves no file
   restore --file PATH --yes [--db NAME]
                                 DESTRUCTIVE: replaces the databases the dump
                                 names; with the world server stopped
@@ -125,10 +130,16 @@ Roster (one JSON file: shaped bots, guilds, ranks, tabards, cards, LLM, populati
   roster apply [--file F] [--fresh-population] --yes
                                 stop, write it all in one transaction, start, and
                                 apply changed professions ('rndbot upgrade').
-                                Without --yes it only shows the plan.
+                                Without --yes it only shows the plan. If a step
+                                fails after the stop, the server is started
+                                again (attune apply too).
                                 --fresh-population first replaces EVERY random
                                 bot (and every guild a bot leads) with a new
-                                population at the roster's counts.
+                                population at the roster's counts. Interrupted
+                                after starting a server that was stopped, it
+                                stops it again once the deletion is over (up to
+                                FRESH_STOP_WAIT s), or leaves it running and
+                                says so.
                                 A roster guild takes over an existing guild only
                                 if all of it is bots of its faction; once applied
                                 it is bound to that guild's id

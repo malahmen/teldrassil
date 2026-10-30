@@ -25,9 +25,20 @@ tmp_dir() {
     fi
     printf '%s' "$TMP_DIR"
 }
-# A bot config pulled from a cluster's Secret and changed is written back
-# first (lib/target.sh); a failure there is reported, and the files are kept.
+# _at_exit <function> — something to undo or finish however the run ends: an
+# error, a signal or the end. Each is a function that checks for itself
+# whether there is anything to do (a command that is done disarms it). They run
+# from the one EXIT trap, last registered first, each in a subshell, so one
+# that fails does not stop the others.
+EXIT_HOOKS=()
+_at_exit() { EXIT_HOOKS+=("$1"); }
+# Then a bot config pulled from a cluster's Secret and changed is written
+# back (lib/target.sh); a failure there is reported, and the files are kept.
 _cleanup() {
+    local i
+    for (( i = ${#EXIT_HOOKS[@]} - 1; i >= 0; i-- )); do
+        ( "${EXIT_HOOKS[i]}" ) || warn "Could not finish '${EXIT_HOOKS[i]}' on the way out; see above."
+    done
     if declare -F _bots_push >/dev/null && ! ( _bots_push ); then
         warn "The bot config was NOT written back; the changed files are in ${TMP_DIR}/bots."
         return 0

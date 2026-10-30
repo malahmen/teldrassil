@@ -8,6 +8,14 @@ _account_name_ok() {
     [[ "$1" =~ ^[A-Za-z0-9]{3,16}$ ]] || error_exit "An account name is 3-16 letters or digits (got '${1}')."
 }
 
+# Every account whose name starts with BOT_ACCOUNT_PREFIX (in any case: the
+# database compares names case-blind) is playerbots': its characters count as
+# random bots everywhere - the roster may rename them, status counts them.
+_is_bot_account() { local n="${1^^}" p="${BOT_ACCOUNT_PREFIX^^}"; [[ -n "$p" && "$n" == "$p"* ]]; }
+_not_bot_account() {
+    ! _is_bot_account "$1" || error_exit "${1^^} starts with BOT_ACCOUNT_PREFIX (${BOT_ACCOUNT_PREFIX}), so its characters would count as playerbots' random bots; choose another name."
+}
+
 cmd_create_account() {
     local name="" pass_file="" from_stdin=0 level=0 password v s
     while [[ $# -gt 0 ]]; do case "$1" in
@@ -19,6 +27,7 @@ cmd_create_account() {
     esac; done
     [[ -n "$name" ]] || error_exit "Usage: create-account --name NAME (--pass-file FILE | --pass-stdin) [--level 0-3]"
     _account_name_ok "$name"
+    _not_bot_account "$name"
     [[ "$level" =~ ^[0-3]$ ]] || error_exit "--level is 0 (player) to 3 (administrator)."
     if [[ -n "$pass_file" ]]; then
         [[ -r "$pass_file" ]] || error_exit "Cannot read ${pass_file}."
@@ -81,7 +90,7 @@ cmd_delete_account() {
     (( yes )) || error_exit "delete-account removes the account for good: add --yes."
     _require_db
     name="${name^^}"
-    [[ "$name" != "${BOT_ACCOUNT_PREFIX}"* ]] || error_exit "That is a bot account; playerbots manages those."
+    ! _is_bot_account "$name" || error_exit "That is a bot account; playerbots manages those."
     [[ "$(_db_value "SELECT COUNT(*) FROM ${DB_REALMD}.account WHERE username=$(_sql_str "$name");")" == "1" ]] \
         || error_exit "No account ${name}."
     chars="$(_db_value "SELECT COUNT(*) FROM ${DB_CHARACTERS}.characters c JOIN ${DB_REALMD}.account a ON a.id=c.account WHERE a.username=$(_sql_str "$name");")"

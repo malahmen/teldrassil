@@ -51,9 +51,13 @@ its volume - every account and character.
 ### Managing it
 
 - **The server:** `start`, `stop` (saves first), `restart` (or `--graceful`:
-  players warned, the world saved, mangosd exits and is started again),
-  `status`, `save`, and the remote console.
-- **Accounts:** create one, set its GM level, list them, delete one.
+  players warned, the world saved, mangosd exits and is started again - by
+  its container's restart policy when mangosd exits with a failure code,
+  else by teldrassil; the container's start time tells which, so a restart
+  that worked is reported as one), `status`, `save`, and the remote console.
+- **Accounts:** create one, set its GM level, list them, delete one. A name
+  starting with `BOT_ACCOUNT_PREFIX` is refused: its characters would count
+  as random bots everywhere.
 - **Characters:** rename one (refused while it is online: the world server
   would write the old name back).
 - **Search:** items, NPCs, objects (herb and ore nodes, chests, doors, with
@@ -62,8 +66,11 @@ its volume - every account and character.
   roster or random - and guilds (leader, members online, ranks, tabard).
   Zone names come from the client's `AreaTable.dbc` (`set DBC_DIR`).
 - **Administration:** `apply-sql` (a file runs once, tracked by its content
-  hash), `dump` (all four databases, one, or some tables; gzipped, 0600) and
-  `restore` (with the world server stopped).
+  hash), `dump` (all four databases, one, or some tables; gzipped, 0600;
+  an existing file is replaced only with `--force`, and a dump that fails
+  or comes out empty leaves no file behind - it is written under a temporary
+  name and moved into place once whole) and `restore` (with the world server
+  stopped).
 - **The roster:** one JSON file that says which bots are shaped on purpose and
   how - name, race, class, gender, professions, priorities, guild and rank,
   farm order, character card, preferred guild size - plus the guilds
@@ -125,6 +132,20 @@ lists every key with its default and what it is for. A typical setup:
 ./teldrassil.sh set ROSTER_FILE ~/wow/roster.json
 ./teldrassil.sh status
 ```
+
+`set` checks what it can: numbers are numbers, and the database names
+(`DB_WORLD`, `DB_CHARACTERS`, `DB_REALMD`, `DB_LOGS`) and `BOT_ACCOUNT_PREFIX`
+are plain names, since they go into SQL; a config file edited by hand gets the
+same checks before any command runs. `PODMAN` may be `docker`: teldrassil
+asks only what both answer (`image inspect`, `volume ls`; docker has no
+`image exists` or `volume exists`). Under rootful docker, the containers that
+write into `WORK_DIR` - the build, the extractors, the database installer and
+the realm and world servers (their logs) - run as you (`--user UID:GID`, with
+`HOME=/tmp`), so what they write is yours and `build --clean` can remove it;
+under rootless docker (`docker info` lists `rootless`) and podman, a
+container's root already is you, and nothing is added. Files a rootful docker
+wrote before this need `sudo chown -R "$(id -u):$(id -g)" WORK_DIR` once, and
+the server containers `create --force` (stopped first) to run as you.
 
 **Secrets never reach a command line.** SQL goes to the database container on
 stdin, and the database password is read *inside* that container from
@@ -215,6 +236,11 @@ See `examples/roster.example.json`. The rules it enforces:
   officer note playerbots reads).
 - **Guild members the roster does not name keep their place,** except the top
   rank, which belongs to the leader.
+- **A roster bot that leads a guild the roster does not name is not moved.**
+  Taking it out would leave that guild with a leader who is not in it; the
+  plan says so instead, and the guild needs a new leader in game first.
+- **The `llm` section's values are one line each** (they become lines of
+  `aiplayerbot.conf`), and `endpoint` is an http(s) URL.
 - **Population:** `{"bots": N, "balance": "50/50"}` sets exact class/race
   counts, half per faction, the roster's own pairs first. Counts apply when
   bots are created: `apply --fresh-population --yes` replaces every random bot
@@ -244,6 +270,22 @@ overwritten. It saves the world, stops it, writes everything in one
 transaction, puts the new `aiplayerbot.conf` and card file in place (keeping
 the old ones under `~/.config/teldrassil/backups`), and starts it again.
 
+**A failed step leaves the realm as it found it.** Once `roster apply` or
+`attune apply` has stopped a running world server, whatever ends it early -
+the state query, the plan, a refused transaction, Ctrl-C - starts the server
+again on the way out. `--fresh-population` turns guild deletion on and random
+guilds off for its one start; if that start does not get through (it fails,
+an error, a signal), both settings go back to what they were and the pending
+"delete every random bot" request is withdrawn, so no later start deletes
+anything. The roster's population counts stay. If the world server was
+stopped before the command and the fresh population had already started it,
+it is stopped again (saved, then stopped) once the deletion is over - the
+request gone from `ai_playerbot_random_bots` and the count of bot characters
+no longer falling - waiting up to `FRESH_STOP_WAIT` (120 s). A deletion that
+takes longer is not cut short: the server is left running, and teldrassil
+says so and how to stop it (`stop`, a few minutes later). A server that was
+running before is left running.
+
 ## Things to know about playerbots
 
 - **Talking to a bot is not commanding it.** Plain words go to the LLM, which
@@ -252,7 +294,8 @@ the old ones under `~/.config/teldrassil/backups`), and starts it again.
   --any` lists them, e.g. `/w <bot> guild invite`.
 - **Never send a bot a chat command from the remote console.**
   `rndbot c <bot> ...` and `rndbot do ...` get no answer and have crashed the
-  world server; `console` refuses them.
+  world server; `console` refuses them, and any argument with a line break
+  (the console would read a second command there).
 - **cmangos creates four accounts** (ADMINISTRATOR, GAMEMASTER, MODERATOR,
   PLAYER) whose passwords are well known. `status` warns while they exist.
 
@@ -263,7 +306,8 @@ tests/run-all.sh
 ```
 
 No network, no database, no containers: the helper's roster logic is tested as
-plain functions, and `tests/stubs/` stands in for podman, ssh and kubectl. The
+plain functions, `tests/stubs/` stands in for podman, ssh and kubectl, and
+`tests/fake_ra.py` for the remote console, on a free port of 127.0.0.1. The
 ssh stub runs its command here after a second shell parse, as a real host
 would, so a quoting mistake fails a test rather than a server.
 

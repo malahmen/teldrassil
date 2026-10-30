@@ -50,19 +50,52 @@ _secret() {
 
 _log_tail() { tail -"${2:-15}" -- "$1" | sed 's/^/    /' >&2; }
 
+# Who the build image's containers run as. Under rootful docker a container's
+# root is the host's root, so whatever the build, the extractors, the database
+# installer or the servers write into WORK_DIR (the build tree, client data,
+# logs) would be root's, and the user could not clean it up ('build --clean').
+# There they run as the user instead: the image needs no root - every tool
+# writes only to the mounted folders, which are the user's, and HOME points at
+# /tmp. Rootless docker and podman map the container's root to the user, so
+# they need nothing (and docker's --user there would be another subuid).
+# Under podman's docker shim, 'docker info' has no SecurityOptions and fails:
+# nothing is added. Sets RUN_AS, once.
+RUN_AS=(); RUN_AS_SET=0
+_run_as() {
+    (( RUN_AS_SET )) && return 0
+    RUN_AS_SET=1; RUN_AS=()
+    [[ "$(basename -- "$PODMAN")" == docker ]] || return 0
+    local opts
+    opts="$("$PODMAN" info --format '{{.SecurityOptions}}' 2>/dev/null)" || return 0
+    [[ "$opts" == *rootless* ]] && return 0
+    RUN_AS=(--user "$(id -u):$(id -g)" -e HOME=/tmp)
+}
+
 # _run_tools <log> <podman run args...> -- <command> — a throwaway container
 # from the build image; output to the log, and its tail shown on failure.
 _run_tools() {
     local log="$1"; shift
     mkdir -p "$LOGS"
-    if ! "$PODMAN" run --rm "$@" > "$log" 2>&1 </dev/null; then
+    _run_as
+    if ! "$PODMAN" run --rm "${RUN_AS[@]}" "$@" > "$log" 2>&1 </dev/null; then
         _log_tail "$log"
         error_exit "Failed; the full log is ${log}."
     fi
 }
 
+# Whether an image or a volume exists, asked the way podman and docker both
+# answer: docker has no 'image exists' or 'volume exists' (they fail there, so
+# every install rebuilt the image and 'remove --database' kept the volume). A
+# volume list that cannot be had is an error, never "no volume".
+_image_exists() { "$PODMAN" image inspect "$1" >/dev/null 2>&1; }
+_volume_exists() {
+    local names
+    names="$("$PODMAN" volume ls -q)" || error_exit "Could not list ${PODMAN}'s volumes; nothing was changed."
+    grep -qxF -- "$1" <<<"$names"
+}
+
 _require_image() {
-    "$PODMAN" image exists "$BUILD_IMAGE" || error_exit "No image ${BUILD_IMAGE}: run 'build-image' first."
+    _image_exists "$BUILD_IMAGE" || error_exit "No image ${BUILD_IMAGE}: run 'build-image' first."
 }
 
 # -----------------------------------------------------------------------------
@@ -108,7 +141,17 @@ _checkout_repo() {
         return 0
     fi
     if (( ! update )); then info "Sources: ${dir} at $(git -C "$dir" rev-parse --short HEAD) ('source --update' fetches ${ref})."; return 0; fi
-    [[ -z "$(git -C "$dir" status --porcelain)" ]] || error_exit "${dir} has local changes; commit or remove them first."
+    # teldrassil's playerbots patches, applied by 'build', are not local
+    # changes: taken off first. Where the repository commits them itself the
+    # tree is clean and nothing is taken off. Anything else left is a local
+    # change: the patches go back on, and nothing moves.
+    if [[ -n "$(git -C "$dir" status --porcelain)" ]]; then
+        _unpatch "$SRC_PB"
+        if [[ -n "$(git -C "$dir" status --porcelain)" ]]; then
+            ( _patch ) >/dev/null 2>&1 || true
+            error_exit "${dir} has local changes; commit or remove them first."
+        fi
+    fi
     git -C "$dir" fetch -q origin "$ref" || error_exit "Could not fetch ${ref} from ${repo}."
     git -C "$dir" checkout -q --detach FETCH_HEAD
     success "Sources: ${repo} at $(git -C "$dir" rev-parse --short HEAD)."
@@ -261,7 +304,7 @@ cmd_extract() {
 _db_container_up() {
     local root; root="$(_secret root.pw)"
     if ! _container_exists "$DB_CONTAINER"; then
-        if "$PODMAN" volume exists "$DB_VOLUME"; then
+        if _volume_exists "$DB_VOLUME"; then
             info "Creating the database container ${DB_CONTAINER} on the existing volume ${DB_VOLUME} (127.0.0.1:${DB_PORT})..."
         else
             info "Creating the database container ${DB_CONTAINER} (127.0.0.1:${DB_PORT}, volume ${DB_VOLUME})..."
@@ -289,7 +332,7 @@ _db_container_up() {
 _db_schemas() { printf '%s\n' "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA;" | _db_raw; }
 
 # _db_exists — is a database already here: its container, or its volume?
-_db_exists() { _container_exists "$DB_CONTAINER" || "$PODMAN" volume exists "$DB_VOLUME"; }
+_db_exists() { _container_exists "$DB_CONTAINER" || _volume_exists "$DB_VOLUME"; }
 
 # _db_present <schemas> — which of the four databases those schemas hold:
 # sets DB_HAVE and DB_MISSING.
@@ -482,13 +525,14 @@ cmd_create() {
             _container_running "$c" && error_exit "${c} is running: 'stop' first."
             "$PODMAN" rm "$c" >/dev/null
         fi
-        _server_mounts
-        # on-failure: a crash restarts it; a stop does not.
+        _server_mounts; _run_as
+        # on-failure: a crash restarts it; a stop does not. They write their
+        # logs to LOGS: under rootful docker, as the user (see _run_as).
         if [[ "$c" == "$REALM_CONTAINER" ]]; then
-            "$PODMAN" create --name "$c" --network host --restart on-failure "${SERVER_MOUNTS[@]}" -w /install/bin \
+            "$PODMAN" create --name "$c" --network host --restart on-failure "${RUN_AS[@]}" "${SERVER_MOUNTS[@]}" -w /install/bin \
                 "$BUILD_IMAGE" ./realmd -c /install/etc/realmd.conf >/dev/null
         else
-            "$PODMAN" create --name "$c" --network host --restart on-failure "${SERVER_MOUNTS[@]}" -w /install/bin \
+            "$PODMAN" create --name "$c" --network host --restart on-failure "${RUN_AS[@]}" "${SERVER_MOUNTS[@]}" -w /install/bin \
                 "$BUILD_IMAGE" ./mangosd -c /install/etc/mangosd.conf -a /install/etc/ahbot.conf >/dev/null
         fi
         success "${c} created."
@@ -509,7 +553,7 @@ cmd_install() {
     (( yes )) || error_exit "install builds and starts a whole server, and creates its databases: add --yes."
     _paths
     header "1/7 Sources";      cmd_source
-    header "2/7 Build image";  if "$PODMAN" image exists "$BUILD_IMAGE"; then info "${BUILD_IMAGE}: present."; else cmd_build_image; fi
+    header "2/7 Build image";  if _image_exists "$BUILD_IMAGE"; then info "${BUILD_IMAGE}: present."; else cmd_build_image; fi
     header "3/7 Build";        if [[ -x "${INSTALL}/bin/mangosd" ]]; then info "Already built (run 'build' to rebuild)."; else cmd_build; fi
     header "4/7 Client data";  if [[ -n "$client" ]]; then cmd_extract --client "$client"; else cmd_extract; fi
     header "5/7 Databases"
@@ -555,7 +599,7 @@ cmd_remove() {
     done
     if (( database )); then
         if _container_exists "$DB_CONTAINER"; then "$PODMAN" rm -f "$DB_CONTAINER" >/dev/null; success "${DB_CONTAINER} removed."; fi
-        if "$PODMAN" volume exists "$DB_VOLUME"; then "$PODMAN" volume rm "$DB_VOLUME" >/dev/null; success "Volume ${DB_VOLUME} (every account and character) removed."; fi
+        if _volume_exists "$DB_VOLUME"; then "$PODMAN" volume rm "$DB_VOLUME" >/dev/null; success "Volume ${DB_VOLUME} (every account and character) removed."; fi
     fi
     info "Files under ${WORK_DIR} are kept: sources, the build, client data, configs, secrets."
 }

@@ -11,6 +11,7 @@ ENG="${TELDRASSIL:-${TEST_DIR}/../teldrassil.sh}"
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 export PATH="${TEST_DIR}/stubs:$PATH" XDG_CONFIG_HOME="$T/config" STUB_LOG="$T/podman.log" STUB_SQL_IN="$T/sql.in"
 unset TELDRASSIL_PROFILE
+umask 022   # what a login shell has: the files below must be private anyway
 pass=0; fail=0
 ok(){ printf '  \033[32mPASS\033[0m %s\n' "$1"; pass=$((pass+1)); }
 bad(){ printf '  \033[31mFAIL\033[0m %s\n' "$1"; fail=$((fail+1)); }
@@ -85,6 +86,7 @@ run install --yes
 chk "the volume and container are created"       'grep -q "^podman volume create teldrassil-db" "$T/podman.log" && grep -q "^podman run -d --name teldrassil-db" "$T/podman.log"'
 chk "  and the installer runs (DeleteAll on nothing)" 'grep -q "podman run --rm .*InstallFullDB.sh" "$T/podman.log" && grep -q DeleteAll "$T/podman.log"'
 chk "  with no dump (there is nothing to keep)"  '! grep -q mariadb-dump "$T/podman.log"'
+chk "  its database password is private (0600, in a 0700 folder)" '[[ "$(stat -c %a "$W/secrets/root.pw")" == 600 && "$(stat -c %a "$W/secrets")" == 700 ]]'
 
 hdr "db-init --yes over existing databases dumps them first"
 scenario; export STUB_RUNNING=teldrassil-db STUB_SCHEMAS="classicmangos classiccharacters classicrealmd"
@@ -100,6 +102,99 @@ for how in partial empty; do
     run db-init --yes
     chk "  so does a dump that fails part-way or is empty ($how)" '[[ $rc -ne 0 && "$out" == *"nothing was replaced"* ]] && no_delete_all'
 done
+
+hdr "PODMAN=docker (docker has no 'image exists' or 'volume exists')"
+run set PODMAN docker
+scenario; export STUB_VOLUMES=teldrassil-db STUB_SCHEMAS="$ALL"
+run install --yes
+chk "the image is found: not rebuilt"            '[[ "$out" == *"present"* ]] && ! grep -q "^docker build" "$T/podman.log"'
+chk "the volume is found: a container on it, no DeleteAll" 'grep -q "^docker run -d --name teldrassil-db .*-v teldrassil-db:/var/lib/mysql" "$T/podman.log" && no_delete_all'
+chk "  and no 'exists' was asked"                '! grep -qE "^docker (image|volume) exists" "$T/podman.log"'
+scenario; mkdir -p "$T/state/volume"; : > "$T/state/volume/teldrassil-db"
+run remove --yes --database
+chk "remove --database removes the volume"       '[[ $rc -eq 0 ]] && grep -q "^docker volume rm teldrassil-db" "$T/podman.log" && [[ ! -e "$T/state/volume/teldrassil-db" ]]'
+run set PODMAN podman
+
+hdr "configure: the config files hold the database password, so are 0600"
+E="$W/install/etc"; mkdir -p "$E"
+printf '%s = x\n' DataDir LogsDir LoginDatabaseInfo WorldDatabaseInfo CharacterDatabaseInfo LogsDatabaseInfo \
+    WorldServerPort Console.Enable Ra.Enable Ra.IP Ra.Port > "$E/mangosd.conf.dist"
+printf '%s = x\n' LoginDatabaseInfo LogsDir RealmServerPort > "$E/realmd.conf.dist"
+printf 'AiPlayerbot.%s = x\n' MinRandomBots MaxRandomBots RandomBotAccountCount DisableActivityPriorities \
+    DisableBotOptimizations RandomBotAutoJoinBG LLMEnabled RandomBotGuildCount > "$E/aiplayerbot.conf.dist"
+printf 'AuctionHouseBot.Seller.Enabled = 0\n' > "$E/ahbot.conf.dist"
+run configure
+chk "configure writes them"                      '[[ $rc -eq 0 && -f "$W/etc/mangosd.conf" ]] && grep -q "$(cat "$W/secrets/mangos.pw")" "$W/etc/mangosd.conf"'
+all_private() { local f; for f in mangosd realmd aiplayerbot ahbot; do [[ "$(stat -c %a "$W/etc/$f.conf")" == 600 ]] || return 1; done; }
+chk "  each 0600"                                'all_private'
+chmod 644 "$W/etc/mangosd.conf"
+run configure --force
+chk "  and --force makes an open one private again" '[[ $rc -eq 0 && "$(stat -c %a "$W/etc/mangosd.conf")" == 600 ]]'
+
+hdr "rootful docker: the build image's containers run as the user (Kamino 225)"
+# Each container that writes into WORK_DIR: build, extract, the database
+# installer, the realm and world servers. Under rootful docker they run as the
+# user, so what they write is the user's; never under rootless docker or
+# podman, whose container root already is the user.
+# A playerbots tree the shipped patches apply to: each file holds what their
+# hunks expect to find (CRLF kept), so 'build' gets past _patch.
+python3 -I - "$W/src/playerbots" "${TEST_DIR}"/../templates/patches/playerbots/*.patch <<'PY'
+import os, sys
+root = sys.argv[1]
+for p in sys.argv[2:]:
+    cur, hunk = None, False
+    for line in open(p, newline=""):
+        if line.startswith("--- a/"):
+            cur = os.path.join(root, line[6:].strip()); os.makedirs(os.path.dirname(cur), exist_ok=True)
+            open(cur, "a").close(); hunk = False
+        elif line.startswith(("+++ ", "diff ")):
+            hunk = False
+        elif line.startswith("@@"):
+            hunk = True
+        elif hunk and line[:1] in (" ", "-"):
+            with open(cur, "a", newline="") as f:
+                f.write(line[1:])
+PY
+mkdir -p "$W/install/bin/tools" "$T/client/Data"; : > "$W/install/bin/tools/ExtractResources.sh"
+printf '#!/bin/sh\n' > "$W/install/bin/realmd"; chmod +x "$W/install/bin/realmd"
+ME="--user $(id -u):$(id -g) -e HOME=/tmp"
+# containers <rt> — every 'run --rm' and 'create' the commands below make.
+containers() {
+    scenario; export STUB_RUNNING=teldrassil-db STUB_SCHEMAS="$ALL"
+    run build;                       out_build="$out"
+    run extract --client "$T/client" --force
+    run db-init --yes
+    run create
+    grep -E "^$1 (run --rm|create) " "$T/podman.log" > "$T/containers"
+}
+# as_user <0|1> — each of the five carries the user (1), or none does (0).
+as_user() {
+    local w n; n=0
+    for w in ":/build:z" "ExtractResources.sh" "InstallFullDB.sh" "./realmd" "./mangosd"; do
+        grep -qF -- "$w" "$T/containers" || return 1
+        grep -F -- "$w" "$T/containers" | grep -qF -- "$ME" && n=$((n+1))
+    done
+    if (( $1 )); then (( n == 5 )); else (( n == 0 )) && ! grep -q -- "--user" "$T/containers"; fi
+}
+run set PODMAN docker
+unset STUB_SECURITY
+containers docker
+chk "rootful docker: build, extract, db install, realmd and mangosd run as $(id -u):$(id -g)" 'as_user 1'
+chk "  the build got past the patches to its container" '[[ "$out_build" == *"Patch 0001"* ]] && grep -qF ":/build:z" "$T/containers"'
+export STUB_SECURITY="[name=seccomp,profile=builtin name=rootless name=cgroupns]"
+containers docker
+chk "rootless docker: none of them gets --user"   'as_user 0'
+export STUB_SECURITY=fail
+containers docker
+chk "docker that cannot say (podman's docker shim): none gets --user" 'as_user 0'
+unset STUB_SECURITY
+run set PODMAN podman
+containers podman
+chk "podman: none of them gets --user"            'as_user 0'
+export STUB_PODMAN_INFO="[name=seccomp]"
+containers podman
+chk "  not even a podman whose 'info' answered as rootful docker would" 'as_user 0'
+unset STUB_PODMAN_INFO
 
 printf '\npass=%d fail=%d\n' "$pass" "$fail"
 (( fail == 0 ))

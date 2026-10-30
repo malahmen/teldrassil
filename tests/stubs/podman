@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # A stand-in for podman: no test may reach a real container. Each call is
-# logged to $STUB_LOG.
+# logged to $STUB_LOG. Called as docker (tests/stubs/docker links here), it
+# has no 'image exists' or 'volume exists', as docker has none.
 #   $STUB_RUNNING  containers that are running
 #   $STUB_STOPPED  containers that exist but are stopped (until 'start'): an
 #                  'exec' into one fails, as on a host after a reboot
@@ -11,9 +12,24 @@
 #   $STUB_SCHEMAS  the databases a query on information_schema.SCHEMATA sees
 #   $STUB_DUMP_FAIL  mariadb-dump fails: 1 at once, 'partial' after some
 #                  output, 'empty' succeeds with no output
+#   $STUB_SQL_MAP    a file of 'regex<TAB>reply' lines: SQL matching a regex
+#                  gets that reply (the first that matches; read at each call,
+#                  so a test can change the answers while a command runs)
+#   $STUB_SQL_FAIL   SQL matching this regex fails, as the database would
+#   $STUB_DB_NEEDS   SQL fails while this container is not running: a database
+#                  step that breaks once the world server is stopped
+# A container's {{.State.StartedAt}} is a counter in $STUB_STATE/started,
+# moved on by every start of a stopped container (and by whatever a test does
+# to stand in for a restart policy).
+# 'docker info' prints its SecurityOptions: $STUB_SECURITY (rootful docker's
+# by default; one with name=rootless is rootless docker; 'fail': docker cannot
+# answer - podman's docker shim, a daemon that is down). podman's 'info' has
+# no such field, and fails - unless $STUB_PODMAN_INFO gives it an answer.
+# 'create --name X' makes a stopped container.
 # Every other container or volume is missing. 'exec' answers any other SQL
 # with $STUB_SQL_REPLY; its input is appended to $STUB_SQL_IN.
-echo "podman $*" >> "${STUB_LOG:-/dev/null}"
+me="$(basename "$0")"
+echo "${me} $*" >> "${STUB_LOG:-/dev/null}"
 S="${STUB_STATE:-}"
 listed() { [[ " $1 " == *" $2 "* ]]; }
 mark() { [[ -n "$S" ]] && mkdir -p "$S/$1" && : > "$S/$1/$2"; return 0; }
@@ -28,6 +44,7 @@ case "$1" in
         case "$*" in
             *'{{.State.Running}}'*) if running "$name"; then echo true; else echo false; fi ;;
             *'{{.State.Status}}'*) if running "$name"; then echo running; else echo exited; fi ;;
+            *'{{.State.StartedAt}}'*) cat "$S/started/$name" 2>/dev/null || echo 0 ;;
         esac ;;
     exec)
         shift; while [[ "$1" == -* ]]; do shift; done; name="$1"
@@ -47,7 +64,17 @@ case "$1" in
             esac
         else
             sql="$(cat)"; printf '%s\n' "$sql" >> "${STUB_SQL_IN:-/dev/null}"
-            if [[ "$sql" == *SCHEMATA* && -n "${STUB_SCHEMAS+set}" ]]; then
+            if [[ -n "${STUB_SQL_FAIL:-}" && "$sql" =~ $STUB_SQL_FAIL ]] || { [[ -n "${STUB_DB_NEEDS:-}" ]] && ! running "$STUB_DB_NEEDS"; }; then
+                echo "ERROR 1064 (42000): the stub refuses this" >&2; exit 1
+            fi
+            mapped=""
+            if [[ -n "${STUB_SQL_MAP:-}" && -r "$STUB_SQL_MAP" ]]; then
+                while IFS=$'\t' read -r re reply; do
+                    [[ -n "$re" && "$sql" =~ $re ]] && { mapped=1; printf '%s\n' "$reply"; break; }
+                done < "$STUB_SQL_MAP"
+            fi
+            if [[ -n "$mapped" ]]; then :
+            elif [[ "$sql" == *SCHEMATA* && -n "${STUB_SCHEMAS+set}" ]]; then
                 if [[ "$sql" =~ COUNT.*SCHEMA_NAME=\'([^\']*)\' ]]; then
                     if listed "$STUB_SCHEMAS" "${BASH_REMATCH[1]}"; then echo 1; else echo 0; fi
                 else
@@ -57,11 +84,19 @@ case "$1" in
                 printf '%s\n' "${STUB_SQL_REPLY:-0}"
             fi
         fi ;;
-    image) [[ "${2:-}" == exists && -n "${STUB_IMAGE:-}" ]] ;;   # an image "exists" only when asked to
+    image)   # an image "exists" only when asked to
+        case "${2:-}" in
+            exists) [[ "$me" == podman && -n "${STUB_IMAGE:-}" ]] ;;
+            inspect) [[ -n "${STUB_IMAGE:-}" ]] ;;
+            *) exit 1 ;;
+        esac ;;
     volume)
         case "${2:-}" in
-            exists) listed "${STUB_VOLUMES:-}" "$3" || marked volume "$3" ;;
+            exists) [[ "$me" == podman ]] && { listed "${STUB_VOLUMES:-}" "$3" || marked volume "$3"; } ;;
+            ls) for v in ${STUB_VOLUMES:-}; do echo "$v"; done
+                [[ -z "$S" || ! -d "$S/volume" ]] || ls -1 "$S/volume" ;;
             create) mark volume "$3" ;;
+            rm) [[ -z "$S" ]] || rm -f -- "$S/volume/$3" ;;
             *) exit 1 ;;
         esac ;;
     run)
@@ -70,8 +105,24 @@ case "$1" in
         [[ " $* " == *" -d "* ]] || exit 1
         name=""; prev=""; for a in "$@"; do [[ "$prev" == --name ]] && name="$a"; prev="$a"; done
         mark exists "$name"; mark running "$name" ;;
-    start) mark running "${*: -1}" ;;
+    info)
+        if [[ "$me" == podman ]]; then
+            [[ -n "${STUB_PODMAN_INFO:-}" ]] || { echo "Error: template: info: can't evaluate field SecurityOptions" >&2; exit 125; }
+            echo "$STUB_PODMAN_INFO"; exit 0
+        fi
+        [[ "${STUB_SECURITY:-}" != fail ]] || { echo "Error: template: info: can't evaluate field SecurityOptions" >&2; exit 125; }
+        echo "${STUB_SECURITY-[name=apparmor name=seccomp,profile=builtin name=cgroupns]}" ;;
+    create)
+        name=""; prev=""; for a in "$@"; do [[ "$prev" == --name ]] && name="$a"; prev="$a"; done
+        mark exists "$name" ;;
+    start)
+        name="${*: -1}"
+        if ! running "$name" && [[ -n "$S" ]]; then
+            mkdir -p "$S/started"; echo $(( $(cat "$S/started/$name" 2>/dev/null || echo 0) + 1 )) > "$S/started/$name"
+        fi
+        mark running "$name" ;;
     stop) [[ -z "$S" ]] || rm -f -- "$S/running/${*: -1}" ;;
+    rm) [[ -z "$S" ]] || rm -f -- "$S/running/${*: -1}" "$S/exists/${*: -1}" ;;
     logs) echo "${STUB_LOG_LINE:-}" ;;
     *) exit 1 ;;
 esac
