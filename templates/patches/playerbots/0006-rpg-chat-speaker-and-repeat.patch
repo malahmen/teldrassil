@@ -1,0 +1,72 @@
+diff --git a/playerbot/strategy/actions/RpgSubActions.cpp b/playerbot/strategy/actions/RpgSubActions.cpp
+index b773b04..a923a53 100644
+--- a/playerbot/strategy/actions/RpgSubActions.cpp
++++ b/playerbot/strategy/actions/RpgSubActions.cpp
+@@ -362,6 +362,12 @@ bool RpgAIChatAction::SpeakLine()
+ 
+     packet >> chatTag;
+ 
++    // kalimdor: what was said, before the speaker's name goes in front - the
++    // "d:" check below ran on "<name>: <line>", so every line of a speaker
++    // whose name ends in d was left out of the conversation the model sees,
++    // and it repeated what it could not see had been said (owner, 2026-10-30).
++    const std::string said = message;
++
+     if (bot->GetObjectGuid() == senderGuid)
+     {
+         if (type == CHAT_MSG_EMOTE)
+@@ -390,7 +396,7 @@ bool RpgAIChatAction::SpeakLine()
+         }
+     }
+ 
+-    if (message.find("d:") == std::string::npos)
++    if (said.find("d:") == std::string::npos)
+     {
+         std::string llmContext = AI_VALUE(std::string, "manual string::llmcontext rpg");
+         llmContext = llmContext + " " + message;
+@@ -487,16 +493,24 @@ bool RpgAIChatAction::RequestNewLines()
+         break;
+     }
+ 
+-    std::string postPompt;
++    // kalimdor: say whose line this is, as the request's user message. The
++    // prompt describes the scene and "<bot name> wants to ask <unit name>..."
++    // but never who speaks now, and <prompt> was sent empty - so the model
++    // continued or repeated the last line, and on the NPC's turns it wrote the
++    // bot's question: the two swapped, the NPC echoed the bot (owner,
++    // 2026-10-30). Not in <post prompt>: a template need not have one (the
++    // one teldrassil writes has none). The sender and receiver placeholders
++    // already follow the turn.
++    std::string turn = "[Write only <sender name>'s next line, spoken to <receiver name>. Do not repeat a line already said.]";
+ 
+     if (chatLine == 2)
+-        postPompt = "[<bot name> has to go. Say goodbye.]";
++        turn += "[<bot name> has to go. Say goodbye.]";
+ 
+-    postPompt += sPlayerbotAIConfig.llmPostPrompt;
++    std::string postPompt = sPlayerbotAIConfig.llmPostPrompt;
+ 
+     std::map<std::string, std::string> jsonFill;
+     jsonFill["<pre prompt>"] = prePrompt;
+-    jsonFill["<prompt>"] = "";
++    jsonFill["<prompt>"] = turn;
+     jsonFill["<post prompt>"] = postPompt;
+ 
+     for (auto& prompt : jsonFill)
+@@ -553,7 +567,16 @@ bool RpgAIChatAction::RequestNewLines()
+     chatLine--;
+ 
+     if (chatLine == 0)
++    {
+         chatLine = -1;
++        // kalimdor: a conversation had is not had again at once. The NPC was
++        // ignored afterwards only sometimes - never while the bot's travel
++        // target was that NPC's kind - so a bot talked to the same one again
++        // and again, minutes each time at the LLM's pace (owner, 2026-10-30).
++        // The ignore list keeps the last 50.
++        if (unit)
++            AI_VALUE(std::set<ObjectGuid>&, "ignore rpg target").insert(unit->GetObjectGuid());
++    }
+     else
+     {
+         SET_AI_VALUE(std::string, "next rpg action", "rpg ai chat");

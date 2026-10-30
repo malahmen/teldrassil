@@ -137,25 +137,37 @@ hdr "rootful docker: the build image's containers run as the user (Kamino 225)"
 # user, so what they write is the user's; never under rootless docker or
 # podman, whose container root already is the user.
 # Trees the shipped patches apply to - playerbots and the core: each file
-# holds what their hunks expect to find (CRLF kept), so 'build' gets past
-# _patch.
+# holds what the hunks touching it expect to find (CRLF kept), so 'build' gets
+# past _patch. Patches stack - a later one changes lines an earlier one wrote,
+# or a file it created - so each patch's hunks get their own region of the
+# file, in patch order, and a file an earlier patch creates is not made up at
+# all: that patch carries its whole content.
 for tree in playerbots mangos-classic; do
 python3 -I - "$W/src/$tree" "${TEST_DIR}/../templates/patches/$tree"/*.patch <<'PY'
 import os, sys
 root = sys.argv[1]
+created, head, body = set(), {}, {}
 for p in sys.argv[2:]:
-    cur, hunk = None, False
+    cur, region, pending_new = None, None, False
     for line in open(p, newline=""):
-        if line.startswith("--- a/"):
-            cur = os.path.join(root, line[6:].strip()); os.makedirs(os.path.dirname(cur), exist_ok=True)
-            open(cur, "a").close(); hunk = False
+        if line.startswith("--- /dev/null"):
+            pending_new, cur, region = True, None, None
+        elif line.startswith("+++ b/") and pending_new:
+            created.add(line[6:].strip()); pending_new = False
+        elif line.startswith("--- a/"):
+            path = line[6:].strip(); region = None
+            cur = None if path in created else os.path.join(root, path)
         elif line.startswith(("+++ ", "diff ")):
-            hunk = False
-        elif line.startswith("@@"):
-            hunk = True
-        elif hunk and line[:1] in (" ", "-"):
-            with open(cur, "a", newline="") as f:
-                f.write(line[1:])
+            region = None
+        elif line.startswith("@@") and cur:
+            # A hunk at line 1 has to match the file's start.
+            region = (head if line.startswith("@@ -1,") else body).setdefault(cur, [])
+        elif region is not None and line[:1] in (" ", "-"):
+            region.append(line[1:])
+for cur in set(head) | set(body):
+    os.makedirs(os.path.dirname(cur), exist_ok=True)
+    with open(cur, "w", newline="") as f:
+        f.write("".join(head.get(cur, []) + body.get(cur, [])))
 PY
 done
 mkdir -p "$W/install/bin/tools" "$T/client/Data"; : > "$W/install/bin/tools/ExtractResources.sh"
