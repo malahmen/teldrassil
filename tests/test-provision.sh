@@ -136,9 +136,11 @@ hdr "rootful docker: the build image's containers run as the user (Kamino 225)"
 # installer, the realm and world servers. Under rootful docker they run as the
 # user, so what they write is the user's; never under rootless docker or
 # podman, whose container root already is the user.
-# A playerbots tree the shipped patches apply to: each file holds what their
-# hunks expect to find (CRLF kept), so 'build' gets past _patch.
-python3 -I - "$W/src/playerbots" "${TEST_DIR}"/../templates/patches/playerbots/*.patch <<'PY'
+# Trees the shipped patches apply to - playerbots and the core: each file
+# holds what their hunks expect to find (CRLF kept), so 'build' gets past
+# _patch.
+for tree in playerbots mangos-classic; do
+python3 -I - "$W/src/$tree" "${TEST_DIR}/../templates/patches/$tree"/*.patch <<'PY'
 import os, sys
 root = sys.argv[1]
 for p in sys.argv[2:]:
@@ -155,6 +157,7 @@ for p in sys.argv[2:]:
             with open(cur, "a", newline="") as f:
                 f.write(line[1:])
 PY
+done
 mkdir -p "$W/install/bin/tools" "$T/client/Data"; : > "$W/install/bin/tools/ExtractResources.sh"
 printf '#!/bin/sh\n' > "$W/install/bin/realmd"; chmod +x "$W/install/bin/realmd"
 ME="--user $(id -u):$(id -g) -e HOME=/tmp"
@@ -180,7 +183,7 @@ run set PODMAN docker
 unset STUB_SECURITY
 containers docker
 chk "rootful docker: build, extract, db install, realmd and mangosd run as $(id -u):$(id -g)" 'as_user 1'
-chk "  the build got past the patches to its container" '[[ "$out_build" == *"Patch 0001"* ]] && grep -qF ":/build:z" "$T/containers"'
+chk "  the build got past the patches to its container" '[[ "$out_build" == *"Patch playerbots/0001"* && "$out_build" == *"Patch mangos-classic/0001"* ]] && grep -qF ":/build:z" "$T/containers"'
 export STUB_SECURITY="[name=seccomp,profile=builtin name=rootless name=cgroupns]"
 containers docker
 chk "rootless docker: none of them gets --user"   'as_user 0'

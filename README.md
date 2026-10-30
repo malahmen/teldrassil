@@ -36,7 +36,7 @@ which. Only `db-init --yes`, run by hand, replaces them.
 | --- | --- |
 | `source` | checks out cmangos-classic, playerbots and classic-db at pinned commits (`MANGOS_REF`, `PLAYERBOTS_REF`, `CLASSICDB_REF`; `source --update` moves to new pins) - or, with `SOURCE_REPO` set, clones one repository holding all three (and `zlib/`), such as kalimdor, at `SOURCE_REF` |
 | `build-image` | the one image for building, tools and running (Ubuntu 24.04) |
-| `build` | applies teldrassil's playerbots patches (`templates/patches/playerbots/`; already-applied ones are recognised, in a subfolder too), then compiles with playerbots and the extractors. Sources with their own `zlib/` build with no network at all; otherwise zlib is fetched from GitHub |
+| `build` | applies teldrassil's patches (`templates/patches/playerbots/` and `templates/patches/mangos-classic/`; already-applied ones are recognised, in a subfolder too), then compiles with playerbots and the extractors. Sources with their own `zlib/` build with no network at all; otherwise zlib is fetched from GitHub |
 | `extract` | dbc, maps, vmaps and mmaps from the 1.12.1 client (~20 minutes on many cores, ~2.4 GB) |
 | `db-init --yes` | a MariaDB container on 127.0.0.1 only, the four databases from classic-db with playerbots' tables (replacing any that exist, after dumping them to `~/.config/teldrassil/dumps/before-db-init-*.sql.gz`; if the dump fails, nothing is replaced), the realm's name and address, a console account for teldrassil; it removes cmangos' default accounts |
 | `configure` | `mangosd.conf`, `realmd.conf`, `aiplayerbot.conf` and `ahbot.conf` from their templates: the database, ports, the remote console on 127.0.0.1, the bot count. An existing file is kept unless `--force`, since `roster apply` edits them |
@@ -114,7 +114,7 @@ It runs from its checkout:
 | `lib/attune.sh` | `attune` |
 | `lib/provision.sh` | `install`, `source`, `build-image`, `build`, `extract`, `db-init`, `configure`, `create`, `remove` |
 | `templates/Containerfile` | the build, tools and server image |
-| `templates/patches/playerbots/` | teldrassil's changes to playerbots, applied before every build |
+| `templates/patches/playerbots/`, `templates/patches/mangos-classic/` | teldrassil's changes to playerbots and to the core, applied before every build |
 | `lib/teldrassil.py` | the helper |
 | `examples/roster.example.json` | a roster to start from |
 
@@ -251,8 +251,9 @@ See `examples/roster.example.json`. The rules it enforces:
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries two changes to playerbots (`templates/patches/playerbots/`,
-applied before every build):
+teldrassil carries two changes to playerbots (`templates/patches/playerbots/`)
+and one to the core (`templates/patches/mangos-classic/`), applied before
+every build:
 
 - **0001:** stored strategies are written as `nc+`/`co+` rows that *add to*
   a bot's defaults - upstream, any stored row replaces them - and bots with
@@ -263,6 +264,12 @@ applied before every build):
   once, and the corrupted `std::map` looped forever - the world stopped
   ticking, bots stopped logging in, the console stopped answering. The lookup
   is now read-only.
+- **mangos-classic 0001:** a fix for a crash. A creature in ranged mode with
+  no main spell (EventAI: "has ranged mode action but no main spell" - the
+  Pyrewood Watcher, 1891) reached `UnitAI::IsMainSpellPrevented` with a null
+  spell, which it dereferenced: the world server segfaulted (core dump,
+  2026-10-29). No spell now counts as prevented. kalimdor commits the same
+  change.
 
 `roster apply` writes the database only while the world server is stopped:
 guilds and characters live in its memory, and a change made under it is

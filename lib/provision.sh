@@ -141,12 +141,12 @@ _checkout_repo() {
         return 0
     fi
     if (( ! update )); then info "Sources: ${dir} at $(git -C "$dir" rev-parse --short HEAD) ('source --update' fetches ${ref})."; return 0; fi
-    # teldrassil's playerbots patches, applied by 'build', are not local
+    # teldrassil's patches, applied by 'build', are not local
     # changes: taken off first. Where the repository commits them itself the
     # tree is clean and nothing is taken off. Anything else left is a local
     # change: the patches go back on, and nothing moves.
     if [[ -n "$(git -C "$dir" status --porcelain)" ]]; then
-        _unpatch "$SRC_PB"
+        _unpatch "$SRC_PB"; _unpatch "$SRC_MANGOS"
         if [[ -n "$(git -C "$dir" status --porcelain)" ]]; then
             ( _patch ) >/dev/null 2>&1 || true
             error_exit "${dir} has local changes; commit or remove them first."
@@ -184,8 +184,12 @@ cmd_source() {
     _checkout "$SRC_DB" "$CLASSICDB_REPO" "$CLASSICDB_REF" "$update"
 }
 
-# Our playerbots changes (templates/patches/playerbots/*.patch), applied to
-# the checkout before every build and taken off before it moves.
+# Our changes, one folder per source tree - templates/patches/playerbots/ and
+# templates/patches/mangos-classic/ (the core) - applied to the checkout
+# before every build and taken off before it moves. _patch_dir <tree> names
+# the checkout a folder's patches belong to.
+_patch_dir() { case "$1" in playerbots) printf '%s' "$SRC_PB" ;; mangos-classic) printf '%s' "$SRC_MANGOS" ;; esac; }
+_PATCH_TREES=(mangos-classic playerbots)
 # _apply <dir> <git apply args...> — git apply, right in a subfolder too. In a
 # subfolder of a bigger repository (kalimdor's playerbots/), git apply skips
 # every file outside it, so a patch whose paths are relative to playerbots
@@ -198,24 +202,30 @@ _apply() {
 }
 
 _patch() {
-    local p
-    for p in "${PATCH_DIR}"/playerbots/*.patch; do
-        [[ -f "$p" ]] || continue
-        if _apply "$SRC_PB" --reverse --check "$p" 2>/dev/null; then
-            info "Patch $(basename "$p"): already applied."
-        elif _apply "$SRC_PB" --check "$p" 2>/dev/null; then
-            _apply "$SRC_PB" "$p"; success "Patch $(basename "$p"): applied."
-        else
-            error_exit "Patch $(basename "$p") does not apply to playerbots at $(git -C "$SRC_PB" rev-parse --short HEAD); it needs updating for that commit."
-        fi
+    local tree dir p
+    for tree in "${_PATCH_TREES[@]}"; do
+        dir="$(_patch_dir "$tree")"
+        for p in "${PATCH_DIR}/${tree}"/*.patch; do
+            [[ -f "$p" ]] || continue
+            if _apply "$dir" --reverse --check "$p" 2>/dev/null; then
+                info "Patch ${tree}/$(basename "$p"): already applied."
+            elif _apply "$dir" --check "$p" 2>/dev/null; then
+                _apply "$dir" "$p"; success "Patch ${tree}/$(basename "$p"): applied."
+            else
+                error_exit "Patch ${tree}/$(basename "$p") does not apply to ${tree} at $(git -C "$dir" rev-parse --short HEAD); it needs updating for that commit."
+            fi
+        done
     done
 }
+# _unpatch <dir> — take off the patches of the tree checked out at <dir>.
 _unpatch() {
-    local dir="$1" p
-    [[ "$dir" == "$SRC_PB" ]] || return 0
-    for p in "${PATCH_DIR}"/playerbots/*.patch; do
-        [[ -f "$p" ]] || continue
-        if _apply "$dir" --reverse --check "$p" 2>/dev/null; then _apply "$dir" --reverse "$p"; fi
+    local dir="$1" tree p
+    for tree in "${_PATCH_TREES[@]}"; do
+        [[ "$dir" == "$(_patch_dir "$tree")" ]] || continue
+        for p in "${PATCH_DIR}/${tree}"/*.patch; do
+            [[ -f "$p" ]] || continue
+            if _apply "$dir" --reverse --check "$p" 2>/dev/null; then _apply "$dir" --reverse "$p"; fi
+        done
     done
     return 0
 }
