@@ -49,6 +49,8 @@ chk "nothing outside the subfolder moved"  '[[ "$(cat "$T/kal/other/y")" == x ]]
 
 # _patch, _unpatch and _checkout_repo, with the messages they print kept.
 eval "$(sed -n -e '/^_patch() {/,/^}/p' -e '/^_unpatch() {/,/^}/p' -e '/^_checkout_repo() {/,/^}/p' "$SRC")"
+eval "$(grep -E '^(_patch_dir\(\) \{|_PATCH_TREES=)' "$SRC")"
+declare -F _patch_dir >/dev/null && [[ ${#_PATCH_TREES[@]} -gt 0 ]] || { echo "no _patch_dir/_PATCH_TREES in $SRC"; exit 1; }
 info() { echo "info: $*"; }; success() { echo "ok: $*"; }; warn() { echo "warn: $*"; }
 error_exit() { echo "error: $*"; exit 1; }
 mkdir -p "$T/patches/playerbots"; cp "$T/fix.patch" "$T/patches/playerbots/0001-fix.patch"
@@ -66,12 +68,12 @@ mk_origin() {   # mk_origin <dir> [committed] — with the patch committed, or n
 upstream_moves() { echo "$RANDOM" > "$1/classic-db/new.sql"; g -C "$1" add -A; g -C "$1" commit -qm more; }
 mk_origin "$T/kal-origin"
 g clone -q "$T/kal-origin" "$T/src"
-SRC_PB="$T/src/playerbots"
+SRC_PB="$T/src/playerbots"; SRC_MANGOS="$T/src/mangos-classic"
 out="$(_patch 2>&1)"
-chk "a clean tree: 'applied'"                       '[[ "$out" == *"Patch 0001-fix.patch: applied"* ]]'
+chk "a clean tree: 'applied'"                       '[[ "$out" == *"Patch playerbots/0001-fix.patch: applied"* ]]'
 chk "  and the file really changed"                 'grep -qx "line 2" "$SRC_PB/playerbot/x.cpp"'
 out="$(_patch 2>&1)"
-chk "again: 'already applied', nothing changes"     '[[ "$out" == *"0001-fix.patch: already applied"* ]] && [[ "$(grep -c "line 2" "$SRC_PB/playerbot/x.cpp")" == 1 ]]'
+chk "again: 'already applied', nothing changes"     '[[ "$out" == *"playerbots/0001-fix.patch: already applied"* ]] && [[ "$(grep -c "line 2" "$SRC_PB/playerbot/x.cpp")" == 1 ]]'
 printf 'line one\nsomething else\n' > "$SRC_PB/playerbot/x.cpp"
 out="$( (_patch) 2>&1)"; rc=$?
 chk "a tree it does not fit: an error, not 'applied'" '[[ $rc -ne 0 && "$out" == *"does not apply"* && "$out" != *"applied."* ]]'
@@ -95,6 +97,18 @@ chk "they read 'already applied'; the tree stays clean" '[[ "$out" == *"already 
 upstream_moves "$T/kal-origin"
 out="$( (_checkout_repo "$T/src" "$T/kal-origin" main 1) 2>&1)"; rc=$?
 chk "it moves, and the committed patch is not taken off" '[[ $rc -eq 0 && -z "$(g -C "$T/src" status --porcelain)" ]] && grep -qx "line 2" "$SRC_PB/playerbot/x.cpp"'
+
+printf '\n== a patch to the core (mangos-classic), beside the playerbots one\n'
+rm -rf "$T/src"; mk_origin "$T/kal-origin"; g clone -q "$T/kal-origin" "$T/src"
+mkdir -p "$T/src/mangos-classic/src"; printf 'a\nb\n' > "$T/src/mangos-classic/src/ai.cpp"; g -C "$T/src" add -A; g -C "$T/src" commit -qm core
+printf 'a\nb fixed\n' > "$T/src/mangos-classic/src/ai.cpp"; g -C "$T/src/mangos-classic" diff --relative > "$T/core.patch"; g -C "$T/src" checkout -q -- .
+mkdir -p "$T/patches/mangos-classic"; cp "$T/core.patch" "$T/patches/mangos-classic/0001-core.patch"
+out="$(_patch 2>&1)"
+chk "the core patch is applied, named by its tree"  '[[ "$out" == *"Patch mangos-classic/0001-core.patch: applied"* ]] && grep -qx "b fixed" "$T/src/mangos-classic/src/ai.cpp"'
+chk "  and the playerbots one beside it"            '[[ "$out" == *"Patch playerbots/0001-fix.patch: applied"* ]]'
+_unpatch "$SRC_MANGOS"
+chk "_unpatch takes off only that tree's patches" 'grep -qx "b" "$T/src/mangos-classic/src/ai.cpp" && grep -qx "line 2" "$SRC_PB/playerbot/x.cpp"'
+rm -r "$T/patches/mangos-classic"
 
 printf '\npass=%d fail=%d\n' "$pass" "$fail"
 (( fail == 0 ))

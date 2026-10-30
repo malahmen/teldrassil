@@ -1,0 +1,19 @@
+diff --git a/src/game/AI/BaseAI/UnitAI.cpp b/src/game/AI/BaseAI/UnitAI.cpp
+index d3d1cb9..04ad502 100644
+--- a/src/game/AI/BaseAI/UnitAI.cpp
++++ b/src/game/AI/BaseAI/UnitAI.cpp
+@@ -1133,6 +1133,14 @@ SpellSchoolMask UnitAI::GetMainAttackSchoolMask() const
+ 
+ bool UnitAI::IsMainSpellPrevented(SpellEntry const* spellInfo) const
+ {
++    // kalimdor: a creature in ranged mode can have no main spell (EventAI logs
++    // "has ranged mode action but no main spell", e.g. Pyrewood Watcher, 1891),
++    // and UpdateAI passes m_mainSpellInfo here unchecked: dereferencing it
++    // segfaulted the world server (core dump, 2026-10-29). No spell is a
++    // spell that cannot be cast.
++    if (!spellInfo)
++        return true;
++
+     if (!m_unit->IsSpellReady(*spellInfo))
+         return true;
+ 
