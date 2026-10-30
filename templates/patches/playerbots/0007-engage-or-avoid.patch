@@ -1,0 +1,530 @@
+diff --git a/playerbot/strategy/actions/ActionContext.h b/playerbot/strategy/actions/ActionContext.h
+index d19d27a..fad5b1a 100644
+--- a/playerbot/strategy/actions/ActionContext.h
++++ b/playerbot/strategy/actions/ActionContext.h
+@@ -3,6 +3,7 @@
+ #include "GenericActions.h"
+ #include "MoveAwayFromEnemyGuardAction.h"
+ #include "GiveUpGatheringAction.h"
++#include "KeepAwayFromEnemyPlayerAction.h"
+ #include "EmoteAction.h"
+ #include "AddLootAction.h"
+ #include "LootAction.h"
+@@ -434,6 +435,7 @@ namespace ai
+             creators["move away from enemy guard"] = [](PlayerbotAI* ai) { return new MoveAwayFromEnemyGuardAction(ai); };
+             creators["leave hostile territory"] = [](PlayerbotAI* ai) { return new LeaveHostileTerritoryAction(ai); };
+             creators["give up gathering"] = [](PlayerbotAI* ai) { return new GiveUpGatheringAction(ai); };
++            creators["keep away from enemy player"] = [](PlayerbotAI* ai) { return new KeepAwayFromEnemyPlayerAction(ai); };
+ 
+ #ifdef GenerateBotTests
+             creators["test"] = [](PlayerbotAI* ai) { return new TestAction(ai); };
+diff --git a/playerbot/strategy/actions/KeepAwayFromEnemyPlayerAction.cpp b/playerbot/strategy/actions/KeepAwayFromEnemyPlayerAction.cpp
+new file mode 100644
+index 0000000..9291d3f
+--- /dev/null
++++ b/playerbot/strategy/actions/KeepAwayFromEnemyPlayerAction.cpp
+@@ -0,0 +1,67 @@
++#include "playerbot/playerbot.h"
++#include "KeepAwayFromEnemyPlayerAction.h"
++#include "playerbot/strategy/values/EngageOdds.h"
++#include "playerbot/TravelMgr.h"
++
++using namespace ai;
++
++bool KeepAwayFromEnemyPlayerAction::isPossible()
++{
++    return MovementAction::isPossible() && ai->CanMove();
++}
++
++bool KeepAwayFromEnemyPlayerAction::Execute(Event& event)
++{
++    Player* enemy = EngageOdds::StrongEnemyNear(bot);
++    if (!enemy)
++        return false;
++
++    // Said once per enemy, so the log shows the decisions, not every step.
++    std::string const enemyKey = std::to_string(enemy->GetGUIDLow());
++    if (AI_VALUE2(std::string, "manual string", "kept away from") != enemyKey)
++    {
++        SET_AI_VALUE2(std::string, "manual string", "kept away from", enemyKey);
++        float const enemySide = EngageOdds::PvpEnemySide(bot, enemy);
++        sLog.outString("Bot #%d %s:%d <%s> in %s: keeps away from %s:%d <%s> (sides %.1f against %s)", bot->GetGUIDLow(),
++            bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), WorldPosition(bot).getAreaName().c_str(),
++            enemy->GetTeam() == ALLIANCE ? "A" : "H", enemy->GetLevel(), enemy->GetName(), EngageOdds::OwnSide(bot),
++            enemySide < 0.0f ? "its guards" : std::to_string(enemySide).substr(0, std::to_string(enemySide).find('.') + 2).c_str());
++    }
++
++    // Points around the enemy, just outside KeepAwayRange, starting straight
++    // away from it and widening left and right (as the guard keep-away does).
++    // A point must be in line of sight and reachable on foot.
++    WorldPosition const botPosition(bot);
++    WorldPosition const enemyPosition(enemy);
++    float const distance = EngageOdds::KeepAwayRange + 5.0f;
++    float angleLeft = enemyPosition.getAngleTo(botPosition);
++    float angleRight = angleLeft;
++    uint8 const halfAttempts = 10;
++    float const angleIncrement = float(M_PI) / halfAttempts;
++
++    for (uint8 i = 0; i < halfAttempts; ++i)
++    {
++        for (float angle : { angleLeft, angleRight })
++        {
++            WorldPosition point = enemyPosition + WorldPosition(0, distance * cos(angle), distance * sin(angle), 1.0f);
++            point.setZ(point.getHeight());
++
++            if (!bot->IsWithinLOS(point.getX(), point.getY(), point.getZ() + bot->GetCollisionHeight()))
++                continue;
++
++            if (!botPosition.canPathTo(point, bot))
++                continue;
++
++            if (MoveTo(bot->GetMapId(), point.getX(), point.getY(), point.getZ(), false, false, false, true))
++            {
++                WaitForReach(point.distance(botPosition));
++                return true;
++            }
++        }
++
++        angleLeft += angleIncrement;
++        angleRight -= angleIncrement;
++    }
++
++    return false;
++}
+diff --git a/playerbot/strategy/actions/KeepAwayFromEnemyPlayerAction.h b/playerbot/strategy/actions/KeepAwayFromEnemyPlayerAction.h
+new file mode 100644
+index 0000000..a831f8d
+--- /dev/null
++++ b/playerbot/strategy/actions/KeepAwayFromEnemyPlayerAction.h
+@@ -0,0 +1,27 @@
++#pragma once
++#include "MovementActions.h"
++
++namespace ai
++{
++    // kalimdor: an enemy player not worth fighting is near - step out of its
++    // way, KeepAwayRange from it, then carry on (Kamino 218; owner's rule,
++    // 2026-10-30; values/EngageOdds.h).
++    class KeepAwayFromEnemyPlayerAction : public MovementAction
++    {
++    public:
++        KeepAwayFromEnemyPlayerAction(PlayerbotAI* ai) : MovementAction(ai, "keep away from enemy player") {}
++        bool Execute(Event& event) override;
++        bool isPossible() override;
++
++#ifdef GenerateBotHelp
++        virtual std::string GetHelpName() { return "keep away from enemy player"; }
++        virtual std::string GetHelpDescription()
++        {
++            return "This action moves the bot away from an enemy player it should not fight:\n"
++                   "the enemy's side - players, pets and guards near it - outweighs the bot's.";
++        }
++        virtual std::vector<std::string> GetUsedActions() { return {}; }
++        virtual std::vector<std::string> GetUsedValues() { return {}; }
++#endif
++    };
++}
+diff --git a/playerbot/strategy/generic/AvoidMobsStrategy.cpp b/playerbot/strategy/generic/AvoidMobsStrategy.cpp
+index f89d4ff..5654a64 100644
+--- a/playerbot/strategy/generic/AvoidMobsStrategy.cpp
++++ b/playerbot/strategy/generic/AvoidMobsStrategy.cpp
+@@ -22,6 +22,13 @@ void AvoidMobsStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
+     // objective by guards often enough lately - it walks out to neutral or
+     // friendly ground (Kamino 210; owner's rule, 2026-10-30). Out of combat
+     // only (the trigger checks); above choosing a new travel target.
++    // kalimdor: an enemy player near that is not worth fighting - its side
++    // outweighs the bot's - is kept away from; then the bot carries on
++    // (Kamino 218; owner's rule, 2026-10-30). Out of combat only (the trigger
++    // checks); just below the guards.
++    triggers.push_back(new TriggerNode(
++        "strong enemy player near",
++        NextAction::array(0, new NextAction("keep away from enemy player", ACTION_EMERGENCY + 4), NULL)));
+     triggers.push_back(new TriggerNode(
+         "blocked in hostile territory",
+         NextAction::array(0, new NextAction("leave hostile territory", ACTION_EMERGENCY + 1), NULL)));
+diff --git a/playerbot/strategy/triggers/StrongEnemyPlayerNearTrigger.cpp b/playerbot/strategy/triggers/StrongEnemyPlayerNearTrigger.cpp
+new file mode 100644
+index 0000000..9742b3e
+--- /dev/null
++++ b/playerbot/strategy/triggers/StrongEnemyPlayerNearTrigger.cpp
+@@ -0,0 +1,14 @@
++#include "playerbot/playerbot.h"
++#include "StrongEnemyPlayerNearTrigger.h"
++#include "playerbot/ServerFacade.h"
++#include "playerbot/strategy/values/EngageOdds.h"
++
++using namespace ai;
++
++bool StrongEnemyPlayerNearTrigger::IsActive()
++{
++    if (ai->IsRealPlayer() || bot->IsInCombat() || bot->InBattleGround() || bot->GetInstanceId() || !sServerFacade.IsAlive(bot))
++        return false;
++
++    return EngageOdds::StrongEnemyNear(bot) != nullptr;
++}
+diff --git a/playerbot/strategy/triggers/StrongEnemyPlayerNearTrigger.h b/playerbot/strategy/triggers/StrongEnemyPlayerNearTrigger.h
+new file mode 100644
+index 0000000..9dac7f1
+--- /dev/null
++++ b/playerbot/strategy/triggers/StrongEnemyPlayerNearTrigger.h
+@@ -0,0 +1,15 @@
++#pragma once
++#include "playerbot/strategy/Trigger.h"
++
++namespace ai
++{
++    // kalimdor: an enemy player near that could attack the bot and is not
++    // worth fighting (values/EngageOdds.h) - out of combat, outside
++    // battlegrounds and instances (Kamino 218).
++    class StrongEnemyPlayerNearTrigger : public Trigger
++    {
++    public:
++        StrongEnemyPlayerNearTrigger(PlayerbotAI* ai) : Trigger(ai, "strong enemy player near", 2) {}
++        virtual bool IsActive() override;
++    };
++}
+diff --git a/playerbot/strategy/triggers/TriggerContext.h b/playerbot/strategy/triggers/TriggerContext.h
+index c72fa57..4831614 100644
+--- a/playerbot/strategy/triggers/TriggerContext.h
++++ b/playerbot/strategy/triggers/TriggerContext.h
+@@ -2,6 +2,7 @@
+ 
+ #include "HealthTriggers.h"
+ #include "GatheringStalledTrigger.h"
++#include "StrongEnemyPlayerNearTrigger.h"
+ #include "GenericTriggers.h"
+ #include "LootTriggers.h"
+ #include "GenericTriggers.h"
+@@ -86,6 +87,7 @@ namespace ai
+             creators["enemy guard near"] = [](PlayerbotAI* ai) { return new EnemyGuardNearTrigger(ai); };
+             creators["blocked in hostile territory"] = [](PlayerbotAI* ai) { return new BlockedInHostileTerritoryTrigger(ai); };
+             creators["gathering stalled"] = [](PlayerbotAI* ai) { return new GatheringStalledTrigger(ai); };
++            creators["strong enemy player near"] = [](PlayerbotAI* ai) { return new StrongEnemyPlayerNearTrigger(ai); };
+             creators["enemy player near"] = [](PlayerbotAI* ai) { return new EnemyPlayerNear(ai); };
+ 
+             creators["combat start"] = [](PlayerbotAI* ai) { return new CombatStartTrigger(ai); };
+diff --git a/playerbot/strategy/values/AttackersValue.cpp b/playerbot/strategy/values/AttackersValue.cpp
+index c22a62c..c1809fc 100644
+--- a/playerbot/strategy/values/AttackersValue.cpp
++++ b/playerbot/strategy/values/AttackersValue.cpp
+@@ -3,6 +3,7 @@
+ #include "AttackersValue.h"
+ #include "PossibleTargetsValue.h"
+ #include "EnemyPlayerValue.h"
++#include "EngageOdds.h"
+ 
+ using namespace ai;
+ using namespace MaNGOS;
+@@ -375,6 +376,19 @@ bool AttackersValue::IsValid(Unit* target, Player* player, Player* owner, bool c
+             {
+                 return false;
+             }
++
++            // kalimdor: a bot starts a fight with an enemy player only when
++            // the odds favour it - its side against the enemy's, levels,
++            // health, numbers, guards (Kamino 218; owner's rule, 2026-10-30).
++            // One fighting the bot or its group is always a target. Not in
++            // battlegrounds, where fighting is the point, nor for a real
++            // player's own choices.
++            PlayerbotAI* const checkAi = playerToCheckAgainst->GetPlayerbotAI();
++            if (checkAi && !checkAi->IsRealPlayer() && !playerToCheckAgainst->InBattleGround() &&
++                !EngageOdds::Engaged(playerToCheckAgainst, enemyPlayer) && !EngageOdds::FavoursPvp(playerToCheckAgainst, enemyPlayer))
++            {
++                return false;
++            }
+         }
+     }
+     // If the target is a NPC
+diff --git a/playerbot/strategy/values/EngageOdds.cpp b/playerbot/strategy/values/EngageOdds.cpp
+new file mode 100644
+index 0000000..3c2f9b1
+--- /dev/null
++++ b/playerbot/strategy/values/EngageOdds.cpp
+@@ -0,0 +1,172 @@
++#include "playerbot/playerbot.h"
++#include "EngageOdds.h"
++#include "EnemyGuards.h"
++#include "playerbot/ServerFacade.h"
++#include "Grids/GridNotifiers.h"
++#include "Grids/GridNotifiersImpl.h"
++#include "Grids/CellImpl.h"
++
++#include <algorithm>
++#include <cmath>
++
++using namespace ai;
++
++namespace
++{
++    std::list<Unit*> UnitsNear(Unit* center, float range)
++    {
++        std::list<Unit*> units;
++        MaNGOS::AnyUnitInObjectRangeCheck check(center, range);
++        MaNGOS::UnitListSearcher<MaNGOS::AnyUnitInObjectRangeCheck> searcher(units, check);
++        Cell::VisitAllObjects(center, searcher, range);
++        return units;
++    }
++
++    bool InGroupOf(Player* bot, Unit* unit)
++    {
++        Player* player = dynamic_cast<Player*>(unit);
++        if (!player)
++        {
++            // A pet or guardian counts with its owner.
++            Unit* owner = unit->GetOwner();
++            player = owner ? dynamic_cast<Player*>(owner) : nullptr;
++        }
++
++        return player && (player == bot || (bot->GetGroup() && bot->GetGroup() == player->GetGroup()));
++    }
++}
++
++float EngageOdds::Strength(Unit* unit, Player* bot)
++{
++    if (!unit || !sServerFacade.IsAlive(unit))
++        return 0.0f;
++
++    float kind = 1.0f;
++    if (unit->GetObjectGuid().IsPet() || (unit->GetTypeId() == TYPEID_UNIT && unit->GetOwnerGuid().IsPlayer()))
++        kind = 0.3f;
++    else if (unit->GetTypeId() == TYPEID_UNIT)
++    {
++        Creature* creature = (Creature*)unit;
++        if (creature->IsTotem() || creature->IsCritter())
++            return 0.0f;
++
++        switch (creature->GetCreatureInfo()->Rank)
++        {
++            case CREATURE_ELITE_ELITE:     kind = 1.5f; break;
++            case CREATURE_ELITE_RAREELITE: kind = 2.0f; break;
++            case CREATURE_ELITE_WORLDBOSS: kind = 20.0f; break;
++            case CREATURE_ELITE_RARE:      kind = 0.75f; break;
++            default:                       kind = 0.5f; break;
++        }
++    }
++
++    int const levels = std::clamp(int(unit->GetLevel()) - int(bot->GetLevel()), -20, 20);
++    return std::pow(PerLevel, float(levels)) * kind * unit->GetHealthPercent() / 100.0f;
++}
++
++float EngageOdds::OwnSide(Player* bot)
++{
++    float side = Strength(bot, bot) + Strength(bot->GetPet(), bot);
++
++    if (Group* group = bot->GetGroup())
++    {
++        for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
++        {
++            Player* member = ref->getSource();
++            if (!member || member == bot || member->GetMapId() != bot->GetMapId() || !member->IsWithinDist(bot, Range))
++                continue;
++
++            side += Strength(member, bot) + Strength(member->GetPet(), bot);
++        }
++    }
++
++    return side;
++}
++
++bool EngageOdds::Engaged(Player* bot, Unit* enemy)
++{
++    if (bot->GetVictim() == enemy)
++        return true;
++
++    Unit* victim = enemy->GetVictim();
++    return victim && InGroupOf(bot, victim);
++}
++
++float EngageOdds::PvpEnemySide(Player* bot, Player* enemy)
++{
++    std::list<Creature*> const guards = EnemyGuards::Near(bot, Range + EnemyGuards::WeakMargin);
++    if (EnemyGuards::Covers(guards, enemy, bot))
++        return -1.0f;
++
++    float enemySide = 0.0f;
++    for (Unit* unit : UnitsNear(enemy, Range))
++    {
++        if (InGroupOf(bot, unit) || !sServerFacade.IsHostileTo(unit, bot))
++            continue;
++
++        bool const joins = unit->GetTypeId() == TYPEID_PLAYER || unit->GetOwnerGuid().IsPlayer() ||
++            (unit->GetTypeId() == TYPEID_UNIT && ((Creature*)unit)->IsGuard());
++        if (joins)
++            enemySide += Strength(unit, bot);
++    }
++
++    return enemySide;
++}
++
++bool EngageOdds::FavoursPvp(Player* bot, Player* enemy)
++{
++    float const enemySide = PvpEnemySide(bot, enemy);
++    return enemySide >= 0.0f && OwnSide(bot) >= enemySide * PvpMargin;
++}
++
++bool EngageOdds::WorthPulling(Player* bot, Unit* mob)
++{
++    // The mob, and its pack: hostile mobs near it not already fighting, and
++    // enemy players near enough to join.
++    float enemySide = Strength(mob, bot);
++    for (Unit* unit : UnitsNear(mob, Range))
++    {
++        if (unit == mob || InGroupOf(bot, unit) || !sServerFacade.IsHostileTo(unit, bot))
++            continue;
++
++        if (unit->GetTypeId() == TYPEID_PLAYER)
++            enemySide += Strength(unit, bot);
++        else if (unit->GetTypeId() == TYPEID_UNIT && !unit->IsInCombat() && unit->IsWithinDist(mob, PackRange))
++            enemySide += Strength(unit, bot);
++    }
++
++    return OwnSide(bot) >= enemySide * PullMargin;
++}
++
++Player* EngageOdds::StrongEnemyNear(Player* bot)
++{
++    Player* nearest = nullptr;
++    for (Unit* unit : UnitsNear(bot, KeepAwayRange))
++    {
++        Player* enemy = dynamic_cast<Player*>(unit);
++        if (!enemy || !sServerFacade.IsAlive(enemy) || !enemy->CanAttack(bot) || !sServerFacade.IsHostileTo(enemy, bot))
++            continue;
++
++        if (nearest && bot->GetDistance(enemy) >= bot->GetDistance(nearest))
++            continue;
++
++        if (Engaged(bot, enemy) || FavoursPvp(bot, enemy))
++            continue;
++
++        nearest = enemy;
++    }
++
++    return nearest;
++}
++
++bool EngageOdds::Rested(Player* bot)
++{
++    if (bot->GetHealthPercent() < RestPercent)
++        return false;
++
++    if (bot->GetPowerType() == POWER_MANA && bot->GetMaxPower(POWER_MANA) &&
++        bot->GetPower(POWER_MANA) * 100.0f / bot->GetMaxPower(POWER_MANA) < RestPercent)
++        return false;
++
++    return true;
++}
+diff --git a/playerbot/strategy/values/EngageOdds.h b/playerbot/strategy/values/EngageOdds.h
+new file mode 100644
+index 0000000..09aa16b
+--- /dev/null
++++ b/playerbot/strategy/values/EngageOdds.h
+@@ -0,0 +1,63 @@
++#pragma once
++
++// kalimdor: whether a fight is worth starting (Kamino 218; owner's rules,
++// 2026-10-30). Nothing weighed a fight before it started: the pvp strategy
++// attacked any reachable enemy player, and grinding pulled any mob within 4
++// levels, pack or not. Now a bot compares the two sides - its own (itself, its
++// group nearby, their pets) against the enemy's (the enemy players near the
++// target, and the guards that would join; or a mob and its pack) - and starts a
++// fight only when the odds favour it. A fight already on is never refused here:
++// fleeing stays with the flee strategy.
++
++class Player;
++class Unit;
++
++namespace ai
++{
++    class EngageOdds
++    {
++    public:
++        // Who counts on each side: within this of the bot (its side) and of
++        // the target (the enemy's).
++        static constexpr float Range = 30.0f;
++        // A mob's pack: hostile mobs this close to it, out of combat, join in.
++        static constexpr float PackRange = 10.0f;
++        // A level's worth: a unit one level above counts this much more.
++        static constexpr float PerLevel = 1.25f;
++        // How much stronger the bot's side has to be to start a fight with
++        // enemy players - "the odds favour it" (owner): an even fight is not
++        // started, a weakened or lower enemy, or a bigger group, is.
++        static constexpr float PvpMargin = 1.2f;
++        // And to pull a mob and its pack: at least even (a normal mob counts
++        // half a player, so two of the bot's level are a fair pull, three not).
++        static constexpr float PullMargin = 1.0f;
++        // An enemy player not worth fighting is kept this far away.
++        static constexpr float KeepAwayRange = 40.0f;
++        // No pull below this much health or mana: the bot rests first (it eats
++        // below 50% health and drinks below 65% mana, UseFoodStrategy).
++        static constexpr float RestPercent = 50.0f;
++
++        // A unit's weight: its health share, its kind (a player 1, a normal
++        // mob 0.5, an elite 1.5, a pet 0.3), and PerLevel per level above
++        // or below the bot.
++        static float Strength(Unit* unit, Player* bot);
++        // The bot, its pet, and its group's members within Range, with theirs.
++        static float OwnSide(Player* bot);
++        // Already fighting: the enemy attacks the bot, its pet or its group,
++        // or the bot attacks it. Such a fight is not weighed.
++        static bool Engaged(Player* bot, Unit* enemy);
++        // The enemy player's side: the enemy players near it, their pets, and
++        // the guards that would join - or -1 under the guards of a town the
++        // bot is no match for (Kamino 210).
++        static float PvpEnemySide(Player* bot, Player* enemy);
++        // Worth starting a fight with this enemy player.
++        static bool FavoursPvp(Player* bot, Player* enemy);
++        // Worth pulling this mob, pack and all.
++        static bool WorthPulling(Player* bot, Unit* mob);
++        // Health and mana enough to start a fight.
++        static bool Rested(Player* bot);
++        // The nearest enemy player within KeepAwayRange that could attack the
++        // bot and is not worth fighting - one to keep away from - or none.
++        static Player* StrongEnemyNear(Player* bot);
++    };
++}
+diff --git a/playerbot/strategy/values/GrindTargetValue.cpp b/playerbot/strategy/values/GrindTargetValue.cpp
+index e6af342..f84b12f 100644
+--- a/playerbot/strategy/values/GrindTargetValue.cpp
++++ b/playerbot/strategy/values/GrindTargetValue.cpp
+@@ -2,6 +2,7 @@
+ #include "playerbot/playerbot.h"
+ #include "GrindTargetValue.h"
+ #include "EnemyGuards.h"
++#include "EngageOdds.h"
+ #include "playerbot/PlayerbotAIConfig.h"
+ #include "playerbot/RandomPlayerbotMgr.h"
+ #include "playerbot/ServerFacade.h"
+@@ -59,6 +60,16 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
+         return unit;
+     }
+ 
++    // kalimdor: no new fight below half health or mana - the bot rests first
++    // (it eats and drinks below that). Self-defence is the loop above
++    // (Kamino 218; owner's rule, 2026-10-30).
++    if (!bot->InBattleGround() && !EngageOdds::Rested(bot))
++    {
++        if (ai->HasStrategy("debug grind", BotState::BOT_STATE_NON_COMBAT))
++            ai->TellPlayer(GetMaster(), "No new target (resting first).");
++        return NULL;
++    }
++
+     std::list<ObjectGuid> targets = *context->GetValue<std::list<ObjectGuid> >("possible targets");
+ 
+     if (targets.empty())
+@@ -286,6 +297,16 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
+             }
+         }
+ 
++        // kalimdor: a mob whose pack - hostile mobs near it, enemy players
++        // near enough to join - outweighs the bot's side is not pulled
++        // (Kamino 218). Last, as the costliest check.
++        if (!bot->InBattleGround() && !EngageOdds::WorthPulling(bot, unit))
++        {
++            if (ai->HasStrategy("debug grind", BotState::BOT_STATE_NON_COMBAT))
++                ai->TellPlayer(GetMaster(), chat->formatWorldobject(unit) + " ignored (its pack is too much).");
++            continue;
++        }
++
+         if (!bot->InBattleGround() && GetTargetingPlayerCount(unit) > assistCount)
+         {
+             if (ai->HasStrategy("debug grind", BotState::BOT_STATE_NON_COMBAT))

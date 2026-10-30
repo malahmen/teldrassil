@@ -251,7 +251,7 @@ See `examples/roster.example.json`. The rules it enforces:
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries six changes to playerbots (`templates/patches/playerbots/`)
+teldrassil carries seven changes to playerbots (`templates/patches/playerbots/`)
 and two to the core (`templates/patches/mangos-classic/`), applied before
 every build:
 
@@ -303,6 +303,12 @@ every build:
   never said, so the NPC echoed the bot), keep the lines of speakers whose name
   ends in "d" (they were left out of what the model saw), and a bot does not go
   back to the same NPC to chat again at once.
+- **playerbots 0007:** bots pick their fights. A bot weighs its side (itself,
+  its group near, pets) against the enemy's (levels, health, numbers, elites,
+  guards near) and starts a fight with an enemy player only when the odds
+  favour it; one it should not fight is kept away from. It skips a mob whose
+  pack is too much, and rests below half health or mana before pulling. A
+  fight already on is never refused; battlegrounds and duels are untouched.
 
 `roster apply` writes the database only while the world server is stopped:
 guilds and characters live in its memory, and a change made under it is
