@@ -1,0 +1,935 @@
+diff --git a/playerbot/strategy/actions/ActionContext.h b/playerbot/strategy/actions/ActionContext.h
+index ac04c6c..d19d27a 100644
+--- a/playerbot/strategy/actions/ActionContext.h
++++ b/playerbot/strategy/actions/ActionContext.h
+@@ -2,6 +2,7 @@
+ 
+ #include "GenericActions.h"
+ #include "MoveAwayFromEnemyGuardAction.h"
++#include "GiveUpGatheringAction.h"
+ #include "EmoteAction.h"
+ #include "AddLootAction.h"
+ #include "LootAction.h"
+@@ -431,6 +432,8 @@ namespace ai
+ 
+             creators["move away from specific creatures"] = [](PlayerbotAI* ai) { return new MoveAwayFromSpecificCreatures(ai); };
+             creators["move away from enemy guard"] = [](PlayerbotAI* ai) { return new MoveAwayFromEnemyGuardAction(ai); };
++            creators["leave hostile territory"] = [](PlayerbotAI* ai) { return new LeaveHostileTerritoryAction(ai); };
++            creators["give up gathering"] = [](PlayerbotAI* ai) { return new GiveUpGatheringAction(ai); };
+ 
+ #ifdef GenerateBotTests
+             creators["test"] = [](PlayerbotAI* ai) { return new TestAction(ai); };
+diff --git a/playerbot/strategy/actions/ChooseTravelTargetAction.cpp b/playerbot/strategy/actions/ChooseTravelTargetAction.cpp
+index ad02acc..4f464e8 100644
+--- a/playerbot/strategy/actions/ChooseTravelTargetAction.cpp
++++ b/playerbot/strategy/actions/ChooseTravelTargetAction.cpp
+@@ -1,5 +1,6 @@
+ 
+ #include "playerbot/playerbot.h"
++#include "playerbot/strategy/values/GatheringStalls.h"
+ #include "playerbot/LootObjectStack.h"
+ #include "ChooseTravelTargetAction.h"
+ #include "playerbot/PlayerbotAIConfig.h"
+@@ -331,6 +332,11 @@ bool ChooseTravelTargetAction::SetBestTarget(Player* requester, TravelTarget* ta
+             if (!target->IsForced() && isActive.find(destination) != isActive.end() && !isActive[destination])
+                 continue;
+ 
++            // kalimdor: gathering points this bot gave up on are skipped
++            // until the give-up expires (values/GatheringStalls.h).
++            if (dynamic_cast<GatherTravelDestination*>(destination) && GatheringStalls::IsGivenUp(ai, position))
++                continue;
++
+             if (distanceCheck) //Check if we have moved significantly after getting the destinations.
+             {
+                 WorldPosition center(requester ? requester : bot);
+diff --git a/playerbot/strategy/actions/GiveUpGatheringAction.cpp b/playerbot/strategy/actions/GiveUpGatheringAction.cpp
+new file mode 100644
+index 0000000..cb5693b
+--- /dev/null
++++ b/playerbot/strategy/actions/GiveUpGatheringAction.cpp
+@@ -0,0 +1,24 @@
++#include "playerbot/playerbot.h"
++#include "GiveUpGatheringAction.h"
++#include "playerbot/TravelMgr.h"
++#include "playerbot/strategy/values/GatheringStalls.h"
++
++using namespace ai;
++
++bool GiveUpGatheringAction::Execute(Event& event)
++{
++    TravelTarget* target = AI_VALUE(TravelTarget*, "travel target");
++    if (!target || !target->GetPosition())
++        return false;
++
++    GatheringStalls::GiveUp(ai, target->GetPosition());
++    SET_AI_VALUE2(time_t, "manual time", "gathering since", 0);
++
++    sLog.outString("Bot #%d %s:%d <%s> gives up gathering (%s) at %s after %d minutes: travel skips it for %d minutes", bot->GetGUIDLow(),
++        bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(),
++        target->GetDestination() ? target->GetDestination()->GetTitle().c_str() : "?", target->GetPosition()->getAreaName().c_str(),
++        int(GatheringStalls::StallTime / 60), int(GatheringStalls::GiveUpFor / 60));
++
++    target->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
++    return true;
++}
+diff --git a/playerbot/strategy/actions/GiveUpGatheringAction.h b/playerbot/strategy/actions/GiveUpGatheringAction.h
+new file mode 100644
+index 0000000..8e1f3f4
+--- /dev/null
++++ b/playerbot/strategy/actions/GiveUpGatheringAction.h
+@@ -0,0 +1,25 @@
++#pragma once
++#include "playerbot/strategy/Action.h"
++
++namespace ai
++{
++    // kalimdor: give up a gathering point the bot has been working at too
++    // long without moving on (values/GatheringStalls.h), and choose again.
++    class GiveUpGatheringAction : public Action
++    {
++    public:
++        GiveUpGatheringAction(PlayerbotAI* ai) : Action(ai, "give up gathering") {}
++        bool Execute(Event& event) override;
++
++#ifdef GenerateBotHelp
++        virtual std::string GetHelpName() { return "give up gathering"; }
++        virtual std::string GetHelpDescription()
++        {
++            return "This action gives up a gathering node the bot has worked at for minutes\\n"
++                   "without picking it, so travel skips it for half an hour.";
++        }
++        virtual std::vector<std::string> GetUsedActions() { return {}; }
++        virtual std::vector<std::string> GetUsedValues() { return {"travel target"}; }
++#endif
++    };
++}
+diff --git a/playerbot/strategy/actions/MoveAwayFromEnemyGuardAction.cpp b/playerbot/strategy/actions/MoveAwayFromEnemyGuardAction.cpp
+index 45e7f0a..7b3d24e 100644
+--- a/playerbot/strategy/actions/MoveAwayFromEnemyGuardAction.cpp
++++ b/playerbot/strategy/actions/MoveAwayFromEnemyGuardAction.cpp
+@@ -1,6 +1,8 @@
+ #include "playerbot/playerbot.h"
+ #include "MoveAwayFromEnemyGuardAction.h"
+ #include "playerbot/strategy/values/EnemyGuards.h"
++#include "playerbot/TravelMgr.h"
++#include "playerbot/TravelNode.h"
+ 
+ using namespace ai;
+ 
+@@ -69,6 +71,16 @@ bool MoveAwayFromEnemyGuardAction::Execute(Event& event)
+             {
+                 if (!IsReaction())
+                     WaitForReach(point.distance(botPosition));
++
++                // Count the retreat: enough of them in a short time is what
++                // "blocked" means (LeaveHostileTerritoryAction).
++                time_t const now = time(nullptr);
++                if (now - AI_VALUE2(time_t, "manual time", "guard retreats since") > EnemyGuards::RetreatWindow)
++                {
++                    SET_AI_VALUE2(time_t, "manual time", "guard retreats since", now);
++                    SET_AI_VALUE2(int32, "manual int", "guard retreats", 0);
++                }
++                SET_AI_VALUE2(int32, "manual int", "guard retreats", AI_VALUE2(int32, "manual int", "guard retreats") + 1);
+                 return true;
+             }
+         }
+@@ -79,3 +91,117 @@ bool MoveAwayFromEnemyGuardAction::Execute(Event& event)
+ 
+     return false;
+ }
++
++bool LeaveHostileTerritoryAction::Execute(Event& event)
++{
++    WorldPosition const botPosition(bot);
++
++    // The way out: of the travel graph's nodes in non-hostile territory, the
++    // one with the shortest walking route from here, on this continent
++    // however far - a faction's lands can be wide (an Alliance bot at Razor
++    // Hill has Durotar and the Barrens to cross), and a long walk is still
++    // better than a hearth. Straight-line nearest picked an island across
++    // open sea (Alcaz, off Dustwallow) - fatigue water - so candidates are
++    // ranked by route. A node whose area cannot be read (its map data not
++    // loaded) is not an exit: unknown is not "not hostile".
++    WorldPosition* exit = nullptr;
++    std::string const failedExits = AI_VALUE2(std::string, "manual string", "failed exits");
++    int32 const failedCount = AI_VALUE2(int32, "manual int", "failed exit count");
++    TravelNode* start = failedCount < EnemyGuards::ExitsBeforeHearth ? sTravelNodeMap.getNode(botPosition, bot) : nullptr;
++    if (start)
++    {
++        float bestDistance = 0.0f;
++        int candidates = 0;
++        for (TravelNode* node : sTravelNodeMap.getNodes(botPosition))
++        {
++            WorldPosition* position = node->getPosition();
++
++            // A way out this bot could not walk to is not tried again.
++            if (failedExits.find(EnemyGuards::ExitKey(*position) + " ") != std::string::npos)
++                continue;
++
++            position->loadMapAndVMap(0);
++            if (!position->GetArea() || EnemyGuards::IsHostileTerritory(*position, bot))
++                continue;
++
++            if (!start->hasRouteTo(node))
++                continue;
++
++            TravelNodeRoute route = sTravelNodeMap.getRoute(start, node, bot);
++            if (route.isEmpty())
++                continue;
++
++            float const distance = route.getTotalDistance();
++            if (!exit || distance < bestDistance)
++            {
++                exit = position;
++                bestDistance = distance;
++            }
++
++            if (++candidates >= 10)
++                break;
++        }
++    }
++
++    // Judged now; the walk gets its time before the next judgement.
++    SET_AI_VALUE2(time_t, "manual time", "left hostile territory", time(nullptr));
++    SET_AI_VALUE2(int32, "manual int", "guard retreats", 0);
++
++    // The whole group leaves: one member may be there for a quest the others
++    // have finished (owner, 2026-10-30). Its leader is given the way out and
++    // the rest follow it, as they do. A group a player leads is theirs to
++    // move.
++    Player* leader = bot;
++    if (Group* group = bot->GetGroup())
++    {
++        // Unless this member is far from its leader (EnemyGuards::GroupRange):
++        // then it goes on its own, as it was judged.
++        Player* groupLeader = sObjectMgr.GetPlayer(group->GetLeaderGuid());
++        if (groupLeader && groupLeader->GetMapId() == bot->GetMapId() && bot->GetDistance(groupLeader) <= EnemyGuards::GroupRange)
++            leader = groupLeader;
++    }
++    PlayerbotAI* leaderAi = leader->GetPlayerbotAI();
++    if (!leaderAi || leaderAi->IsRealPlayer())
++        return false;
++
++    if (!exit)
++    {
++        // The last resort (owner, 2026-10-30): no way out on foot, or two
++        // that could not be walked.
++        sLog.outString("Bot #%d %s:%d <%s> in %s: %s - %s uses the hearthstone", bot->GetGUIDLow(),
++            bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), botPosition.getAreaName().c_str(),
++            failedCount >= EnemyGuards::ExitsBeforeHearth ? "two ways out could not be walked" : "no way out on foot",
++            leader == bot ? "it" : "its group leader");
++        return leaderAi->DoSpecificAction("hearthstone", Event(), true);
++    }
++
++    TravelTarget* target = leaderAi->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get();
++    if (!target)
++        return false;
++
++    TemporaryTravelDestination* destination = new TemporaryTravelDestination(*exit);
++    target->SetTarget(destination, destination->GetPosition());
++    target->SetStatus(TravelStatus::TRAVEL_STATUS_TRAVEL);
++    target->SetForced(true);
++    target->SetExpireIn(EnemyGuards::LeaveTime * IN_MILLISECONDS);
++    if (!leaderAi->HasStrategy("travel", BotState::BOT_STATE_NON_COMBAT))
++        leaderAi->ChangeStrategy("+travel once", BotState::BOT_STATE_NON_COMBAT);
++
++    // Said where people can hear it, in character (owner, 2026-10-30).
++    std::string const here = botPosition.getAreaName();
++    std::string const there = exit->getAreaName();
++    bool const together = leader != bot || bot->GetGroup();
++    std::vector<std::string> const lines = {
++        "Too many guards in " + here + " for the likes of " + std::string(together ? "us" : "me") + ". Heading for " + there + ".",
++        here + " is crawling with guards. " + std::string(together ? "We're" : "I'm") + " making for " + there + ".",
++        "No getting past the guards here. Back towards " + there + " it is.",
++        "Not worth dying in " + here + " over. " + std::string(together ? "We're" : "I'm") + " off to " + there + ".",
++    };
++    ai->SayToGeneral(lines[urand(0, lines.size() - 1)]);
++
++    sLog.outString("Bot #%d %s:%d <%s> in %s (%s): %s walks out of hostile territory to %s", bot->GetGUIDLow(),
++        bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), here.c_str(),
++        AI_VALUE2(std::string, "manual string", "leave reason").c_str(),
++        leader == bot ? "it" : (std::string("its group, led by ") + leader->GetName() + ",").c_str(), there.c_str());
++    return true;
++}
+diff --git a/playerbot/strategy/actions/MoveAwayFromEnemyGuardAction.h b/playerbot/strategy/actions/MoveAwayFromEnemyGuardAction.h
+index 6768f6f..9dcf938 100644
+--- a/playerbot/strategy/actions/MoveAwayFromEnemyGuardAction.h
++++ b/playerbot/strategy/actions/MoveAwayFromEnemyGuardAction.h
+@@ -23,6 +23,31 @@ namespace ai
+         }
+         virtual std::vector<std::string> GetUsedActions() { return {}; }
+         virtual std::vector<std::string> GetUsedValues() { return {}; }
++#endif
++    };
++
++    // kalimdor: walk out of hostile territory with no objective there, or
++    // blocked from it (Kamino 210; owner's rule, 2026-10-30) - getting to
++    // neutral or friendly ground is then the objective. The way
++    // out is the nearest travel-graph node in non-hostile territory, given
++    // to the travel system as a forced target, so the guard-aware routes walk
++    // it there. The hearthstone only as a last resort, when no such node is
++    // on the continent: a hearth empties the world of a bot.
++    class LeaveHostileTerritoryAction : public Action
++    {
++    public:
++        LeaveHostileTerritoryAction(PlayerbotAI* ai) : Action(ai, "leave hostile territory") {}
++        bool Execute(Event& event) override;
++
++#ifdef GenerateBotHelp
++        virtual std::string GetHelpName() { return "leave hostile territory"; }
++        virtual std::string GetHelpDescription()
++        {
++            return "This action sends the bot walking to the nearest neutral or friendly ground\n"
++                   "when it is blocked in the other faction's territory by guards above its level.";
++        }
++        virtual std::vector<std::string> GetUsedActions() { return {"hearthstone"}; }
++        virtual std::vector<std::string> GetUsedValues() { return {"travel target"}; }
+ #endif
+     };
+ }
+diff --git a/playerbot/strategy/generic/AvoidMobsStrategy.cpp b/playerbot/strategy/generic/AvoidMobsStrategy.cpp
+index c400cea..f89d4ff 100644
+--- a/playerbot/strategy/generic/AvoidMobsStrategy.cpp
++++ b/playerbot/strategy/generic/AvoidMobsStrategy.cpp
+@@ -17,6 +17,14 @@ void AvoidMobsStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
+     triggers.push_back(new TriggerNode(
+         "enemy guard near",
+         NextAction::array(0, new NextAction("move away from enemy guard", ACTION_EMERGENCY + 5), NULL)));
++
++    // kalimdor: blocked in the other faction's territory - kept from its
++    // objective by guards often enough lately - it walks out to neutral or
++    // friendly ground (Kamino 210; owner's rule, 2026-10-30). Out of combat
++    // only (the trigger checks); above choosing a new travel target.
++    triggers.push_back(new TriggerNode(
++        "blocked in hostile territory",
++        NextAction::array(0, new NextAction("leave hostile territory", ACTION_EMERGENCY + 1), NULL)));
+ }
+ 
+ void AvoidMobsStrategy::InitCombatTriggers(std::list<TriggerNode*>& triggers)
+diff --git a/playerbot/strategy/generic/TravelStrategy.cpp b/playerbot/strategy/generic/TravelStrategy.cpp
+index 6b2c049..d613f4d 100644
+--- a/playerbot/strategy/generic/TravelStrategy.cpp
++++ b/playerbot/strategy/generic/TravelStrategy.cpp
+@@ -67,6 +67,12 @@ void TravelStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
+         {"",TravelDestinationPurpose::Grind, 6.27f},                                                           // 100%
+     };
+ 
++    // kalimdor: a gathering point worked at for minutes without moving on is
++    // given up, above choosing anew (values/GatheringStalls.h).
++    triggers.push_back(new TriggerNode(
++        "gathering stalled",
++        NextAction::array(0, new NextAction("give up gathering", 7.0f), NULL)));
++
+     for (auto& [condition, purpose, relevance] : PurposeActions)
+     {
+         std::string trigger = condition.empty() ? "val::need travel purpose::" + std::to_string((uint32)purpose) : condition;
+diff --git a/playerbot/strategy/triggers/GatheringStalledTrigger.cpp b/playerbot/strategy/triggers/GatheringStalledTrigger.cpp
+new file mode 100644
+index 0000000..3af95f6
+--- /dev/null
++++ b/playerbot/strategy/triggers/GatheringStalledTrigger.cpp
+@@ -0,0 +1,34 @@
++#include "playerbot/playerbot.h"
++#include "GatheringStalledTrigger.h"
++#include "playerbot/TravelMgr.h"
++#include "playerbot/strategy/values/GatheringStalls.h"
++
++using namespace ai;
++
++bool GatheringStalledTrigger::IsActive()
++{
++    // Herb and ore nodes only: one pick there ends the work. Fishing (many
++    // casts) and skinning (the kills first) take minutes at one destination
++    // by nature - giving those up after three was a false alarm (2026-10-30).
++    TravelTarget* target = AI_VALUE(TravelTarget*, "travel target");
++    GatherTravelDestination* gather = target ? dynamic_cast<GatherTravelDestination*>(target->GetDestination()) : nullptr;
++    bool const gathering = gather && target->GetStatus() == TravelStatus::TRAVEL_STATUS_WORK && target->GetPosition() &&
++        (gather->GetPurpose() == TravelDestinationPurpose::GatherHerbalism || gather->GetPurpose() == TravelDestinationPurpose::GatherMining);
++
++    std::string const point = gathering ? std::to_string(reinterpret_cast<uintptr_t>(target->GetPosition())) : "";
++    time_t const now = time(nullptr);
++
++    // A new gathering point, or none: start (or stop) the clock.
++    if (point != AI_VALUE2(std::string, "manual string", "gathering point"))
++    {
++        SET_AI_VALUE2(std::string, "manual string", "gathering point", point);
++        SET_AI_VALUE2(time_t, "manual time", "gathering since", gathering ? now : 0);
++        return false;
++    }
++
++    if (!gathering)
++        return false;
++
++    time_t const since = AI_VALUE2(time_t, "manual time", "gathering since");
++    return since && now - since >= GatheringStalls::StallTime;
++}
+diff --git a/playerbot/strategy/triggers/GatheringStalledTrigger.h b/playerbot/strategy/triggers/GatheringStalledTrigger.h
+new file mode 100644
+index 0000000..0a29505
+--- /dev/null
++++ b/playerbot/strategy/triggers/GatheringStalledTrigger.h
+@@ -0,0 +1,14 @@
++#pragma once
++#include "playerbot/strategy/Trigger.h"
++
++namespace ai
++{
++    // kalimdor: working at the same herb or ore node for GatheringStalls::
++    // StallTime - a pick that succeeds ends the work and moves the bot on.
++    class GatheringStalledTrigger : public Trigger
++    {
++    public:
++        GatheringStalledTrigger(PlayerbotAI* ai) : Trigger(ai, "gathering stalled", 5) {}
++        virtual bool IsActive() override;
++    };
++}
+diff --git a/playerbot/strategy/triggers/GenericTriggers.cpp b/playerbot/strategy/triggers/GenericTriggers.cpp
+index be2af1d..6423bd2 100644
+--- a/playerbot/strategy/triggers/GenericTriggers.cpp
++++ b/playerbot/strategy/triggers/GenericTriggers.cpp
+@@ -2,6 +2,7 @@
+ #include "playerbot/playerbot.h"
+ #include "GenericTriggers.h"
+ #include "playerbot/strategy/values/EnemyGuards.h"
++#include "playerbot/TravelMgr.h"
+ #include "playerbot/LootObjectStack.h"
+ #include "playerbot/PlayerbotAIConfig.h"
+ #include "playerbot/ServerFacade.h"
+@@ -777,6 +778,160 @@ bool EnemyGuardNearTrigger::IsActive()
+     return false;
+ }
+ 
++bool BlockedInHostileTerritoryTrigger::IsActive()
++{
++    time_t const now = time(nullptr);
++
++    // Idle is measured from the last fight or real move: farming resets it.
++    PositionEntry idleFrom = AI_VALUE2(PositionEntry, "pos", "hostile idle");
++    if (bot->IsInCombat() || !idleFrom.isSet() || idleFrom.Get().distance(WorldPosition(bot)) > EnemyGuards::IdleMoveRange)
++    {
++        SET_AI_VALUE2(PositionEntry, "pos", "hostile idle", PositionEntry(bot));
++        SET_AI_VALUE2(time_t, "manual time", "hostile idle since", now);
++        return false;
++    }
++
++    if (bot->GetInstanceId() || bot->InBattleGround())
++        return false;
++
++    if (bot->GetLevel() >= sWorld.getConfig(CONFIG_UINT32_MAX_PLAYER_LEVEL))
++        return false;
++
++    // Sent out lately: not judged again - unless the way out stalls (below).
++    bool const leaving = now - AI_VALUE2(time_t, "manual time", "left hostile territory") < EnemyGuards::LeaveTime;
++
++    if (!EnemyGuards::IsHostileTerritory(WorldPosition(bot), bot))
++    {
++        SET_AI_VALUE2(time_t, "manual time", "no objective since", 0);
++        SET_AI_VALUE2(std::string, "manual string", "hostile objective logged", "");
++        SET_AI_VALUE2(std::string, "manual string", "failed exits", "");
++        SET_AI_VALUE2(int32, "manual int", "failed exit count", 0);
++        return false;
++    }
++
++    // No objective here: in hostile territory, that is reason enough to go
++    // (owner's rule, 2026-10-30). Any travel destination is one - a quest,
++    // gathering, grinding, roleplay, exploring, the way out itself; having
++    // none is not, and is what left bots here killing whatever was near. A
++    // group goes where its leader does, so a member is judged by its bot
++    // leader's target.
++    PlayerbotAI* judged = ai;
++    if (Group* group = bot->GetGroup())
++    {
++        Player* leader = sObjectMgr.GetPlayer(group->GetLeaderGuid());
++        if (leader && leader != bot && leader->GetPlayerbotAI() && !leader->GetPlayerbotAI()->IsRealPlayer() &&
++            leader->GetMapId() == bot->GetMapId() && bot->GetDistance(leader) <= EnemyGuards::GroupRange)
++            judged = leader->GetPlayerbotAI();
++    }
++    TravelTarget* target = judged->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get();
++    TravelDestination* destination = target ? target->GetDestination() : nullptr;
++    bool objective = destination && !dynamic_cast<NullTravelDestination*>(destination);
++    bool const toExit = dynamic_cast<TemporaryTravelDestination*>(destination) != nullptr;
++
++    // ...and one the bot is getting to: on this continent, and nearer by
++    // ProgressYards within NoObjectiveTime unless already within WorkRange.
++    std::string lacking = "no objective here";
++    if (objective && target->GetPosition())
++    {
++        WorldPosition const* goal = target->GetPosition();
++        std::string const goalKey = std::to_string(reinterpret_cast<uintptr_t>(goal));
++        if (goal->getMapId() != bot->GetMapId())
++        {
++            objective = false;
++            lacking = "objective on another continent";
++        }
++        else
++        {
++            float const distance = goal->distance(WorldPosition(judged->GetBot()));
++            if (distance <= EnemyGuards::WorkRange || goalKey != AI_VALUE2(std::string, "manual string", "progress goal"))
++            {
++                SET_AI_VALUE2(std::string, "manual string", "progress goal", goalKey);
++                SET_AI_VALUE2(int32, "manual int", "progress best", int32(distance));
++                SET_AI_VALUE2(time_t, "manual time", "progress since", now);
++            }
++            else if (distance < AI_VALUE2(int32, "manual int", "progress best") - EnemyGuards::ProgressYards)
++            {
++                SET_AI_VALUE2(int32, "manual int", "progress best", int32(distance));
++                SET_AI_VALUE2(time_t, "manual time", "progress since", now);
++            }
++            else if (now - AI_VALUE2(time_t, "manual time", "progress since") >= (toExit ? EnemyGuards::ExitStallTime : EnemyGuards::NoObjectiveTime))
++            {
++                objective = false;
++                lacking = toExit ? "no progress towards the way out" : "no progress towards its objective";
++            }
++        }
++    }
++
++    // What the bot is here for, logged on arrival and whenever it changes -
++    // the console cannot ask a bot, so this is how it is seen (2026-10-30).
++    std::string const doing = !destination || dynamic_cast<NullTravelDestination*>(destination) ? std::string("none") :
++        destination->GetTitle() + (objective ? "" : " - " + lacking);
++    if (doing != AI_VALUE2(std::string, "manual string", "hostile objective logged"))
++    {
++        SET_AI_VALUE2(std::string, "manual string", "hostile objective logged", doing);
++        sLog.outString("Bot #%d %s:%d <%s> in %s (hostile territory): objective %s%s", bot->GetGUIDLow(),
++            bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), WorldPosition(bot).getAreaName().c_str(),
++            doing.c_str(), judged != ai ? " (its group leader's)" : "");
++    }
++
++    // Sent out lately: only a stalled way out is judged again, at once - it
++    // is remembered as failed, and the next choice takes another.
++    if (leaving)
++    {
++        if (!toExit || objective)
++            return false;
++
++        std::string failed = AI_VALUE2(std::string, "manual string", "failed exits");
++        SET_AI_VALUE2(std::string, "manual string", "failed exits", failed + EnemyGuards::ExitKey(*target->GetPosition()) + " ");
++        SET_AI_VALUE2(int32, "manual int", "failed exit count", AI_VALUE2(int32, "manual int", "failed exit count") + 1);
++        SET_AI_VALUE2(std::string, "manual string", "leave reason", lacking);
++        return true;
++    }
++
++    // Why, for the log - and none yet means stay.
++    std::string reason;
++    if (!objective)
++    {
++        time_t since = AI_VALUE2(time_t, "manual time", "no objective since");
++        if (!since)
++            SET_AI_VALUE2(time_t, "manual time", "no objective since", since = now);
++        if (now - since >= EnemyGuards::NoObjectiveTime)
++            reason = lacking;
++    }
++    else
++    {
++        SET_AI_VALUE2(time_t, "manual time", "no objective since", 0);
++
++        // With one, blocked from it: pushed back by the guards...
++        if (now - AI_VALUE2(time_t, "manual time", "guard retreats since") <= EnemyGuards::RetreatWindow &&
++            AI_VALUE2(int32, "manual int", "guard retreats") >= EnemyGuards::RetreatsBeforeLeaving)
++            reason = "pushed back by enemy guards";
++
++        // ...or standing idle just outside their reach.
++        if (reason.empty() && now - AI_VALUE2(time_t, "manual time", "hostile idle since") >= EnemyGuards::IdleTime)
++        {
++            for (Creature* guard : EnemyGuards::Near(bot, 100.0f))
++            {
++                if (bot->GetDistance(guard) < EnemyGuards::Reach(guard, bot) + EnemyGuards::IdleRange)
++                {
++                    reason = "idle near enemy guards";
++                    break;
++                }
++            }
++        }
++    }
++
++    if (reason.empty())
++        return false;
++
++    // Rested first: the walk out is long (EnemyGuards::RestBeforeLeavingPercent).
++    if (bot->GetHealthPercent() < EnemyGuards::RestBeforeLeavingPercent)
++        return false;
++
++    SET_AI_VALUE2(std::string, "manual string", "leave reason", reason);
++    return true;
++}
++
+ bool HasItemForSpellTrigger::IsActive()
+ {
+     std::string spell = getName();
+diff --git a/playerbot/strategy/triggers/GenericTriggers.h b/playerbot/strategy/triggers/GenericTriggers.h
+index 792add4..3569b59 100644
+--- a/playerbot/strategy/triggers/GenericTriggers.h
++++ b/playerbot/strategy/triggers/GenericTriggers.h
+@@ -795,6 +795,17 @@ namespace ai
+         virtual bool IsActive() override;
+     };
+ 
++    // kalimdor: in the other faction's territory, out of combat, and with no
++    // objective there (no travel destination at all) - or one its guards keep it
++    // from: pushed back often lately, or idle just outside their reach
++    // (Kamino 210; values/EnemyGuards.h).
++    class BlockedInHostileTerritoryTrigger : public Trigger
++    {
++    public:
++        BlockedInHostileTerritoryTrigger(PlayerbotAI* ai) : Trigger(ai, "blocked in hostile territory", 5) {}
++        virtual bool IsActive() override;
++    };
++
+     class HasItemForSpellTrigger : public Trigger
+     {
+     public:
+diff --git a/playerbot/strategy/triggers/TriggerContext.h b/playerbot/strategy/triggers/TriggerContext.h
+index 34d6bea..c72fa57 100644
+--- a/playerbot/strategy/triggers/TriggerContext.h
++++ b/playerbot/strategy/triggers/TriggerContext.h
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include "HealthTriggers.h"
++#include "GatheringStalledTrigger.h"
+ #include "GenericTriggers.h"
+ #include "LootTriggers.h"
+ #include "GenericTriggers.h"
+@@ -83,6 +84,8 @@ namespace ai
+             creators["not dps aoe target active"] = [](PlayerbotAI* ai) { return new NotDpsAoeTargetActiveTrigger(ai); };
+             creators["has nearest adds"] = [](PlayerbotAI* ai) { return new HasNearestAddsTrigger(ai); };
+             creators["enemy guard near"] = [](PlayerbotAI* ai) { return new EnemyGuardNearTrigger(ai); };
++            creators["blocked in hostile territory"] = [](PlayerbotAI* ai) { return new BlockedInHostileTerritoryTrigger(ai); };
++            creators["gathering stalled"] = [](PlayerbotAI* ai) { return new GatheringStalledTrigger(ai); };
+             creators["enemy player near"] = [](PlayerbotAI* ai) { return new EnemyPlayerNear(ai); };
+ 
+             creators["combat start"] = [](PlayerbotAI* ai) { return new CombatStartTrigger(ai); };
+diff --git a/playerbot/strategy/values/DeadValues.cpp b/playerbot/strategy/values/DeadValues.cpp
+index 43cc73c..0680e90 100644
+--- a/playerbot/strategy/values/DeadValues.cpp
++++ b/playerbot/strategy/values/DeadValues.cpp
+@@ -104,6 +104,12 @@ WorldSafeLocsEntry const* GraveyardValue::GetAnotherAppropriateClosestGraveyard(
+         if (bot->GetLevel() + 5 < (uint32)graveyardAreaEntry->area_level)
+             continue;
+ 
++        // kalimdor: the safest - not in hostile territory, where the guards
++        // that kept killing the bot may stand too (a neutral town counts as
++        // safe; values/EnemyGuards.h). Owner, 2026-10-30.
++        if (EnemyGuards::IsHostileTerritory(WorldPosition(graveyardCoreEntry->map_id, graveyardCoreEntry->x, graveyardCoreEntry->y, graveyardCoreEntry->z), bot))
++            continue;
++
+         float dist = WorldPosition(corpse).sqDistance(graveyardCoreEntry);
+ 
+         if (dist < distNear)
+diff --git a/playerbot/strategy/values/DeadValues.h b/playerbot/strategy/values/DeadValues.h
+index 8f65902..98e6596 100644
+--- a/playerbot/strategy/values/DeadValues.h
++++ b/playerbot/strategy/values/DeadValues.h
+@@ -6,8 +6,12 @@ namespace ai
+     enum DeadValueConstants
+     {
+         DEATH_COUNT_BEFORE_EVAC = 15,
+-        DEATH_COUNT_BEFORE_TRYING_ANOTHER_GRAVEYARD = 10,
+-        DEATH_COUNT_BEFORE_REVIVING_AT_SPIRIT_HEALER = 8
++        // kalimdor: a bot dying again and again on the way back to its body
++        // gives up on it sooner - at the third death it takes the spirit
++        // healer at the nearest safe graveyard (owner, 2026-10-30). Upstream:
++        // 10 and 8.
++        DEATH_COUNT_BEFORE_TRYING_ANOTHER_GRAVEYARD = 3,
++        DEATH_COUNT_BEFORE_REVIVING_AT_SPIRIT_HEALER = 3
+     };
+ 
+     class GraveyardValue : public GuidPositionCalculatedValue, public Qualified
+diff --git a/playerbot/strategy/values/EnemyGuards.cpp b/playerbot/strategy/values/EnemyGuards.cpp
+index 0b23e7d..97cbb5f 100644
+--- a/playerbot/strategy/values/EnemyGuards.cpp
++++ b/playerbot/strategy/values/EnemyGuards.cpp
+@@ -4,8 +4,58 @@
+ #include "Grids/GridNotifiersImpl.h"
+ #include "Grids/CellImpl.h"
+ 
++#include <mutex>
++#include <vector>
++
+ using namespace ai;
+ 
++namespace
++{
++    // Every guard spawn, read once from the spawn data: where it stands and
++    // which factions it is friendly to. A few thousand points, checked by
++    // distance - the spawn data itself is a whole-server scan per call.
++    struct HavenGuard { uint32 map; float x, y; bool alliance, horde; };
++    std::vector<HavenGuard> havenGuards;
++    std::once_flag havenGuardsLoaded;
++
++    struct HavenGuardCollector
++    {
++        bool operator()(CreatureDataPair const& pair)
++        {
++            CreatureData const& data = pair.second;
++            CreatureInfo const* info = ObjectMgr::GetCreatureTemplate(data.id);
++            if (!info || !(info->ExtraFlags & CREATURE_EXTRA_FLAG_GUARD))
++                return false;
++
++            FactionTemplateEntry const* faction = sFactionTemplateStore.LookupEntry(info->Faction);
++            if (!faction)
++                return false;
++
++            havenGuards.push_back({ data.mapid, data.posX, data.posY,
++                PlayerbotAI::friendToAlliance(faction), PlayerbotAI::friendToHorde(faction) });
++            return false;
++        }
++    };
++}
++
++bool EnemyGuards::IsSafeHaven(const WorldPosition& position, Player* bot)
++{
++    std::call_once(havenGuardsLoaded, [] { HavenGuardCollector collector; sObjectMgr.DoCreatureData(collector); });
++
++    float const range2 = HavenRange * HavenRange;
++    for (HavenGuard const& guard : havenGuards)
++    {
++        if (guard.map != position.getMapId() || !(guard.alliance && guard.horde))
++            continue;
++
++        float const dx = guard.x - position.getX(), dy = guard.y - position.getY();
++        if (dx * dx + dy * dy < range2)
++            return true;
++    }
++
++    return false;
++}
++
+ bool EnemyGuards::IsDangerous(Creature* creature, Player* bot)
+ {
+     if (!creature || !bot || !creature->IsAlive() || creature->IsPet())
+@@ -56,6 +106,29 @@ std::list<Creature*> EnemyGuards::Near(Player* bot, float range)
+     return guards;
+ }
+ 
++bool EnemyGuards::IsHostileTerritory(const WorldPosition& position, Player* bot)
++{
++    AreaTableEntry const* area = position.GetArea();
++    if (!area)
++        return false;
++
++    uint32 team = area->team;
++    if (area->zone)
++    {
++        if (AreaTableEntry const* zone = GetAreaEntryByAreaID(area->zone))
++            team |= zone->team;
++    }
++
++    uint32 const own = bot->GetTeam() == ALLIANCE ? AREATEAM_ALLY : AREATEAM_HORDE;
++    uint32 const enemy = own == AREATEAM_ALLY ? AREATEAM_HORDE : AREATEAM_ALLY;
++    return (team & enemy) && !(team & own) && !IsSafeHaven(position, bot);
++}
++
++std::string EnemyGuards::ExitKey(const WorldPosition& position)
++{
++    return std::to_string(position.getMapId()) + ":" + std::to_string(int32(position.getX())) + ":" + std::to_string(int32(position.getY()));
++}
++
+ bool EnemyGuards::Covers(const std::list<Creature*>& guards, float x, float y, float z, Player* bot)
+ {
+     for (Creature* guard : guards)
+diff --git a/playerbot/strategy/values/EnemyGuards.h b/playerbot/strategy/values/EnemyGuards.h
+index 298f12b..cb29291 100644
+--- a/playerbot/strategy/values/EnemyGuards.h
++++ b/playerbot/strategy/values/EnemyGuards.h
+@@ -1,6 +1,8 @@
+ #pragma once
+ 
++#include <ctime>
+ #include <list>
++#include <string>
+ 
+ class Creature;
+ class Player;
+@@ -8,6 +10,8 @@ class Unit;
+ 
+ namespace ai
+ {
++    class WorldPosition;
++
+     // kalimdor: the other faction's guards and NPCs, when they are well above a
+     // bot's level (Kamino 210). Bots roam freely, enemy territory included;
+     // what they must not do below the level cap is walk into, or fight next
+@@ -41,5 +45,64 @@ namespace ai
+         static bool Covers(const std::list<Creature*>& guards, Unit* unit, Player* bot);
+         // Whether a point does.
+         static bool Covers(const std::list<Creature*>& guards, float x, float y, float z, Player* bot);
++
++        // Hostile territory: an area owned by the other faction only - its
++        // own faction mask, or its zone's, has the enemy's bit and not the
++        // bot's - unless it is a safe haven. Contested and neutral ground is
++        // not.
++        static bool IsHostileTerritory(const WorldPosition& position, Player* bot);
++        // A safe haven: a neutral town - guards friendly to both factions
++        // stand within HavenRange. Ratchet is one inside the Barrens, whose
++        // faction mask it inherits like Razor Hill does in Durotar; its
++        // Bruisers are what tell them apart, and make it a way out an Alliance
++        // bot at Razor Hill was walked past. A faction's outpost in enemy land
++        // (Tiragarde Keep's Kul Tiras guards, Alliance-only) is not one: the
++        // way out is to non-hostile ground or a neutral town (owner,
++        // 2026-10-30). From the spawn data, so far places answer too.
++        static bool IsSafeHaven(const WorldPosition& position, Player* bot);
++        static constexpr float HavenRange = 80.0f;
++
++        // Blocked in it: an objective that runs into such guards' range is
++        // no longer a priority - one retreat, and the bot drops it and walks
++        // out to non-hostile ground (owner's rule, 2026-10-30).
++        static constexpr int RetreatsBeforeLeaving = 1;
++        static constexpr time_t RetreatWindow = 5 * 60;
++        // After choosing a way out, the walk gets this long before the bot
++        // may be judged blocked again.
++        static constexpr time_t LeaveTime = 10 * 60;
++        // Or standing idle this long - no fight, no move of IdleMoveRange -
++        // within IdleRange beyond such a guard's reach. A farming bot fights
++        // or moves often enough not to count.
++        static constexpr time_t IdleTime = 5 * 60;
++        static constexpr float IdleMoveRange = 20.0f;
++        static constexpr float IdleRange = 30.0f;
++        // No objective this long first: a bot just logged in, or between two
++        // destinations, has none for a moment while travel picks one - a
++        // restart sent bots out of hostile territory on that alone (owner:
++        // at most a minute).
++        static constexpr time_t NoObjectiveTime = 45;
++        // The walk out is long: below this share of health the bot recovers
++        // first. Guards close by are the keep-away's, at once.
++        static constexpr float RestBeforeLeavingPercent = 60.0f;
++        // A destination is an objective here only while the bot gets closer:
++        // ProgressYards nearer within NoObjectiveTime, unless it is within
++        // WorkRange (being worked at). One on another continent is none -
++        // straight-line distance to Stormwind from Durotar shrinks walking to
++        // Tiragarde Keep (owner, 2026-10-30).
++        static constexpr float ProgressYards = 50.0f;
++        static constexpr float WorkRange = 150.0f;
++        // A group member is judged by its leader's objective - unless it is
++        // farther than this from the leader (or on another map): one ported or
++        // strayed away is judged on its own (owner, 2026-10-30).
++        static constexpr float GroupRange = 200.0f;
++        // The way out itself: no ProgressYards nearer within ExitStallTime and
++        // it has failed - a ground path the travel graph promised but the
++        // pathfinder could not walk (Tiragarde Keep to Ratchet, 2026-10-30).
++        // It is remembered, the next candidate is taken, and after
++        // ExitsBeforeHearth failures the hearthstone (owner: fallback first).
++        static constexpr time_t ExitStallTime = 2 * 60;
++        static constexpr int ExitsBeforeHearth = 2;
++        // A way out is remembered by its coordinates, to the yard.
++        static std::string ExitKey(const WorldPosition& position);
+     };
+ }
+diff --git a/playerbot/strategy/values/GatheringStalls.cpp b/playerbot/strategy/values/GatheringStalls.cpp
+new file mode 100644
+index 0000000..ba3d1d8
+--- /dev/null
++++ b/playerbot/strategy/values/GatheringStalls.cpp
+@@ -0,0 +1,52 @@
++#include "playerbot/playerbot.h"
++#include "GatheringStalls.h"
++
++#include <sstream>
++
++using namespace ai;
++
++// Kept per bot as "key:until key:until ..." in a manual string; a point is
++// keyed by its address, which the travel manager's destinations keep for the
++// server's life.
++static std::string Key(const WorldPosition* point)
++{
++    return std::to_string(reinterpret_cast<uintptr_t>(point));
++}
++
++bool GatheringStalls::IsGivenUp(PlayerbotAI* ai, const WorldPosition* point)
++{
++    std::string const list = ai->GetAiObjectContext()->GetValue<std::string>("manual string", "stalled gathers")->Get();
++    if (list.empty())
++        return false;
++
++    std::string const key = Key(point) + ":";
++    size_t const at = list.find(key);
++    if (at == std::string::npos || (at > 0 && list[at - 1] != ' '))
++        return false;
++
++    time_t const until = std::stoll(list.substr(at + key.size()));
++    return until > time(nullptr);
++}
++
++void GatheringStalls::GiveUp(PlayerbotAI* ai, const WorldPosition* point)
++{
++    std::string const list = ai->GetAiObjectContext()->GetValue<std::string>("manual string", "stalled gathers")->Get();
++    time_t const now = time(nullptr);
++
++    // Keep what has not expired, drop this point's old entry, add it anew.
++    std::string kept;
++    std::istringstream in(list);
++    std::string entry;
++    std::string const key = Key(point) + ":";
++    while (in >> entry)
++    {
++        size_t const colon = entry.find(':');
++        if (colon == std::string::npos || entry.compare(0, key.size(), key) == 0)
++            continue;
++        if (std::stoll(entry.substr(colon + 1)) > now)
++            kept += entry + " ";
++    }
++
++    kept += key + std::to_string(now + GiveUpFor);
++    ai->GetAiObjectContext()->GetValue<std::string>("manual string", "stalled gathers")->Set(kept);
++}
+diff --git a/playerbot/strategy/values/GatheringStalls.h b/playerbot/strategy/values/GatheringStalls.h
+new file mode 100644
+index 0000000..3926f66
+--- /dev/null
++++ b/playerbot/strategy/values/GatheringStalls.h
+@@ -0,0 +1,28 @@
++#pragma once
++
++#include <ctime>
++
++class PlayerbotAI;
++
++namespace ai
++{
++    class WorldPosition;
++
++
++    // kalimdor: a gathering node a bot cannot pick is given up on for a while
++    // (owner, 2026-10-30). A bot stood on a Peacebloom near Razor Hill, never
++    // picking it - the node was never used up, so the gathering destination
++    // stayed active and the bot kept coming back. Whatever breaks a pick, a
++    // bot working at one gathering point this long without moving on gives
++    // the point up, and travel skips it until the time is over. Herb and ore
++    // nodes only (GatheringStalledTrigger).
++    class GatheringStalls
++    {
++    public:
++        static constexpr time_t StallTime = 3 * 60;
++        static constexpr time_t GiveUpFor = 30 * 60;
++
++        static bool IsGivenUp(PlayerbotAI* ai, const WorldPosition* point);
++        static void GiveUp(PlayerbotAI* ai, const WorldPosition* point);
++    };
++}
+diff --git a/playerbot/strategy/values/GrindTargetValue.cpp b/playerbot/strategy/values/GrindTargetValue.cpp
+index e3480f9..e6af342 100644
+--- a/playerbot/strategy/values/GrindTargetValue.cpp
++++ b/playerbot/strategy/values/GrindTargetValue.cpp
+@@ -244,6 +244,21 @@ Unit* GrindTargetValue::FindTargetForGrinding(int assistCount)
+             }
+         }
+ 
++        // kalimdor: killing is tied to an objective (owner, 2026-10-30) - a
++        // mob a quest needs, or any mob while the bot is grinding on purpose
++        // (a grind destination). Not whatever is near because nothing else is
++        // planned: with no target, or travelling to or working at another
++        // purpose, a mob no quest needs is not chosen. Self-defence is the
++        // loop above (mobs attacking the bot), untouched. isGrindTravelDest
++        // compares typeid of a pointer with a class, so it is never true;
++        // the destination's real type is tested here.
++        if (entry && !needForQuest && !(travelTarget && dynamic_cast<GrindTravelDestination*>(travelTarget->GetDestination())))
++        {
++            if (ai->HasStrategy("debug grind", BotState::BOT_STATE_NON_COMBAT))
++                ai->TellPlayer(GetMaster(), chat->formatWorldobject(unit) + " ignored (no quest needs it, and not grinding).");
++            continue;
++        }
++
+         if (entry && !needForQuest)
+         {
+             if (urand(0, 100) < 99 && travelTargetWorking && !isGrindTravelDest)

@@ -201,13 +201,42 @@ _apply() {
     if [[ -n "$prefix" ]]; then git -C "$dir" apply --directory="${prefix%/}" "$@"; else git -C "$dir" apply "$@"; fi
 }
 
+# _applied <tree> — how many of the tree's patches, from the first, are on its
+# checkout. Patches stack - a later one changes lines an earlier one wrote, or
+# a file it made - so an earlier one cannot be taken off alone to see whether it
+# is there (once 0005 changed 0004's lines, every rebuild stopped at 0004 as
+# "does not apply"). This takes them off last-first, but in a scratch copy of
+# the index: the files are not touched, so a rebuild recompiles nothing. A gap
+# (a later one there, an earlier one not) counts as none, and the first patch's
+# check then says the checkout needs a look.
+_applied() {
+    local tree="$1" dir tmp idx i n=0
+    local -a ps=()
+    dir="$(_patch_dir "$tree")"
+    for i in "${PATCH_DIR}/${tree}"/*.patch; do [[ -f "$i" ]] && ps+=("$i"); done
+    tmp="$(mktemp -d)"; idx="$tmp/index"
+    cp "$(git -C "$dir" rev-parse --absolute-git-dir)/index" "$idx" 2>/dev/null || true
+    GIT_INDEX_FILE="$idx" git -C "$dir" add -A -- . 2>/dev/null
+    for (( i = ${#ps[@]} - 1; i >= 0; i-- )); do
+        if GIT_INDEX_FILE="$idx" _apply "$dir" --cached --reverse "${ps[i]}" 2>/dev/null; then
+            (( n )) || n=$((i + 1))
+        elif (( n )); then
+            n=0; break
+        fi
+    done
+    rm -f -- "$idx"; rmdir -- "$tmp"
+    printf '%s' "$n"
+}
+
 _patch() {
-    local tree dir p
+    local tree dir p i n
     for tree in "${_PATCH_TREES[@]}"; do
         dir="$(_patch_dir "$tree")"
+        n="$(_applied "$tree")"; i=0
         for p in "${PATCH_DIR}/${tree}"/*.patch; do
             [[ -f "$p" ]] || continue
-            if _apply "$dir" --reverse --check "$p" 2>/dev/null; then
+            i=$((i + 1))
+            if (( i <= n )); then
                 info "Patch ${tree}/$(basename "$p"): already applied."
             elif _apply "$dir" --check "$p" 2>/dev/null; then
                 _apply "$dir" "$p"; success "Patch ${tree}/$(basename "$p"): applied."
@@ -217,14 +246,17 @@ _patch() {
         done
     done
 }
-# _unpatch <dir> — take off the patches of the tree checked out at <dir>.
+# _unpatch <dir> — take off the patches of the tree checked out at <dir>, last
+# first (they stack, see _applied).
 _unpatch() {
-    local dir="$1" tree p
+    local dir="$1" tree p i n
+    local -a ps
     for tree in "${_PATCH_TREES[@]}"; do
         [[ "$dir" == "$(_patch_dir "$tree")" ]] || continue
-        for p in "${PATCH_DIR}/${tree}"/*.patch; do
-            [[ -f "$p" ]] || continue
-            if _apply "$dir" --reverse --check "$p" 2>/dev/null; then _apply "$dir" --reverse "$p"; fi
+        n="$(_applied "$tree")"; ps=()
+        for p in "${PATCH_DIR}/${tree}"/*.patch; do [[ -f "$p" ]] && ps+=("$p"); done
+        for (( i = n - 1; i >= 0; i-- )); do
+            _apply "$dir" --reverse "${ps[i]}"
         done
     done
     return 0

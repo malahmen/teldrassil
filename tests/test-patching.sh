@@ -47,8 +47,8 @@ chk "after applying, the file really changed" 'grep -qx "line 2" "$T/kal/playerb
 chk "and it reads applied"                 '[[ "$(state "$T/kal/playerbots")" == applied ]]'
 chk "nothing outside the subfolder moved"  '[[ "$(cat "$T/kal/other/y")" == x ]]'
 
-# _patch, _unpatch and _checkout_repo, with the messages they print kept.
-eval "$(sed -n -e '/^_patch() {/,/^}/p' -e '/^_unpatch() {/,/^}/p' -e '/^_checkout_repo() {/,/^}/p' "$SRC")"
+# _applied, _patch, _unpatch and _checkout_repo, with the messages they print kept.
+eval "$(sed -n -e '/^_applied() {/,/^}/p' -e '/^_patch() {/,/^}/p' -e '/^_unpatch() {/,/^}/p' -e '/^_checkout_repo() {/,/^}/p' "$SRC")"
 eval "$(grep -E '^(_patch_dir\(\) \{|_PATCH_TREES=)' "$SRC")"
 declare -F _patch_dir >/dev/null && [[ ${#_PATCH_TREES[@]} -gt 0 ]] || { echo "no _patch_dir/_PATCH_TREES in $SRC"; exit 1; }
 info() { echo "info: $*"; }; success() { echo "ok: $*"; }; warn() { echo "warn: $*"; }
@@ -109,6 +109,20 @@ chk "  and the playerbots one beside it"            '[[ "$out" == *"Patch player
 _unpatch "$SRC_MANGOS"
 chk "_unpatch takes off only that tree's patches" 'grep -qx "b" "$T/src/mangos-classic/src/ai.cpp" && grep -qx "line 2" "$SRC_PB/playerbot/x.cpp"'
 rm -r "$T/patches/mangos-classic"
+
+printf '\n== stacked patches: a later one changes what an earlier one wrote\n'
+# 0005 changed lines 0004 wrote: 0004 alone could not be taken off any more, so
+# every rebuild read it "does not apply" and stopped.
+printf -- 'diff --git a/playerbot/x.cpp b/playerbot/x.cpp\n--- a/playerbot/x.cpp\n+++ b/playerbot/x.cpp\n@@ -1,2 +1,2 @@\n line one\n-line 2\n+line 2 again\n' > "$T/patches/playerbots/0002-on-top.patch"
+out="$(_patch 2>&1)"
+chk "the second applies on top of the first"          '[[ "$out" == *"0001-fix.patch: already applied"* && "$out" == *"0002-on-top.patch: applied."* ]] && grep -qx "line 2 again" "$SRC_PB/playerbot/x.cpp"'
+before="$(stat -c %Y.%y "$SRC_PB/playerbot/x.cpp")"; sleep 1
+out="$(_patch 2>&1)"; rc=$?
+chk "a rebuild: both 'already applied', no error"     '[[ $rc -eq 0 && "$out" == *"0001-fix.patch: already applied"* && "$out" == *"0002-on-top.patch: already applied"* && "$out" != *error* ]]'
+chk "  and no file was rewritten (nothing recompiles)" '[[ "$(stat -c %Y.%y "$SRC_PB/playerbot/x.cpp")" == "$before" ]]'
+_unpatch "$SRC_PB"
+chk "_unpatch takes both off, last first"             'grep -qx "line two" "$SRC_PB/playerbot/x.cpp" && [[ -z "$(g -C "$T/src" status --porcelain -- playerbots)" ]]'
+rm "$T/patches/playerbots/0002-on-top.patch"
 
 printf '\npass=%d fail=%d\n' "$pass" "$fail"
 (( fail == 0 ))

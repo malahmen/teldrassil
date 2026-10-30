@@ -251,7 +251,7 @@ See `examples/roster.example.json`. The rules it enforces:
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries four changes to playerbots (`templates/patches/playerbots/`)
+teldrassil carries six changes to playerbots (`templates/patches/playerbots/`)
 and two to the core (`templates/patches/mangos-classic/`), applied before
 every build:
 
@@ -288,6 +288,21 @@ every build:
   below half health) the margin is 40 yards, so a bot revived at a hostile
   graveyard leaves at once; and a ghost whose corpse lies in that range takes
   the spirit healer rather than going back for it. Bots still roam anywhere.
+- **playerbots 0005:** in the other faction's territory, getting to safety is
+  the objective when there is no other. A bot (with its group) walks out when it
+  has no objective there for 45 s - none, one on another continent, or one it
+  gets no nearer to - or when the guards block it. The way out is the shortest
+  walking route to ground outside hostile territory or to a neutral town (guards
+  friendly to both factions, like Ratchet's); a way out that cannot be walked is
+  dropped for the next, and the hearthstone is the last resort. It says so in
+  General and the log gives the reason. Killing is tied to an objective (a
+  quest's mob, or grinding on purpose); a bot dying three times on the way back
+  to its body revives at the nearest safe graveyard; and a herb or ore node that
+  cannot be picked in 3 minutes is skipped for 30.
+- **playerbots 0006:** NPC conversations say whose line each turn is (it was
+  never said, so the NPC echoed the bot), keep the lines of speakers whose name
+  ends in "d" (they were left out of what the model saw), and a bot does not go
+  back to the same NPC to chat again at once.
 
 `roster apply` writes the database only while the world server is stopped:
 guilds and characters live in its memory, and a change made under it is
