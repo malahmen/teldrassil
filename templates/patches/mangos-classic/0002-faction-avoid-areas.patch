@@ -1,0 +1,22 @@
+diff --git a/src/game/MotionGenerators/PathFinder.cpp b/src/game/MotionGenerators/PathFinder.cpp
+index 5badca4..6f41138 100644
+--- a/src/game/MotionGenerators/PathFinder.cpp
++++ b/src/game/MotionGenerators/PathFinder.cpp
+@@ -1044,6 +1044,17 @@ void PathFinder::createFilter()
+             m_filter.setAreaCost(9, 20.0f);  //Water
+             m_filter.setAreaCost(12, 5.0f);  //Mob proximity
+             m_filter.setAreaCost(13, 20.0f); //Mob aggro
++            // kalimdor: the other faction's guards and NPCs (Kamino 210).
++            // playerbots marks the shared navmesh around them by the side they
++            // are dangerous to - 15 to Alliance, 16 to Horde - so the cost
++            // follows the bot's team: as dear as mob aggro for its own side,
++            // plain ground for the other, whose guards they are.
++            if (m_sourceUnit)
++            {
++                bool const alliance = ((Player*)m_sourceUnit)->GetTeam() == ALLIANCE;
++                m_filter.setAreaCost(15, alliance ? 20.0f : 1.0f); // dangerous to Alliance
++                m_filter.setAreaCost(16, alliance ? 1.0f : 20.0f); // dangerous to Horde
++            }
+         }
+         else
+         {
