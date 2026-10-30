@@ -175,6 +175,13 @@ class Population(unittest.TestCase):
 
 
 class Plan(unittest.TestCase):
+    def test_levels_from_1_says_professions_are_not_applied(self):
+        r = t.load_roster(roster(population={"bots": 100, "levels": "from 1"}))
+        lines, sql, upgrade = t.plan(r, empty_state(), now=1)
+        self.assertEqual(upgrade, [])
+        self.assertIn("professions not applied", "\n".join(lines))
+        self.assertNotIn("firstSkill", "\n".join(sql))
+
     def test_claims_renames_and_shapes(self):
         r = t.load_roster(roster())
         lines, sql, upgrade = t.plan(r, empty_state(), now=1)
@@ -442,6 +449,15 @@ class ConfAndCards(unittest.TestCase):
         self.assertEqual(changes["AiPlayerbot.LLMApiEndpoint"], "http://x/v1/chat/completions")
         self.assertEqual(changes["AiPlayerbot.ClassRace.UseFixedClassRaceCounts"], "1")
         self.assertEqual(changes["AiPlayerbot.LLMDefaultPromptsFile"], "/install/etc/cards.txt")
+
+    def test_population_levels(self):
+        conf = "AiPlayerbot.DisableRandomLevels = 0\n"
+        r = t.load_roster(roster(population={"bots": 100, "levels": "from 1"}))
+        self.assertEqual(t.conf_changes(r, conf, "/c")["AiPlayerbot.DisableRandomLevels"], "1")
+        r = t.load_roster(roster(population={"bots": 100}))
+        self.assertNotIn("AiPlayerbot.DisableRandomLevels", t.conf_changes(r, conf, "/c"), "random is the default")
+        with self.assertRaises(t.RosterError):
+            t.load_roster(roster(population={"bots": 100, "levels": "level 1"}))
 
     def test_cards_file(self):
         text = t.cards_text(t.load_roster(roster()))

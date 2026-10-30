@@ -31,6 +31,23 @@ run --profile far profiles;                 chk "profiles marks the active one" 
 run --profile far config;                   chk "config marks the profile's keys" '[[ "$out" == *"P DB_CONTAINER"* ]]'
 run --profile far set SERVER_KIND docker;   chk "SERVER_KIND is podman or kube" '[[ $rc -ne 0 ]]'
 
+hdr "editing and removing profiles"
+run --profile tmp set DB_USER bob; run --profile tmp set DB_CONTAINER tmp-db
+run --profile tmp unset DB_USER;            chk "unset drops a key"             '[[ $rc -eq 0 && "$out" == *"now '"'"'root'"'"'"* ]]'
+run --profile tmp get DB_CONTAINER;         chk "  and keeps the rest"          '[[ "$out" == tmp-db ]]'
+run --profile tmp unset NOPE;               chk "unset refuses an unknown key"  '[[ $rc -ne 0 ]]'
+printf 'password: x\n' > "$T/config/teldrassil/console-tmp.txt"
+run --profile tmp set RA_PASS_FILE "$T/config/teldrassil/console-tmp.txt"
+run profile-rename tmp tmp2;                chk "rename"                        '[[ $rc -eq 0 && -f "$T/config/teldrassil/profiles/tmp2.conf" && ! -e "$T/config/teldrassil/profiles/tmp.conf" ]]'
+chk "  moves its console file"              '[[ -f "$T/config/teldrassil/console-tmp2.txt" && ! -e "$T/config/teldrassil/console-tmp.txt" ]]'
+run --profile tmp2 get RA_PASS_FILE;        chk "  and points the setting at it" '[[ "$out" == *console-tmp2.txt ]]'
+run profile-rename tmp2 far;                chk "rename onto an existing one is refused" '[[ $rc -ne 0 && "$out" == *"already exists"* ]]'
+run profile-delete tmp2;                    chk "delete needs --yes"            '[[ $rc -ne 0 && -f "$T/config/teldrassil/profiles/tmp2.conf" ]]'
+run profile-delete tmp2 --yes;              chk "delete"                        '[[ $rc -eq 0 && ! -e "$T/config/teldrassil/profiles/tmp2.conf" ]]'
+chk "  keeps the console password file, and says where" '[[ -f "$T/config/teldrassil/console-tmp2.txt" && "$out" == *console-tmp2.txt* ]]'
+run profile-delete nope --yes;              chk "deleting a missing profile fails" '[[ $rc -ne 0 && "$out" == *"No such profile"* ]]'
+run profile-delete "../teldrassil" --yes;   chk "a path is refused"             '[[ $rc -ne 0 && -f "$T/config/teldrassil/teldrassil.conf" ]]'
+
 hdr "over ssh"
 for kv in "SSH_HOST box" "DB_CONTAINER db" "DB_PASS_ENV MARIADB_ROOT_PASSWORD"; do run --profile box set $kv; done
 : > "$T/calls.log"

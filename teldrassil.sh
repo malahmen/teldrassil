@@ -166,13 +166,17 @@ Bots:
                                 bot act.
 
 Config:
-  set KEY VALUE | get KEY | config | profiles
+  set KEY VALUE | unset KEY | get KEY | config | profiles
+  profile-rename OLD NEW        also moves the console password file
+                                console-account made for it
+  profile-delete NAME --yes     the settings only; the server is untouched
 
 Profiles (one per server): --profile NAME before the command, or
 $TELDRASSIL_PROFILE. A profile is ~/.config/teldrassil/profiles/NAME.conf,
 layered over teldrassil.conf: what it sets wins, the rest falls through.
 'set' writes to the active profile and creates it; any other command refuses
-a profile that does not exist. --no-profile ignores $TELDRASSIL_PROFILE.
+a profile that does not exist; 'unset KEY' drops a key from it, so the base
+config's value shows through again. --no-profile ignores $TELDRASSIL_PROFILE.
 
   A server elsewhere: SSH_HOST runs podman, kubectl and the console's
   connection there (an ssh destination, e.g. a ~/.ssh/config alias; key-based,
@@ -210,7 +214,7 @@ main() {
     _profile_require "$subcmd"
     case "$subcmd" in
         help) usage; return 0 ;;
-        set|get|config|profiles) ;;
+        set|unset|get|config|profiles|profile-rename|profile-delete) ;;
         *) _settings; _check_target "$subcmd" ;;
     esac
     case "$subcmd" in
@@ -247,6 +251,9 @@ main() {
         get)                cmd_get "$@" ;;
         config)             cmd_config "$@" ;;
         profiles)           cmd_profiles "$@" ;;
+        unset)              cmd_unset "$@" ;;
+        profile-rename)     cmd_profile_rename "$@" ;;
+        profile-delete)     cmd_profile_delete "$@" ;;
         *) error_exit "Unknown command: $subcmd (run with --help for usage)" ;;
     esac
 }

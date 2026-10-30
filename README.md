@@ -160,7 +160,10 @@ One profile per server: `--profile NAME` before the command, or
 layered over `teldrassil.conf`: what it sets wins, the rest falls through, so
 the roster and other shared settings stay in one place. `set` writes to the
 active profile and creates it; every other command refuses a profile that does
-not exist, so a typo never acts on another server. `profiles` lists them.
+not exist, so a typo never acts on another server. `profiles` lists them,
+`unset KEY` drops one of a profile's settings (the base config's shows through
+again), `profile-rename OLD NEW` renames one, and `profile-delete NAME --yes`
+removes one - its settings only; the server it pointed at is untouched.
 
 A profile can point at a server on another machine, and at one run in
 Kubernetes:
@@ -241,7 +244,12 @@ See `examples/roster.example.json`. The rules it enforces:
 - **Population:** `{"bots": N, "balance": "50/50"}` sets exact class/race
   counts, half per faction, the roster's own pairs first. Counts apply when
   bots are created: `apply --fresh-population --yes` replaces every random bot
-  (and every guild a bot leads) to get them.
+  (and every guild a bot leads) to get them. `"levels": "from 1"` makes every
+  bot - the roster's too - start at level 1 in its race's starting area and
+  level by playing, like a server's first day (playerbots'
+  `DisableRandomLevels`: no rolled level, gear or spells, no teleport by
+  level); `"random"`, the default, rolls them. It too takes a fresh population
+  to apply to bots that exist already.
 
 teldrassil carries two changes to playerbots (`templates/patches/playerbots/`,
 applied before every build):

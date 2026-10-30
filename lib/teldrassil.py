@@ -343,7 +343,14 @@ def load_roster(data):
                 raise RosterError("population: fewer bots than the roster names")
             if p.get("balance", "50/50") != "50/50":
                 raise RosterError("population: only balance 50/50 is supported")
-            out["population"] = {"bots": bots}
+            # "from 1": every bot is made at level 1 in its race's starting
+            # area and levels by playing; playerbots never rolls a level, gear
+            # or spells for it, nor teleports it by level (DisableRandomLevels).
+            # Takes a fresh population to apply to bots that exist already.
+            levels = p.get("levels", "random")
+            if levels not in ("random", "from 1"):
+                raise RosterError(f"population: levels is 'random' or 'from 1' (got {levels!r})")
+            out["population"] = {"bots": bots, "levels": levels}
         except (RosterError, KeyError, ValueError, TypeError) as e:
             errors.append(str(e) if isinstance(e, RosterError) else f"population: {e!r}")
     if "llm" in data:
@@ -424,6 +431,7 @@ def conf_changes(roster, conf_text, cards_in_server):
         want["AiPlayerbot.ClassRace.UseFixedClassRaceCounts"] = "1"
         want["AiPlayerbot.MinRandomBots"] = str(pop["bots"])
         want["AiPlayerbot.MaxRandomBots"] = str(pop["bots"])
+        want["AiPlayerbot.DisableRandomLevels"] = "1" if pop.get("levels") == "from 1" else "0"
         for r in sorted(LEGAL):
             for c in sorted(LEGAL[r]):
                 want[f"AiPlayerbot.ClassRaceProb.{c}.{r}"] = str(counts.get((c, r), 0))
@@ -669,7 +677,12 @@ def plan(roster, state, now=None, bindings=None, bound=None):
         if c["gender"] != b["gender"]:
             lines.append(f"{n}: gender to {'female' if b['gender'] else 'male'} (appearance reset to the race's first options)")
             sql.append(f"UPDATE characters SET gender={b['gender']}, playerBytes=0, playerBytes2=playerBytes2 & ~255 WHERE guid={g};")
-        if b["professions"]:
+        if b["professions"] and (roster["population"] or {}).get("levels") == "from 1":
+            # playerbots reads a bot's professions only when it rolls the
+            # bot's level and gear, which "from 1" turns off: 'rndbot
+            # upgrade' would do nothing. Said, not pretended.
+            lines.append(f"{n}: professions not applied - with levels 'from 1' playerbots does not set them")
+        elif b["professions"]:
             have = skills.get(g, {})
             want = {"firstSkill": b["professions"][0], "secondSkill": b["professions"][1]}
             if any(have.get(k) != v for k, v in want.items()):
@@ -825,7 +838,7 @@ def cmd_check(a):
         n = sum(1 for b in r["bots"] if b["guild"] == g["name"])
         print(f"guild {g['name']} ({g['faction']}): {n} members, led by {g['leader']}")
     if r["population"]:
-        print(f"population: {r['population']['bots']} bots, 50/50")
+        print(f"population: {r['population']['bots']} bots, 50/50, levels {r['population']['levels']}")
     print(f"cards: {sum(1 for b in r['bots'] if b['card'])}")
     with open(a.roster, encoding="utf-8") as f:
         rules = load_attunements(json.load(f))
