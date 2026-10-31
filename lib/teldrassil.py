@@ -336,7 +336,11 @@ def load_roster(data):
                 raise RosterError(f"{where}: give two professions, or none (playerbots picks)")
             if len(profs) == 2 and profs[0] == profs[1]:
                 raise RosterError(f"{where}: the two professions must differ")
-            prios = [str(p).lower() for p in b.get("priorities", [])]
+            # priorities: for a bot without an archetype only - with one, its
+            # strategies come from the archetype (bot_strategies) and this
+            # older list is not read: two lists of similar words, where only
+            # the archetype's ranks anything, were a trap.
+            prios = [str(p).lower() for p in b.get("priorities", [])] if b.get("archetype") is None else []
             for p in prios:
                 if p not in PRIORITY_STRATEGIES:
                     raise RosterError(f"{where}: unknown priority '{p}' (one of: {', '.join(PRIORITY_STRATEGIES)})")
@@ -424,6 +428,20 @@ def load_roster(data):
     if errors:
         raise RosterError("\n".join(errors))
     return out
+
+
+# An archetype's activities as the priorities that switch strategies on: wpvp
+# (attack enemy players), quests first (take every quest).
+ACTIVITY_PRIORITY = {"quests": "quests", "gather": "gather", "ah": "ah", "wpvp": "wpvp", "bosses": "dungeons"}
+
+
+def bot_strategies(roster, b):
+    """(non-combat, combat) strategy names for a roster bot: from its
+    archetype's activities when it has one, else from its priorities."""
+    if b["archetype"]:
+        acts = roster["archetypes"][b["archetype"]]["activities"]
+        return strategies_for([ACTIVITY_PRIORITY[a] for a in acts if a in ACTIVITY_PRIORITY])
+    return strategies_for(b["priorities"])
 
 
 def strategies_for(prios):
@@ -766,7 +784,7 @@ def plan(roster, state, now=None, bindings=None, bound=None):
         if full:
             lines.append(f"{n}: WARNING has full strategy lists ({', '.join(full)}), which replace its defaults; "
                          "they are left alone")
-        nc, co = strategies_for(b["priorities"])
+        nc, co = bot_strategies(roster, b)
         for key, strat in (("nc+", nc), ("co+", co)):
             value = ",".join("+" + s for s in strat)
             have = [v for k, v in rows if k == key]
