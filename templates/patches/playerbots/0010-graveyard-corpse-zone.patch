@@ -1,0 +1,18 @@
+diff --git a/playerbot/strategy/values/DeadValues.cpp b/playerbot/strategy/values/DeadValues.cpp
+index 0680e90..728374c 100644
+--- a/playerbot/strategy/values/DeadValues.cpp
++++ b/playerbot/strategy/values/DeadValues.cpp
+@@ -73,7 +73,12 @@ WorldSafeLocsEntry const* GraveyardValue::GetAnotherAppropriateClosestGraveyard(
+         return nullptr;
+ 
+     uint32 botMapId = corpse->GetMapId();
+-    uint32 botZoneId = corpse->GetZoneId();
++    // kalimdor: the corpse's zone from where it lies - GetZoneId asks the
++    // corpse's map, and a corpse need not be on one (not loaded, or turned
++    // to bones): the world server asserted and stopped, twice in an hour on
++    // the dev server (2026-10-31), once 210 sent bots here after 3 deaths
++    // instead of 10.
++    uint32 botZoneId = sTerrainMgr.GetZoneId(corpse->GetMapId(), corpse->GetPositionX(), corpse->GetPositionY(), corpse->GetPositionZ());
+ 
+     for (auto mapValues : sWorld.GetGraveyardManager().GetGraveyardMap())
+     {
