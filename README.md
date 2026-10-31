@@ -228,10 +228,13 @@ See `examples/roster.example.json`. The rules it enforces:
   the only ones certain to exist for both genders.
 - **Professions** are stored for playerbots and applied with `rndbot upgrade`
   after the server starts.
-- **Priorities.** playerbots runs all of a bot's strategies at once and ranks
-  none of them, so every shaped bot gets the same base (gathering, vendors
-  and the auction house, questing), and a priority adds only what changes
-  behaviour: `wpvp` adds world PvP, and `quests` first takes every quest.
+- **Priorities** (for a bot without an archetype; with one, they are not
+  read - the archetype's activities do this). playerbots runs all of a bot's
+  strategies at once and ranks none of them, so every shaped bot gets the
+  same base (gathering, vendors and the auction house, questing), and a
+  priority adds only what changes behaviour: `wpvp` adds world PvP, and
+  `quests` first takes every quest. An archetype listing `wpvp` adds world
+  PvP the same way, and one with `quests` first takes every quest.
   Gathering first is a guild **farm order** (`"farm": "Copper Ore 40"`, the
   officer note playerbots reads).
 - **Guild members the roster does not name keep their place,** except the top
@@ -252,7 +255,8 @@ See `examples/roster.example.json`. The rules it enforces:
   on. An archetype listing `wpvp` is not held by the world-PvP gates (10% of
   bots, the first 15 minutes of each hour). They are written to
   `aiplayerbot.conf` (`AiPlayerbot.Archetypes`, `AiPlayerbot.Archetype.<name>`).
-  A bot without one behaves as playerbots does upstream.
+  A bot without one behaves as playerbots does upstream. The activities are a
+  goal list that falls through (patch 0011, below).
 - **Moods:** every bot has two for life, from polite, rude, direct, poetic,
   logical, emotional, evil, saint, seductive and repulsive - a polite evil, a
   saint seductive - which colour what it says. playerbots draws them from the
@@ -273,7 +277,7 @@ See `examples/roster.example.json`. The rules it enforces:
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries ten changes to playerbots (`templates/patches/playerbots/`)
+teldrassil carries eleven changes to playerbots (`templates/patches/playerbots/`)
 and two to the core (`templates/patches/mangos-classic/`), applied before
 every build:
 
@@ -344,6 +348,11 @@ every build:
   that died three times (0005) asked its corpse for its zone through the
   corpse's map, which a corpse need not be on; the world server's assertion
   stopped it. The zone is now read from where the corpse lies.
+- **playerbots 0011:** an archetype's activities fall through as goals. One
+  reached is skipped for good (grinding to level, at the cap); one that finds
+  nothing to do is skipped for 60 minutes; one pursued past its budget (bosses
+  30 minutes, the rest 2 hours) is skipped for 60 minutes too, and the bot
+  moves to its next. The log says which, why and for how long.
 
 `roster apply` writes the database only while the world server is stopped:
 guilds and characters live in its memory, and a change made under it is

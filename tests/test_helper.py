@@ -68,7 +68,7 @@ def apply_plan_to_state(rost, state):
         c["gender"] = b["gender"]
         st["skills"] += [{"guid": c["guid"], "event": "firstSkill", "value": b["professions"][0]},
                          {"guid": c["guid"], "event": "secondSkill", "value": b["professions"][1]}]
-        nc, co = t.strategies_for(b["priorities"])
+        nc, co = t.bot_strategies(r, b)
         st["store"].append({"guid": c["guid"], "key": "nc+", "value": ",".join("+" + s for s in nc)})
         if co:
             st["store"].append({"guid": c["guid"], "key": "co+", "value": ",".join("+" + s for s in co)})
@@ -513,6 +513,24 @@ class Archetypes(unittest.TestCase):
         after = apply_plan_to_state(rost, empty_state())
         _, sql, _ = t.plan(t.load_roster(rost), after, now=1)
         self.assertFalse(any("archetype" in s for s in sql), "a second plan changes nothing")
+
+    def test_an_archetype_sets_the_strategies_and_priorities_are_not_read(self):
+        rost = roster(archetypes=ARCHETYPES)
+        rost["bots"][0]["archetype"] = "creeper"            # wpvp: attacks enemy players
+        rost["bots"][0]["priorities"] = ["grind", "bosses"]  # not priority words: not read
+        rost["bots"][1]["archetype"] = "quester"            # quests first: takes every quest
+        r = t.load_roster(rost)
+        self.assertIn("pvp", t.bot_strategies(r, r["bots"][0])[1])
+        self.assertIn("accept all quests", t.bot_strategies(r, r["bots"][1])[0])
+        self.assertNotIn("pvp", t.bot_strategies(r, r["bots"][1])[1], "Grunt's wpvp priority is not read")
+
+    def test_without_an_archetype_priorities_still_count(self):
+        r = t.load_roster(roster())
+        self.assertIn("pvp", t.bot_strategies(r, r["bots"][1])[1])
+        bad = roster()
+        bad["bots"][1]["priorities"] = ["grind"]
+        with self.assertRaises(t.RosterError):
+            t.load_roster(bad)
 
     def test_a_changed_or_dropped_archetype_replaces_the_row(self):
         rost = roster(archetypes=ARCHETYPES)

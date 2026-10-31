@@ -1,0 +1,255 @@
+diff --git a/playerbot/strategy/actions/ChooseTravelTargetAction.cpp b/playerbot/strategy/actions/ChooseTravelTargetAction.cpp
+index 4f464e8..5cc98b8 100644
+--- a/playerbot/strategy/actions/ChooseTravelTargetAction.cpp
++++ b/playerbot/strategy/actions/ChooseTravelTargetAction.cpp
+@@ -10,6 +10,7 @@
+ #include "playerbot/strategy/values/FreeMoveValues.h"
+ #include "Guilds/GuildMgr.h"
+ #include <iomanip>
++#include "playerbot/strategy/values/Goals.h"
+ 
+ using namespace ai;
+ 
+@@ -73,14 +74,22 @@ bool ChooseTravelTargetAction::Execute(Event& event)
+         newTarget.SetRelevance(targetRelevance);
+     }
+ 
++    // kalimdor: the goal this request was for, if any (values/Goals.h):
++    // nothing found makes it not reachable now; a target starts its clock.
++    std::string const goal = Goals::OfCondition(AI_VALUE2(std::string, "manual string", "future travel condition"));
++
+     if (!SetBestTarget(requester, &newTarget, destinationList))
+     {
+         SET_AI_VALUE2(bool, "no active travel destinations", futureTravelPurpose, true);
+         ai->TellDebug(ai->GetMaster(), "No target set", "debug travel");
++        if (!goal.empty())
++            Goals::NotReachable(ai, goal, "not reachable now (nothing found)");
+         return false;
+     }
+ 
+     setNewTarget(requester, &newTarget, travelTarget);
++    if (!goal.empty())
++        Goals::Started(ai, goal);
+     
+     return true;
+ }
+diff --git a/playerbot/strategy/generic/TravelStrategy.cpp b/playerbot/strategy/generic/TravelStrategy.cpp
+index a693dfc..cc59839 100644
+--- a/playerbot/strategy/generic/TravelStrategy.cpp
++++ b/playerbot/strategy/generic/TravelStrategy.cpp
+@@ -119,6 +119,17 @@ void TravelStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
+         }
+     };
+ 
++    // kalimdor: and its activities fall through as goals (Kamino 215;
++    // values/Goals.h): each activity's trigger also asks whether its goal is
++    // open - not reached, not cooling down after finding nothing, not past
++    // its time.
++    auto goalTrigger = [archetype](const std::string& trigger, const std::string& activity)
++    {
++        if (!archetype || activity.empty() || trigger.rfind("val::", 0) != 0)
++            return trigger;
++        return "val::and::{" + trigger.substr(5) + ",goal open::" + activity + "}";
++    };
++
+     // kalimdor: a gathering point worked at for minutes without moving on is
+     // given up, above choosing anew (values/GatheringStalls.h).
+     triggers.push_back(new TriggerNode(
+@@ -131,6 +142,8 @@ void TravelStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
+         // Only the plain purposes are activities: grinding for money (a
+         // condition) is upkeep.
+         float const ranked = condition.empty() ? relevanceOf(activityOf(purpose), relevance) : relevance;
++        if (condition.empty())
++            trigger = goalTrigger(trigger, activityOf(purpose));
+         triggers.push_back(new TriggerNode(
+             trigger,
+             NextAction::array(0, new NextAction("request travel target::" + std::to_string((uint32)purpose), ranked), NULL)));
+@@ -161,13 +174,16 @@ void TravelStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
+         // The activities among them: world PvP, and questing (not a focus
+         // target the player set, nor questing for money).
+         float ranked = relevance;
++        std::string goal;
+         if (trigger == "val::should travel named::pvp")
+-            ranked = relevanceOf("wpvp", relevance);
++            goal = "wpvp";
+         else if (trigger == "val::has strategy::rpg quest")
+-            ranked = relevanceOf("quests", relevance);
++            goal = "quests";
++        if (!goal.empty())
++            ranked = relevanceOf(goal, relevance);
+ 
+         triggers.push_back(new TriggerNode(
+-            trigger,
++            goal.empty() ? trigger : goalTrigger(trigger, goal),
+             NextAction::array(0, new NextAction(action, ranked), NULL)));
+     }
+ 
+diff --git a/playerbot/strategy/values/Goals.cpp b/playerbot/strategy/values/Goals.cpp
+new file mode 100644
+index 0000000..2bbd2db
+--- /dev/null
++++ b/playerbot/strategy/values/Goals.cpp
+@@ -0,0 +1,84 @@
++#include "playerbot/playerbot.h"
++#include "Goals.h"
++#include "Archetypes.h"
++#include "World/World.h"
++
++using namespace ai;
++
++bool Goals::Reached(PlayerbotAI* ai, const std::string& activity)
++{
++    // lvl60 - grinding to level - is reached at the cap. Grinding for money
++    // is upkeep, not this goal.
++    if (activity == "grind")
++        return ai->GetBot()->GetLevel() >= sWorld.getConfig(CONFIG_UINT32_MAX_PLAYER_LEVEL);
++
++    return false;
++}
++
++time_t Goals::BudgetOf(const std::string& activity)
++{
++    return activity == "bosses" ? BossBudget : Budget;
++}
++
++std::string Goals::OfCondition(const std::string& condition)
++{
++    static const std::string marker = "goal open::";
++    size_t const at = condition.find(marker);
++    if (at == std::string::npos)
++        return "";
++
++    size_t const from = at + marker.size();
++    size_t const to = condition.find_first_of(",}", from);
++    return condition.substr(from, to == std::string::npos ? std::string::npos : to - from);
++}
++
++void Goals::NotReachable(PlayerbotAI* ai, const std::string& activity, const std::string& why)
++{
++    AiObjectContext* context = ai->GetAiObjectContext();
++    Player* bot = ai->GetBot();
++
++    SET_AI_VALUE2(time_t, "manual time", "goal cooldown " + activity, time(nullptr) + Cooldown);
++    if (AI_VALUE2(std::string, "manual string", "goal") == activity)
++        RESET_AI_VALUE2(std::string, "manual string", "goal");
++
++    sLog.outString("Bot #%d %s:%d <%s>: %s %s - skipped for %d minutes, on to its next goal", bot->GetGUIDLow(),
++        bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), activity.c_str(), why.c_str(), int(Cooldown / 60));
++}
++
++void Goals::Started(PlayerbotAI* ai, const std::string& activity)
++{
++    AiObjectContext* context = ai->GetAiObjectContext();
++
++    if (AI_VALUE2(std::string, "manual string", "goal") == activity)
++        return;
++
++    SET_AI_VALUE2(std::string, "manual string", "goal", activity);
++    SET_AI_VALUE2(time_t, "manual time", "goal since", time(nullptr));
++
++    // Said when the bot takes up a goal - not per target - so the log shows
++    // its way down the list.
++    Player* bot = ai->GetBot();
++    sLog.outString("Bot #%d %s:%d <%s>: takes up %s (budget %d minutes)", bot->GetGUIDLow(),
++        bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), activity.c_str(), int(BudgetOf(activity) / 60));
++}
++
++bool GoalOpenValue::Calculate()
++{
++    std::string const activity = getQualifier();
++
++    if (Goals::Reached(ai, activity))
++        return false;
++
++    time_t const now = time(nullptr);
++    if (AI_VALUE2(time_t, "manual time", "goal cooldown " + activity) > now)
++        return false;
++
++    if (AI_VALUE2(std::string, "manual string", "goal") == activity &&
++        now - AI_VALUE2(time_t, "manual time", "goal since") > Goals::BudgetOf(activity))
++    {
++        Goals::NotReachable(ai, activity, "out of time (" + std::to_string(Goals::BudgetOf(activity) / 60) + " minutes)");
++        return false;
++    }
++
++    return true;
++}
+diff --git a/playerbot/strategy/values/Goals.h b/playerbot/strategy/values/Goals.h
+new file mode 100644
+index 0000000..cdd8ceb
+--- /dev/null
++++ b/playerbot/strategy/values/Goals.h
+@@ -0,0 +1,53 @@
++#pragma once
++#include "playerbot/strategy/Value.h"
++
++#include <ctime>
++#include <string>
++
++// kalimdor: an archetype's activities as a goal list that falls through
++// (Kamino 215; owner's rules, 2026-10-27 and 2026-10-31). A goal - one of the
++// archetype's activities - is
++//   reached:            done for good, skipped (grind - "lvl60" - at the cap);
++//   not reachable now:  its request found nothing - skipped, retried after
++//                       Cooldown;
++//   out of time:        pursued past its budget (bosses BossBudget, the rest
++//                       Budget) - then not reachable now.
++// For a bot with an archetype only (values/Archetypes.h): its activity
++// triggers ask "goal open::<activity>" (TravelStrategy), and the travel target
++// choice reports what it found (ChooseTravelTargetAction). Upkeep - vendors,
++// repairs, mail, money - is never a goal and never held.
++
++namespace ai
++{
++    class Goals
++    {
++    public:
++        static constexpr time_t Cooldown = 60 * 60;
++        // Bosses: today the open-world ones; once dungeon runs exist (Kamino
++        // 151), the time to find a group.
++        static constexpr time_t BossBudget = 30 * 60;
++        static constexpr time_t Budget = 2 * 60 * 60;
++
++        static bool Reached(PlayerbotAI* ai, const std::string& activity);
++        static time_t BudgetOf(const std::string& activity);
++        // The goal a travel condition asks for ("and::{...,goal open::quests}"),
++        // or "".
++        static std::string OfCondition(const std::string& condition);
++        // Its request found nothing, or its time ran out: skipped for Cooldown.
++        static void NotReachable(PlayerbotAI* ai, const std::string& activity, const std::string& why);
++        // A target was chosen for it: the bot's current goal, timed from the
++        // first target (a change of goal restarts the clock; upkeep between
++        // targets does not).
++        static void Started(PlayerbotAI* ai, const std::string& activity);
++    };
++
++    // Whether a goal may be pursued now: not reached, not cooling down, and
++    // (as the bot's current goal) within its budget.
++    class GoalOpenValue : public BoolCalculatedValue, public Qualified
++    {
++    public:
++        GoalOpenValue(PlayerbotAI* ai, std::string name = "goal open") : BoolCalculatedValue(ai, name, 5), Qualified() {}
++
++        virtual bool Calculate() override;
++    };
++}
+diff --git a/playerbot/strategy/values/ValueContext.h b/playerbot/strategy/values/ValueContext.h
+index 26d258c..7baa298 100644
+--- a/playerbot/strategy/values/ValueContext.h
++++ b/playerbot/strategy/values/ValueContext.h
+@@ -93,6 +93,7 @@
+ #include "EntryValues.h"
+ #include "GuidPositionValues.h"
+ #include "EngineValues.h"
++#include "Goals.h"
+ #include "FreeMoveValues.h"
+ #include "HazardsValue.h"
+ #include "TalentSpecValue.h"
+@@ -458,6 +459,7 @@ namespace ai
+             creators["action useful"] = [](PlayerbotAI* ai) { return new ActionUsefulValue(ai); };
+             creators["trigger active"] = [](PlayerbotAI* ai) { return new TriggerActiveValue(ai); };
+             creators["has strategy"] = [](PlayerbotAI* ai) { return new HasStrategyValue(ai); };
++            creators["goal open"] = [](PlayerbotAI* ai) { return new GoalOpenValue(ai); };
+ 
+             creators["party tank without lifebloom"] = [](PlayerbotAI* ai) { return new PartyTankWithoutLifebloomValue(ai); };
+             creators["move style"] = [](PlayerbotAI* ai) { return new MoveStyleValue(ai); };
