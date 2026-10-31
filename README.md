@@ -273,7 +273,7 @@ See `examples/roster.example.json`. The rules it enforces:
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries nine changes to playerbots (`templates/patches/playerbots/`)
+teldrassil carries ten changes to playerbots (`templates/patches/playerbots/`)
 and two to the core (`templates/patches/mangos-classic/`), applied before
 every build:
 
@@ -340,6 +340,10 @@ every build:
   it could not read.
 - **playerbots 0009:** every bot carries two moods for life, which its chat
   replies and NPC conversations are told (see the roster's moods).
+- **playerbots 0010:** a fix for a crash. Choosing a safe graveyard for a bot
+  that died three times (0005) asked its corpse for its zone through the
+  corpse's map, which a corpse need not be on; the world server's assertion
+  stopped it. The zone is now read from where the corpse lies.
 
 `roster apply` writes the database only while the world server is stopped:
 guilds and characters live in its memory, and a change made under it is
