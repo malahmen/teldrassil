@@ -86,6 +86,15 @@ TABARD_FIELDS = [("symbol", "EmblemStyle"), ("symbol_color", "EmblemColor"),
 
 CARD_PREFIX = "manual saved string::llmdefaultprompt>"
 GUILDER_PREFIX = "manual saved int::guilder override>"
+ARCHETYPE_PREFIX = "manual saved string::archetype>"
+MOOD_PREFIX = "manual saved string::mood>"
+# A bot's two moods, for life (playerbots/0009, strategy/values/Moods.h):
+# drawn from the bot (never two opposites) unless the roster names two.
+MOODS = ["polite", "rude", "direct", "poetic", "logical", "emotional", "evil", "saint", "seductive", "repulsive"]
+
+# What an archetype can list, most wanted first (playerbots/0008,
+# strategy/values/Archetypes.h): the travel activities it ranks.
+ARCHETYPE_ACTIVITIES = ["quests", "grind", "gather", "ah", "wpvp", "bosses", "explore", "rpg"]
 
 # The commands a bot accepts from any player; every other one only from its
 # master (playerbots: PlayerbotAI::IsAllowedCommand).
@@ -234,7 +243,41 @@ def load_roster(data):
     """Validate a roster (parsed JSON) and return it normalised: IDs instead
     of words, defaults filled in. Raises RosterError listing every problem."""
     errors = []
-    out = {"guilds": [], "bots": [], "population": None, "llm": None}
+    out = {"guilds": [], "bots": [], "population": None, "llm": None, "archetypes": None}
+
+    # Archetypes (Kamino 211): named once, here; a bot names one. Each lists
+    # its activities in order and how much stronger its side must be to
+    # start a fight with an enemy player - a number, "always" or "never" -
+    # optionally from a level on ("pvp_from_level": {"60": "always"}).
+    if "archetypes" in data:
+        out["archetypes"] = {}
+        for name, a in (data.get("archetypes") or {}).items():
+            where = f"archetype {name}"
+            try:
+                if not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", str(name)):
+                    raise RosterError(f"{where}: a name is lower-case letters, digits, - or _, up to 32")
+                acts = [str(x).lower() for x in a.get("activities", [])]
+                for x in acts:
+                    if x not in ARCHETYPE_ACTIVITIES:
+                        raise RosterError(f"{where}: unknown activity '{x}' (one of: {', '.join(ARCHETYPE_ACTIVITIES)})")
+                if len(set(acts)) != len(acts):
+                    raise RosterError(f"{where}: an activity is listed twice")
+                pvp = {}
+                for lvl, v in [(1, a["pvp"])] if "pvp" in a else []:
+                    pvp[lvl] = v
+                for lvl, v in (a.get("pvp_from_level") or {}).items():
+                    if not str(lvl).isdigit() or not 1 <= int(lvl) <= 60:
+                        raise RosterError(f"{where}: pvp_from_level's levels are 1 to 60")
+                    pvp[int(lvl)] = v
+                for lvl, v in pvp.items():
+                    if v in ("always", "never"):
+                        continue
+                    if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
+                        raise RosterError(f"{where}: pvp is a number (1.2: its side 1.2x the enemy's), always or never")
+                    pvp[lvl] = float(v)
+                out["archetypes"][name] = {"activities": acts, "pvp": pvp}
+            except (RosterError, KeyError, ValueError, TypeError, AttributeError) as e:
+                errors.append(str(e) if isinstance(e, RosterError) else f"{where}: {e!r}")
 
     guild_names = {}
     for i, g in enumerate(data.get("guilds", [])):
@@ -317,11 +360,22 @@ def load_roster(data):
             card = b.get("card")
             if card is not None and ("\n" in card or "::" in card):
                 raise RosterError(f"{where}: a card is one line, without '::'")
+            mood = b.get("mood")
+            if mood is not None:
+                if not isinstance(mood, list) or len(mood) != 2 or mood[0] == mood[1]:
+                    raise RosterError(f"{where}: mood is two different moods, e.g. [\"polite\", \"evil\"]")
+                for m in mood:
+                    if m not in MOODS:
+                        raise RosterError(f"{where}: unknown mood '{m}' (one of: {', '.join(MOODS)})")
+                mood = ",".join(mood)
+            archetype = b.get("archetype")
+            if archetype is not None and archetype not in (out["archetypes"] or {}):
+                raise RosterError(f"{where}: archetype '{archetype}' is not in the roster's archetypes")
             out["bots"].append({"name": name, "race": race, "class": cls, "gender": gender,
                                 "professions": profs, "priorities": prios, "guild": guild,
                                 "rank": rank, "farm": b.get("farm"), "note": b.get("note", ""),
                                 "card": card, "guild_size": size,
-                                "spec": b.get("spec"), "goal": b.get("goal")})
+                                "spec": b.get("spec"), "goal": b.get("goal"), "archetype": archetype, "mood": mood})
         except (RosterError, KeyError, ValueError, TypeError) as e:
             errors.append(str(e) if isinstance(e, RosterError) else f"{where}: missing {e}")
 
@@ -459,7 +513,22 @@ def conf_changes(roster, conf_text, cards_in_server):
         want["AiPlayerbot.LLMBotToBotChatChance"] = str(llm.get("bot_to_bot_chance", 0))
     if any(b["card"] for b in roster["bots"]):
         want["AiPlayerbot.LLMDefaultPromptsFile"] = cards_in_server
+    if roster["archetypes"] is not None:
+        want["AiPlayerbot.Archetypes"] = ",".join(sorted(roster["archetypes"]))
+        for name, a in sorted(roster["archetypes"].items()):
+            want[f"AiPlayerbot.Archetype.{name}"] = archetype_conf(a)
     return {k: v for k, v in want.items() if conf_get(conf_text, k) != v}
+
+
+def archetype_conf(a):
+    """An archetype as playerbots reads it: 'activities=quests,grind; pvp=1.2;
+    pvp@60=always'."""
+    parts = [f"activities={','.join(a['activities'])}"] if a["activities"] else []
+    for lvl in sorted(a["pvp"]):
+        v = a["pvp"][lvl]
+        v = v if isinstance(v, str) else f"{v:g}"
+        parts.append(f"pvp={v}" if lvl == 1 else f"pvp@{lvl}={v}")
+    return "; ".join(parts)
 
 
 def cards_text(roster):
@@ -714,6 +783,15 @@ def plan(roster, state, now=None, bindings=None, bound=None):
                        f"AND `value` LIKE {sql_str(GUILDER_PREFIX + '%')};")
             if want:
                 sql.append(f"INSERT INTO ai_playerbot_db_store (guid,preset,`key`,`value`) VALUES ({g},'','value',{sql_str(want[0])});")
+        for what, prefix in (("archetype", ARCHETYPE_PREFIX), ("mood", MOOD_PREFIX)):
+            have = [v for k, v in rows if k == "value" and v.startswith(prefix)]
+            want = [f"{prefix}{b[what]}"] if b[what] else []
+            if have != want:
+                lines.append(f"{n}: {what} {b[what] or '(none)'}")
+                sql.append(f"DELETE FROM ai_playerbot_db_store WHERE guid={g} AND preset='' AND `key`='value' "
+                           f"AND `value` LIKE {sql_str(prefix + '%')};")
+                if want:
+                    sql.append(f"INSERT INTO ai_playerbot_db_store (guid,preset,`key`,`value`) VALUES ({g},'','value',{sql_str(want[0])});")
         if not b["card"] and any(k == "value" and v.startswith(CARD_PREFIX) for k, v in rows):
             lines.append(f"{n}: remove its old card")
             sql.append(f"DELETE FROM ai_playerbot_db_store WHERE guid={g} AND `key`='value' AND `value` LIKE {sql_str(CARD_PREFIX + '%')};")

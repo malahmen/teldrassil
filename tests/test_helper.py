@@ -73,6 +73,10 @@ def apply_plan_to_state(rost, state):
         if co:
             st["store"].append({"guid": c["guid"], "key": "co+", "value": ",".join("+" + s for s in co)})
         st["store"].append({"guid": c["guid"], "key": "value", "value": t.GUILDER_PREFIX + "70"})
+        if b["archetype"]:
+            st["store"].append({"guid": c["guid"], "key": "value", "value": t.ARCHETYPE_PREFIX + b["archetype"]})
+        if b["mood"]:
+            st["store"].append({"guid": c["guid"], "key": "value", "value": t.MOOD_PREFIX + b["mood"]})
         rank = 0 if b["name"] == "Leadra" else r["guilds"][0]["ranks"].index(b["rank"]) if b["rank"] else len(r["guilds"][0]["ranks"]) - 1
         st["members"].append({"guild": gid, "guid": c["guid"], "rank": rank, "pnote": "",
                               "offnote": f"Farm: {b['farm']}" if b["farm"] else ""})
@@ -463,6 +467,91 @@ class ConfAndCards(unittest.TestCase):
         text = t.cards_text(t.load_roster(roster()))
         self.assertIn("Leadra::You are a test.", text)
         self.assertNotIn("Grunt::", text)
+
+
+ARCHETYPES = {"quester": {"activities": ["quests", "grind", "explore"], "pvp": 1.2},
+              "creeper": {"activities": ["wpvp", "grind"], "pvp": 1, "pvp_from_level": {"60": "always"}},
+              "pacifist": {"activities": ["quests"], "pvp": "never"}}
+
+
+class Archetypes(unittest.TestCase):
+    """Kamino 211: named once in the roster, written to aiplayerbot.conf as
+    playerbots reads them, and named per bot in its stored values."""
+
+    def test_written_as_playerbots_reads_them(self):
+        r = t.load_roster(roster(archetypes=ARCHETYPES))
+        changes = t.conf_changes(r, "", "/c")
+        self.assertEqual(changes["AiPlayerbot.Archetypes"], "creeper,pacifist,quester")
+        self.assertEqual(changes["AiPlayerbot.Archetype.quester"], "activities=quests,grind,explore; pvp=1.2")
+        self.assertEqual(changes["AiPlayerbot.Archetype.creeper"], "activities=wpvp,grind; pvp=1; pvp@60=always")
+        self.assertEqual(changes["AiPlayerbot.Archetype.pacifist"], "activities=quests; pvp=never")
+
+    def test_no_archetypes_section_leaves_the_conf_alone(self):
+        changes = t.conf_changes(t.load_roster(roster()), "", "/c")
+        self.assertFalse(any("Archetype" in k for k in changes))
+
+    def test_every_problem_is_reported(self):
+        bad = copy.deepcopy(ARCHETYPES)
+        bad["quester"]["activities"].append("flying")
+        bad["creeper"]["pvp_from_level"] = {"70": "always"}
+        bad["pacifist"]["pvp"] = "sometimes"
+        rost = roster(archetypes=bad)
+        rost["bots"][0]["archetype"] = "nosuch"
+        with self.assertRaises(t.RosterError) as e:
+            t.load_roster(rost)
+        msg = str(e.exception)
+        self.assertIn("unknown activity 'flying'", msg)
+        self.assertIn("levels are 1 to 60", msg)
+        self.assertIn("pvp is a number", msg)
+        self.assertIn("archetype 'nosuch' is not in the roster's archetypes", msg)
+
+    def test_a_bot_gets_its_archetype_once(self):
+        rost = roster(archetypes=ARCHETYPES)
+        rost["bots"][0]["archetype"] = "quester"
+        _, sql, _ = t.plan(t.load_roster(rost), empty_state(), now=1)
+        self.assertTrue(any(t.ARCHETYPE_PREFIX + "quester" in s and s.startswith("INSERT") for s in sql))
+        after = apply_plan_to_state(rost, empty_state())
+        _, sql, _ = t.plan(t.load_roster(rost), after, now=1)
+        self.assertFalse(any("archetype" in s for s in sql), "a second plan changes nothing")
+
+    def test_a_changed_or_dropped_archetype_replaces_the_row(self):
+        rost = roster(archetypes=ARCHETYPES)
+        rost["bots"][0]["archetype"] = "quester"
+        after = apply_plan_to_state(rost, empty_state())
+        rost["bots"][0]["archetype"] = "creeper"
+        _, sql, _ = t.plan(t.load_roster(rost), after, now=1)
+        joined = "\n".join(sql)
+        self.assertIn("DELETE FROM ai_playerbot_db_store", joined)
+        self.assertIn(t.ARCHETYPE_PREFIX + "creeper", joined)
+        del rost["bots"][0]["archetype"]
+        _, sql, _ = t.plan(t.load_roster(rost), after, now=1)
+        self.assertTrue(any(s.startswith("DELETE") and "archetype" in s for s in sql))
+        self.assertFalse(any(s.startswith("INSERT") and "archetype" in s for s in sql))
+
+
+class Moods(unittest.TestCase):
+    """A bot's two moods are drawn by playerbots unless the roster names them."""
+
+    def test_a_named_mood_is_stored_once(self):
+        rost = roster()
+        rost["bots"][1]["mood"] = ["polite", "evil"]
+        _, sql, _ = t.plan(t.load_roster(rost), empty_state(), now=1)
+        self.assertTrue(any(t.MOOD_PREFIX + "polite,evil" in s and s.startswith("INSERT") for s in sql))
+        after = apply_plan_to_state(rost, empty_state())
+        _, sql, _ = t.plan(t.load_roster(rost), after, now=1)
+        self.assertFalse(any("mood" in s for s in sql), "a second plan changes nothing")
+
+    def test_an_unknown_mood_is_refused(self):
+        rost = roster()
+        rost["bots"][1]["mood"] = ["polite", "grumpy"]
+        with self.assertRaises(t.RosterError) as e:
+            t.load_roster(rost)
+        self.assertIn("unknown mood 'grumpy'", str(e.exception))
+        for bad in ("rude", ["rude"], ["rude", "rude"], ["rude", "evil", "poetic"]):
+            rost["bots"][1]["mood"] = bad
+            with self.assertRaises(t.RosterError) as e:
+                t.load_roster(rost)
+            self.assertIn("two different moods", str(e.exception))
 
 
 class Misc(unittest.TestCase):

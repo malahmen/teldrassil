@@ -239,6 +239,28 @@ See `examples/roster.example.json`. The rules it enforces:
 - **A roster bot that leads a guild the roster does not name is not moved.**
   Taking it out would leave that guild with a leader who is not in it; the
   plan says so instead, and the guild needs a new leader in game first.
+- **Archetypes** (`"archetypes": {"quester": {...}}`, and `"archetype":
+  "quester"` on a bot) are named once and define how a bot behaves. Each one
+  has `activities`, most wanted first, from `quests`, `grind`, `gather`, `ah`,
+  `wpvp`, `bosses`, `explore`, `rpg`: what the bot travels to do between its
+  upkeep (vendors, repairs, trainers, mail, bank), which stays first. An
+  activity not listed is still done, after the listed ones. It also has `pvp`:
+  how much stronger the bot's side must be to start a fight with an enemy
+  player (`1.2`, the default; `1` an even fight), or `"always"` (every enemy
+  player on sight, guards or not) or `"never"` (none, and it keeps away from
+  all of them). `"pvp_from_level": {"60": "always"}` changes it from a level
+  on. An archetype listing `wpvp` is not held by the world-PvP gates (10% of
+  bots, the first 15 minutes of each hour). They are written to
+  `aiplayerbot.conf` (`AiPlayerbot.Archetypes`, `AiPlayerbot.Archetype.<name>`).
+  A bot without one behaves as playerbots does upstream.
+- **Moods:** every bot has two for life, from polite, rude, direct, poetic,
+  logical, emotional, evil, saint, seductive and repulsive - a polite evil, a
+  saint seductive - which colour what it says. playerbots draws them from the
+  bot itself, so they are the same at every start, and never two opposites
+  (polite/rude, saint/evil, seductive/repulsive, logical/emotional,
+  direct/poetic); `"mood": ["polite", "evil"]` on a roster bot names any two
+  instead. A pre-prompt can place them with `<bot mood>` ("polite (courteous,
+  ...) and evil (cruel, ...)"); without that, playerbots adds a sentence.
 - **The `llm` section's values are one line each** (they become lines of
   `aiplayerbot.conf`), and `endpoint` is an http(s) URL.
 - **Population:** `{"bots": N, "balance": "50/50"}` sets exact class/race
@@ -251,7 +273,7 @@ See `examples/roster.example.json`. The rules it enforces:
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries seven changes to playerbots (`templates/patches/playerbots/`)
+teldrassil carries nine changes to playerbots (`templates/patches/playerbots/`)
 and two to the core (`templates/patches/mangos-classic/`), applied before
 every build:
 
@@ -309,6 +331,15 @@ every build:
   favour it; one it should not fight is kept away from. It skips a mob whose
   pack is too much, and rests below half health or mana before pulling. A
   fight already on is never refused; battlegrounds and duels are untouched.
+- **playerbots 0008:** archetypes as data. A bot's stored archetype ranks its
+  travel activities and sets its fight margin (see the roster's archetypes),
+  and world PvP has no level gate (upstream: above 50 only); its share-of-bots
+  and minutes-per-hour gates are settings (`AiPlayerbot.WorldPvpShare`,
+  `WorldPvpMinutes`), skipped for an archetype that lists `wpvp`. The log says
+  once per bot which archetype it travels as, and names a part of a definition
+  it could not read.
+- **playerbots 0009:** every bot carries two moods for life, which its chat
+  replies and NPC conversations are told (see the roster's moods).
 
 `roster apply` writes the database only while the world server is stopped:
 guilds and characters live in its memory, and a change made under it is

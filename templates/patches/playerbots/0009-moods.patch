@@ -1,0 +1,193 @@
+diff --git a/playerbot/PlayerbotAI.h b/playerbot/PlayerbotAI.h
+index 1d38047..0c61ebe 100644
+--- a/playerbot/PlayerbotAI.h
++++ b/playerbot/PlayerbotAI.h
+@@ -292,7 +292,8 @@ enum class BotTypeNumber : uint8
+     DUMMY_ATTACK_NUMBER = 5, 
+     RPG_PHASE_NUMBER = 6,
+     RPG_STYLE_NUMBER = 7,
+-    WORLD_PVP_LOCATION = 8
++    WORLD_PVP_LOCATION = 8,
++    MOOD_NUMBER = 9  // kalimdor: a bot's mood (strategy/values/Moods.h)
+ };
+ 
+ enum class GrouperType : uint8
+diff --git a/playerbot/strategy/actions/RpgSubActions.cpp b/playerbot/strategy/actions/RpgSubActions.cpp
+index a923a53..e168fb3 100644
+--- a/playerbot/strategy/actions/RpgSubActions.cpp
++++ b/playerbot/strategy/actions/RpgSubActions.cpp
+@@ -459,6 +459,10 @@ bool RpgAIChatAction::RequestNewLines()
+ 
+     std::string prePrompt = sPlayerbotAIConfig.llmPreRpgPrompt;
+ 
++    // kalimdor: the bot's moods colour its lines (values/Moods.h).
++    if (prePrompt.find("<bot mood>") == std::string::npos && !placeholders["<bot mood>"].empty())
++        prePrompt += " <bot name> is <bot mood>, both at once.";
++
+     if (AI_VALUE2(bool, "trigger active", "rpg start quest"))
+         prePrompt += " <unit name> can offer <bot name> a new quest.";
+     else if (AI_VALUE2(bool, "trigger active", "rpg end quest"))
+diff --git a/playerbot/strategy/actions/SayAction.cpp b/playerbot/strategy/actions/SayAction.cpp
+index 0f98780..8ee64c8 100644
+--- a/playerbot/strategy/actions/SayAction.cpp
++++ b/playerbot/strategy/actions/SayAction.cpp
+@@ -8,6 +8,7 @@
+ #include <regex>
+ #include <boost/algorithm/string.hpp>
+ #include "playerbot/PlayerbotLLMInterface.h"
++#include "playerbot/strategy/values/Moods.h"
+ 
+ using namespace ai;
+ 
+@@ -145,6 +146,8 @@ void ChatReplyAction::GetAIChatPlaceholders(std::map<std::string, std::string>&
+ void ChatReplyAction::GetAIChatPlaceholders(std::map<std::string, std::string>& placeholders, Unit* unit, const std::string preFix, Player* observer)
+ {
+     placeholders["<" + preFix + " name>"] = unit->GetName();
++    // kalimdor: a bot's two moods, for life (values/Moods.h); "" for anyone else.
++    placeholders["<" + preFix + " mood>"] = unit->IsPlayer() ? Moods::Of((Player*)unit) : "";
+     placeholders["<" + preFix + " gender>"] = unit->getGender() == GENDER_MALE ? "male" : "female";
+     placeholders["<" + preFix + " level>"] = std::to_string(unit->GetLevel());
+     placeholders["<" + preFix + " class>"] = ChatHelper::formatClass(unit->getClass());
+@@ -565,6 +568,10 @@ void ChatReplyAction::ChatReplyDo(Player* bot, uint32 type, uint32 guid1, uint32
+ 
+                 std::map<std::string, std::string> jsonFill;
+                 jsonFill["<pre prompt>"] = sPlayerbotAIConfig.llmPrePrompt + " " + llmPromptCustom;
++                // kalimdor: the bot's moods colour its answer; a pre-prompt
++                // that does not place it gets it said (values/Moods.h).
++                if (sPlayerbotAIConfig.llmPrePrompt.find("<bot mood>") == std::string::npos && !placeholders["<bot mood>"].empty())
++                    jsonFill["<pre prompt>"] += " Your temperament is <bot mood>, both at once; let them shape every answer.";
+                 jsonFill["<prompt>"] = sPlayerbotAIConfig.llmPrompt;
+                 jsonFill["<post prompt>"] = sPlayerbotAIConfig.llmPostPrompt;
+ 
+diff --git a/playerbot/strategy/values/Moods.cpp b/playerbot/strategy/values/Moods.cpp
+new file mode 100644
+index 0000000..319b6ee
+--- /dev/null
++++ b/playerbot/strategy/values/Moods.cpp
+@@ -0,0 +1,91 @@
++#include "playerbot/playerbot.h"
++#include "Moods.h"
++
++#include <algorithm>
++
++using namespace ai;
++
++namespace
++{
++    // Each mood as the model is told it: the word, and how it speaks.
++    const std::vector<std::pair<std::string, std::string>>& Described()
++    {
++        static const std::vector<std::pair<std::string, std::string>> moods = {
++            { "polite",    "courteous, respectful and considerate" },
++            { "rude",      "curt, dismissive and insulting" },
++            { "direct",    "blunt and brief, straight to the point" },
++            { "poetic",    "speaks in imagery and lyrical turns of phrase" },
++            { "logical",   "cool, precise and reasoned, sticks to facts" },
++            { "emotional", "wears every feeling openly, quick to joy, anger or tears" },
++            { "evil",      "cruel and scheming, enjoys the misfortune of others" },
++            { "saint",     "kind, selfless and forgiving, sees the good in everyone" },
++            { "seductive", "flirtatious and charming, full of innuendo" },
++            { "repulsive", "crude, coarse and off-putting" },
++        };
++        return moods;
++    }
++}
++
++const std::vector<std::string>& Moods::Names()
++{
++    static const std::vector<std::string> names = []()
++    {
++        std::vector<std::string> list;
++        for (const auto& [name, how] : Described())
++            list.push_back(name);
++        return list;
++    }();
++    return names;
++}
++
++std::string Moods::Of(Player* player)
++{
++    PlayerbotAI* ai = player ? player->GetPlayerbotAI() : nullptr;
++    if (!ai || ai->IsRealPlayer())
++        return "";
++
++    const auto& moods = Described();
++    auto find = [&moods](const std::string& name)
++    {
++        return std::find_if(moods.begin(), moods.end(), [&name](const auto& mood) { return mood.first == name; });
++    };
++
++    // Two moods (owner, 2026-10-30): a polite evil, a saint seductive. Set by
++    // the roster as "first,second" - any two; else drawn from the bot's fixed
++    // number among the pairs that are not opposites (a saint evil only
++    // confuses the model).
++    std::vector<std::string> const set = split(ai->GetAiObjectContext()->GetValue<std::string>("manual saved string", "mood")->Get(), ',');
++    auto first = moods.end(), second = moods.end();
++    if (set.size() == 2 && set[0] != set[1])
++    {
++        first = find(set[0]);
++        second = find(set[1]);
++    }
++
++    if (first == moods.end() || second == moods.end())
++    {
++        static const std::vector<std::pair<size_t, size_t>> pairs = [&moods]()
++        {
++            static const std::vector<std::pair<std::string, std::string>> opposites = {
++                { "polite", "rude" }, { "saint", "evil" }, { "seductive", "repulsive" },
++                { "logical", "emotional" }, { "direct", "poetic" } };
++            std::vector<std::pair<size_t, size_t>> list;
++            for (size_t i = 0; i < moods.size(); ++i)
++                for (size_t j = i + 1; j < moods.size(); ++j)
++                {
++                    bool opposite = false;
++                    for (const auto& [a, b] : opposites)
++                        opposite |= (moods[i].first == a && moods[j].first == b) || (moods[i].first == b && moods[j].first == a);
++                    if (!opposite)
++                        list.push_back({ i, j });
++                }
++            return list;
++        }();
++
++        auto const& pair = pairs[ai->GetFixedBotNumber(BotTypeNumber::MOOD_NUMBER, uint32(pairs.size()) - 1)];
++        first = moods.begin() + pair.first;
++        second = moods.begin() + pair.second;
++    }
++
++    return first->first + " (" + first->second + ") and " + second->first + " (" + second->second + ")";
++}
+diff --git a/playerbot/strategy/values/Moods.h b/playerbot/strategy/values/Moods.h
+new file mode 100644
+index 0000000..c0a5d99
+--- /dev/null
++++ b/playerbot/strategy/values/Moods.h
+@@ -0,0 +1,29 @@
++#pragma once
++
++#include <string>
++#include <vector>
++
++// kalimdor: every bot carries two moods that colour what it says, and keeps
++// them for life (owner, 2026-10-30): two of polite, rude, direct, poetic,
++// logical, emotional, evil, saint, seductive and repulsive - a polite evil, a
++// saint seductive. They are drawn from the bot's own fixed number
++// (PlayerbotAI::GetFixedBotNumber), never two opposites, so they are the same
++// at every start without being stored; a roster can set any two instead, as
++// the bot's "manual saved string::mood" ("polite,evil"). The chat prompts
++// carry them as
++// <bot mood> - and a prompt that does not mention it gets a sentence saying
++// it.
++
++class Player;
++
++namespace ai
++{
++    class Moods
++    {
++    public:
++        static const std::vector<std::string>& Names();
++        // The bot's moods with what they mean ("polite (courteous, ...) and
++        // evil (cruel, ...)"), or "" for a player or a unit that is not a bot.
++        static std::string Of(Player* player);
++    };
++}
