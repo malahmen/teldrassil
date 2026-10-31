@@ -1,0 +1,467 @@
+diff --git a/playerbot/PlayerbotAIConfig.cpp b/playerbot/PlayerbotAIConfig.cpp
+index 295a5bb..9b8147f 100644
+--- a/playerbot/PlayerbotAIConfig.cpp
++++ b/playerbot/PlayerbotAIConfig.cpp
+@@ -675,6 +675,21 @@ bool PlayerbotAIConfig::Initialize()
+ 
+ 
+ 
++    // kalimdor: AiPlayerbot.Archetypes names them, AiPlayerbot.Archetype.<name>
++    // defines each (Kamino 211; strategy/values/Archetypes.h).
++    archetypes.clear();
++    for (const std::string& name : split(config.GetStringDefault("AiPlayerbot.Archetypes", ""), ','))
++    {
++        std::string const trimmed = name.substr(name.find_first_not_of(' ') == std::string::npos ? name.size() : name.find_first_not_of(' '));
++        if (!trimmed.empty())
++            archetypes[trimmed] = config.GetStringDefault("AiPlayerbot.Archetype." + trimmed, "");
++    }
++    // Upstream's world-PvP travel: 10% of the bots, the first 15 minutes of
++    // each hour (and only above level 50 - lifted: the owner's world PvP has
++    // no level gate).
++    worldPvpShare = config.GetIntDefault("AiPlayerbot.WorldPvpShare", 10);
++    worldPvpMinutes = config.GetIntDefault("AiPlayerbot.WorldPvpMinutes", 15);
++
+     llmPrompt = config.GetStringDefault("AiPlayerbot.LLMPrompt", "<receiver name>:<initial message>");
+     llmPostPrompt = config.GetStringDefault("AiPlayerbot.LLMPostPrompt", "<sender name>:");
+ 
+diff --git a/playerbot/PlayerbotAIConfig.h b/playerbot/PlayerbotAIConfig.h
+index 84d25f5..165e0c7 100644
+--- a/playerbot/PlayerbotAIConfig.h
++++ b/playerbot/PlayerbotAIConfig.h
+@@ -400,6 +400,13 @@ public:
+ 
+     //LM BEGIN
+     std::string llmApiEndpoint, llmApiKey, llmApiJson, llmPrePrompt, llmPreRpgPrompt, llmPrompt, llmPostPrompt, llmResponseStartPattern, llmResponseEndPattern, llmResponseDeletePattern, llmResponseSplitPattern;
++
++    // kalimdor: archetypes by name - each one's definition as written in
++    // AiPlayerbot.Archetype.<name>, read by strategy/values/Archetypes.h - and
++    // the world-PvP travel gates for bots whose archetype does not seek it
++    // (Kamino 211).
++    std::map<std::string, std::string> archetypes;
++    uint32 worldPvpShare, worldPvpMinutes;
+     uint32 llmEnabled, llmContextLength, llmBotToBotChatChance, llmGenerationTimeout, llmMaxSimultaniousGenerations, llmRpgAIChatChance;
+     bool llmGlobalContext;
+     ParsedUrl llmEndPointUrl;
+diff --git a/playerbot/strategy/generic/TravelStrategy.cpp b/playerbot/strategy/generic/TravelStrategy.cpp
+index d613f4d..a693dfc 100644
+--- a/playerbot/strategy/generic/TravelStrategy.cpp
++++ b/playerbot/strategy/generic/TravelStrategy.cpp
+@@ -2,6 +2,9 @@
+ #include "playerbot/playerbot.h"
+ #include "TravelStrategy.h"
+ #include "playerbot/TravelMgr.h"
++#include "playerbot/strategy/values/Archetypes.h"
++
++#include <mutex>
+ 
+ using namespace ai;
+ 
+@@ -67,6 +70,55 @@ void TravelStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
+         {"",TravelDestinationPurpose::Grind, 6.27f},                                                           // 100%
+     };
+ 
++    // kalimdor: the bot's archetype ranks its activities (Kamino 211;
++    // values/Archetypes.h): the ones it lists go, in its order, into a band
++    // just below its upkeep - choosing a group target (6.65) and everything
++    // above stay first - and above every activity it does not list, which
++    // keep upstream's relevance, capped below the band (the auction house
++    // and world PvP are above it upstream). Without an archetype, upstream's
++    // table.
++    const Archetype* archetype = Archetypes::Of(ai->GetBot());
++    // Said once per bot and archetype: strategies are rebuilt often.
++    static std::mutex saidLock;
++    static std::set<std::string> said;
++    bool sayIt = false;
++    if (archetype)
++    {
++        std::lock_guard<std::mutex> guard(saidLock);
++        sayIt = said.insert(std::to_string(ai->GetBot()->GetGUIDLow()) + ":" + archetype->name).second;
++    }
++    if (sayIt)
++    {
++        std::string activities;
++        for (const std::string& activity : archetype->activities)
++            activities += (activities.empty() ? "" : ", ") + activity;
++        sLog.outString("Bot #%d <%s> travels as %s: %s first", ai->GetBot()->GetGUIDLow(), ai->GetBot()->GetName(),
++            archetype->name.c_str(), activities.empty() ? "upkeep" : activities.c_str());
++    }
++    auto relevanceOf = [archetype](const std::string& activity, float upstream)
++    {
++        if (!archetype)
++            return upstream;
++        int const rank = Archetypes::Rank(archetype, activity);
++        return rank < 0 ? std::min(upstream, 6.5f) : 6.59f - 0.01f * rank;
++    };
++    auto activityOf = [](TravelDestinationPurpose purpose) -> std::string
++    {
++        switch (purpose)
++        {
++            case TravelDestinationPurpose::AH: return "ah";
++            case TravelDestinationPurpose::GatherMining:
++            case TravelDestinationPurpose::GatherSkinning:
++            case TravelDestinationPurpose::GatherHerbalism:
++            case TravelDestinationPurpose::GatherFishing: return "gather";
++            case TravelDestinationPurpose::Boss: return "bosses";
++            case TravelDestinationPurpose::Explore: return "explore";
++            case TravelDestinationPurpose::GenericRpg: return "rpg";
++            case TravelDestinationPurpose::Grind: return "grind";
++            default: return "";
++        }
++    };
++
+     // kalimdor: a gathering point worked at for minutes without moving on is
+     // given up, above choosing anew (values/GatheringStalls.h).
+     triggers.push_back(new TriggerNode(
+@@ -76,9 +128,12 @@ void TravelStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
+     for (auto& [condition, purpose, relevance] : PurposeActions)
+     {
+         std::string trigger = condition.empty() ? "val::need travel purpose::" + std::to_string((uint32)purpose) : condition;
++        // Only the plain purposes are activities: grinding for money (a
++        // condition) is upkeep.
++        float const ranked = condition.empty() ? relevanceOf(activityOf(purpose), relevance) : relevance;
+         triggers.push_back(new TriggerNode(
+             trigger,
+-            NextAction::array(0, new NextAction("request travel target::" + std::to_string((uint32)purpose), relevance), NULL)));
++            NextAction::array(0, new NextAction("request travel target::" + std::to_string((uint32)purpose), ranked), NULL)));
+     }
+ 
+     //Specific named exceptions
+@@ -103,9 +158,17 @@ void TravelStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
+ 
+     for (auto& [trigger, action, relevance] : StringActions)
+     {
++        // The activities among them: world PvP, and questing (not a focus
++        // target the player set, nor questing for money).
++        float ranked = relevance;
++        if (trigger == "val::should travel named::pvp")
++            ranked = relevanceOf("wpvp", relevance);
++        else if (trigger == "val::has strategy::rpg quest")
++            ranked = relevanceOf("quests", relevance);
++
+         triggers.push_back(new TriggerNode(
+             trigger,
+-            NextAction::array(0, new NextAction(action, relevance), NULL)));
++            NextAction::array(0, new NextAction(action, ranked), NULL)));
+     }
+ 
+     triggers.push_back(new TriggerNode(
+diff --git a/playerbot/strategy/values/Archetypes.cpp b/playerbot/strategy/values/Archetypes.cpp
+new file mode 100644
+index 0000000..90740c4
+--- /dev/null
++++ b/playerbot/strategy/values/Archetypes.cpp
+@@ -0,0 +1,160 @@
++#include "playerbot/playerbot.h"
++#include "Archetypes.h"
++#include "EngageOdds.h"
++#include "playerbot/PlayerbotAIConfig.h"
++
++#include <algorithm>
++#include <mutex>
++
++using namespace ai;
++
++namespace
++{
++    std::map<std::string, Archetype> archetypes;
++    std::once_flag archetypesParsed;
++
++    std::string Trim(const std::string& text)
++    {
++        size_t const first = text.find_first_not_of(" \t");
++        if (first == std::string::npos)
++            return "";
++        return text.substr(first, text.find_last_not_of(" \t") - first + 1);
++    }
++
++    // "1.2", "always" or "never" - false if it is none of them.
++    bool ParseMargin(const std::string& text, float& margin)
++    {
++        if (text == "always") { margin = Archetypes::Always; return true; }
++        if (text == "never") { margin = Archetypes::Never; return true; }
++        try
++        {
++            size_t used = 0;
++            margin = std::stof(text, &used);
++            return used == text.size() && margin >= 0.0f;
++        }
++        catch (...)
++        {
++            return false;
++        }
++    }
++
++    // Each archetype's definition, read once; a part that cannot be read is
++    // said in the log and left out, the rest kept.
++    void Parse()
++    {
++        for (const auto& [name, definition] : sPlayerbotAIConfig.archetypes)
++        {
++            Archetype archetype;
++            archetype.name = name;
++
++            for (const std::string& part : split(definition, ';'))
++            {
++                std::string const field = Trim(part);
++                if (field.empty())
++                    continue;
++
++                size_t const equals = field.find('=');
++                std::string const key = equals == std::string::npos ? field : Trim(field.substr(0, equals));
++                std::string const value = equals == std::string::npos ? "" : Trim(field.substr(equals + 1));
++
++                if (key == "activities")
++                {
++                    for (const std::string& item : split(value, ','))
++                    {
++                        std::string const activity = Trim(item);
++                        const std::vector<std::string>& known = Archetypes::ActivityNames();
++                        if (std::find(known.begin(), known.end(), activity) == known.end())
++                            sLog.outError("Archetype %s: unknown activity '%s' left out", name.c_str(), activity.c_str());
++                        else if (std::find(archetype.activities.begin(), archetype.activities.end(), activity) == archetype.activities.end())
++                            archetype.activities.push_back(activity);
++                    }
++                }
++                else if (key == "pvp" || key.rfind("pvp@", 0) == 0)
++                {
++                    uint32_t fromLevel = 1;
++                    float margin = 0.0f;
++                    bool ok = ParseMargin(value, margin);
++                    if (ok && key != "pvp")
++                    {
++                        try { fromLevel = std::stoul(key.substr(4)); }
++                        catch (...) { ok = false; }
++                    }
++
++                    if (ok)
++                        archetype.pvp[fromLevel] = margin;
++                    else
++                        sLog.outError("Archetype %s: '%s' left out (pvp is a number, always or never; pvp@<level> from that level)", name.c_str(), field.c_str());
++                }
++                else
++                    sLog.outError("Archetype %s: unknown part '%s' left out", name.c_str(), field.c_str());
++            }
++
++            archetypes[name] = archetype;
++        }
++
++        sLog.outString("Loaded %u archetypes.", uint32(archetypes.size()));
++    }
++}
++
++const std::vector<std::string>& Archetypes::ActivityNames()
++{
++    static const std::vector<std::string> names = { "quests", "grind", "gather", "ah", "wpvp", "bosses", "explore", "rpg" };
++    return names;
++}
++
++const Archetype* Archetypes::Find(const std::string& name)
++{
++    std::call_once(archetypesParsed, Parse);
++
++    auto it = archetypes.find(name);
++    return it == archetypes.end() ? nullptr : &it->second;
++}
++
++const Archetype* Archetypes::Of(Player* bot)
++{
++    PlayerbotAI* ai = bot ? bot->GetPlayerbotAI() : nullptr;
++    if (!ai)
++        return nullptr;
++
++    std::string const name = ai->GetAiObjectContext()->GetValue<std::string>("manual saved string", "archetype")->Get();
++    if (name.empty())
++        return nullptr;
++
++    const Archetype* archetype = Find(name);
++    if (!archetype)
++    {
++        // Said once per name: a bot given an archetype the config lacks.
++        static std::mutex saidLock;
++        static std::set<std::string> said;
++        std::lock_guard<std::mutex> guard(saidLock);
++        if (said.insert(name).second)
++            sLog.outError("Archetype '%s' (bot %s) is not in AiPlayerbot.Archetypes; the bot behaves as without one", name.c_str(), bot->GetName());
++    }
++
++    return archetype;
++}
++
++int Archetypes::Rank(const Archetype* archetype, const std::string& activity)
++{
++    if (!archetype)
++        return -1;
++
++    auto it = std::find(archetype->activities.begin(), archetype->activities.end(), activity);
++    return it == archetype->activities.end() ? -1 : int(it - archetype->activities.begin());
++}
++
++float Archetypes::PvpMargin(Player* bot)
++{
++    const Archetype* archetype = Of(bot);
++    float margin = EngageOdds::PvpMargin;
++    if (!archetype)
++        return margin;
++
++    for (const auto& [fromLevel, value] : archetype->pvp)
++    {
++        if (bot->GetLevel() >= fromLevel)
++            margin = value;
++    }
++
++    return margin;
++}
+diff --git a/playerbot/strategy/values/Archetypes.h b/playerbot/strategy/values/Archetypes.h
+new file mode 100644
+index 0000000..539f79c
+--- /dev/null
++++ b/playerbot/strategy/values/Archetypes.h
+@@ -0,0 +1,56 @@
++#pragma once
++
++#include <map>
++#include <string>
++#include <vector>
++
++// kalimdor: archetypes as data (Kamino 211; owner's rules, 2026-10-30). An
++// archetype is named and defined once in aiplayerbot.conf - teldrassil writes
++// it there from the roster - and a bot is given one by name, stored as its
++// "manual saved string::archetype". Without one, a bot behaves as upstream.
++//
++//   AiPlayerbot.Archetypes = quester,wpvper,creeper
++//   AiPlayerbot.Archetype.quester = activities=quests,grind,explore; pvp=1.2
++//   AiPlayerbot.Archetype.wpvper  = activities=wpvp,quests,grind; pvp=1.0
++//   AiPlayerbot.Archetype.creeper = activities=wpvp,grind; pvp@60=always
++//
++// activities: what the bot travels to do, most wanted first - between its
++//   upkeep (vendor, repair, trainers, mail, bank), which stays first. One not
++//   listed keeps upstream's place, below the listed ones. A bot whose
++//   archetype lists wpvp is not held by the world-PvP gates.
++// pvp: how much stronger its side must be to start a fight with an enemy
++//   player (values/EngageOdds.h; 1.2 without an archetype) - "always": every
++//   enemy player on sight, guards or not; "never": none, and it keeps away
++//   from all of them. pvp@N applies from level N on; the highest N at or
++//   below the bot's level wins, plain pvp below that.
++
++class Player;
++
++namespace ai
++{
++    struct Archetype
++    {
++        std::string name;
++        std::vector<std::string> activities;
++        std::map<uint32_t, float> pvp;  // from level -> margin
++    };
++
++    class Archetypes
++    {
++    public:
++        static constexpr float Always = 0.0f;
++        static constexpr float Never = 1.0e9f;
++
++        // The activity names an archetype can list.
++        static const std::vector<std::string>& ActivityNames();
++
++        static const Archetype* Find(const std::string& name);
++        // The bot's archetype, or none.
++        static const Archetype* Of(Player* bot);
++        // Where the activity is in the archetype's list, first 0, or -1.
++        static int Rank(const Archetype* archetype, const std::string& activity);
++        // The margin for starting a fight with an enemy player, at the bot's
++        // level: its archetype's, or EngageOdds::PvpMargin.
++        static float PvpMargin(Player* bot);
++    };
++}
+diff --git a/playerbot/strategy/values/EngageOdds.cpp b/playerbot/strategy/values/EngageOdds.cpp
+index 3c2f9b1..6f392db 100644
+--- a/playerbot/strategy/values/EngageOdds.cpp
++++ b/playerbot/strategy/values/EngageOdds.cpp
+@@ -1,6 +1,7 @@
+ #include "playerbot/playerbot.h"
+ #include "EngageOdds.h"
+ #include "EnemyGuards.h"
++#include "Archetypes.h"
+ #include "playerbot/ServerFacade.h"
+ #include "Grids/GridNotifiers.h"
+ #include "Grids/GridNotifiersImpl.h"
+@@ -115,8 +116,16 @@ float EngageOdds::PvpEnemySide(Player* bot, Player* enemy)
+ 
+ bool EngageOdds::FavoursPvp(Player* bot, Player* enemy)
+ {
++    // The bot's archetype can set the margin (Kamino 211): "always" attacks
++    // every enemy player on sight, guards or not; "never" none.
++    float const margin = Archetypes::PvpMargin(bot);
++    if (margin <= Archetypes::Always)
++        return true;
++    if (margin >= Archetypes::Never)
++        return false;
++
+     float const enemySide = PvpEnemySide(bot, enemy);
+-    return enemySide >= 0.0f && OwnSide(bot) >= enemySide * PvpMargin;
++    return enemySide >= 0.0f && OwnSide(bot) >= enemySide * margin;
+ }
+ 
+ bool EngageOdds::WorthPulling(Player* bot, Unit* mob)
+diff --git a/playerbot/strategy/values/EngageOdds.h b/playerbot/strategy/values/EngageOdds.h
+index 09aa16b..53d6aa5 100644
+--- a/playerbot/strategy/values/EngageOdds.h
++++ b/playerbot/strategy/values/EngageOdds.h
+@@ -25,7 +25,7 @@ namespace ai
+         // A level's worth: a unit one level above counts this much more.
+         static constexpr float PerLevel = 1.25f;
+         // How much stronger the bot's side has to be to start a fight with
+-        // enemy players - "the odds favour it" (owner): an even fight is not
++        // enemy players, unless its archetype says otherwise (Archetypes.h) - "the odds favour it" (owner): an even fight is not
+         // started, a weakened or lower enemy, or a bigger group, is.
+         static constexpr float PvpMargin = 1.2f;
+         // And to pull a mob and its pack: at least even (a normal mob counts
+diff --git a/playerbot/strategy/values/TravelValues.cpp b/playerbot/strategy/values/TravelValues.cpp
+index 56ed315..5f12d24 100644
+--- a/playerbot/strategy/values/TravelValues.cpp
++++ b/playerbot/strategy/values/TravelValues.cpp
+@@ -5,6 +5,7 @@
+ #include "BudgetValues.h"
+ #include "GuildValues.h"
+ #include "Guilds/GuildMgr.h"
++#include "Archetypes.h"
+ 
+ using namespace ai;
+ 
+@@ -348,21 +349,25 @@ bool ShouldTravelNamedValue::Calculate()
+     }
+     else if (name == "pvp")
+     {
+-        if (bot->GetLevel() <= 50)
+-            return false;
++        // kalimdor: world PvP has no level gate (owner, 2026-10-27; upstream:
++        // above 50 only), and a bot whose archetype lists it is not held by
++        // the share and hour gates; for the rest they are settings,
++        // AiPlayerbot.WorldPvpShare and WorldPvpMinutes (Kamino 211).
++        if (Archetypes::Rank(Archetypes::Of(bot), "wpvp") < 0)
++        {
++            int32 rpgStyle = AI_VALUE2(int32, "manual saved int", "rpg style override");
+ 
+-        int32 rpgStyle = AI_VALUE2(int32, "manual saved int", "rpg style override");
++            if (rpgStyle < 0)
++                rpgStyle = ai->GetFixedBotNumber(BotTypeNumber::RPG_STYLE_NUMBER, 100);
+ 
+-        if (rpgStyle < 0)
+-            rpgStyle = ai->GetFixedBotNumber(BotTypeNumber::RPG_STYLE_NUMBER, 100);
++            if (rpgStyle > int32(sPlayerbotAIConfig.worldPvpShare)) //Only this share of the bots likes to go to world-pvp.
++                return false;
+ 
+-        if (rpgStyle > 10) //Only 10% of the bots like to go to world-pvp.
+-            return false;
++            uint32 rpgPhase = ai->GetFixedBotNumber(BotTypeNumber::RPG_PHASE_NUMBER, 60, 1);
+ 
+-        uint32 rpgPhase = ai->GetFixedBotNumber(BotTypeNumber::RPG_PHASE_NUMBER, 60, 1);
+-
+-        if (rpgPhase > 15) //Only first 15 minutes of the hour allow world pvp.
+-            return false;
++            if (rpgPhase > sPlayerbotAIConfig.worldPvpMinutes) //Only these first minutes of the hour allow world pvp.
++                return false;
++        }
+ 
+         if (!botPos.isOverworld())
+             return false;
