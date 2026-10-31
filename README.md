@@ -281,7 +281,7 @@ See `examples/roster.example.json`. The rules it enforces:
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries twelve changes to playerbots (`templates/patches/playerbots/`)
+teldrassil carries thirteen changes to playerbots (`templates/patches/playerbots/`)
 and two to the core (`templates/patches/mangos-classic/`), applied before
 every build:
 
@@ -367,6 +367,16 @@ every build:
   rule (3 deaths) holds only in hostile territory - elsewhere upstream's 8
   and 10 deaths (a level-4 dwarf who died thrice in Coldridge revived in
   Goldshire). (meksha, 2026-10-31.)
+- **playerbots 0013:** where a bot's hearthstone leads. Every bot is bound to
+  its race's starting area below level 20 (Goldshire, Kharanos, Dolanaar,
+  Razor Hill, Bloodhoof Village, Brill) and to its race's capital from 20; it
+  may bind elsewhere, a neutral town included, only where the spot's level is
+  within 5 of its own, never in hostile territory - a bind breaking that goes
+  back to the default. A level-2 Alliance bot carried to Ratchet bound itself
+  there, and every hearth took it back among the Horde. And the hearthstone,
+  a stranded bot's last resort, is tried at most every 10 minutes, each try
+  letting it walk its ways out again meanwhile - one that did not go off was
+  tried every tick, 91 times in a row. (meksha, 2026-10-31.)
 
 `roster apply` writes the database only while the world server is stopped:
 guilds and characters live in its memory, and a change made under it is

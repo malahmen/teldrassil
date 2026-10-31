@@ -1,0 +1,346 @@
+diff --git a/playerbot/strategy/actions/ActionContext.h b/playerbot/strategy/actions/ActionContext.h
+index fad5b1a..f1e9e7c 100644
+--- a/playerbot/strategy/actions/ActionContext.h
++++ b/playerbot/strategy/actions/ActionContext.h
+@@ -4,6 +4,7 @@
+ #include "MoveAwayFromEnemyGuardAction.h"
+ #include "GiveUpGatheringAction.h"
+ #include "KeepAwayFromEnemyPlayerAction.h"
++#include "BindToDefaultHomeAction.h"
+ #include "EmoteAction.h"
+ #include "AddLootAction.h"
+ #include "LootAction.h"
+@@ -436,6 +437,7 @@ namespace ai
+             creators["leave hostile territory"] = [](PlayerbotAI* ai) { return new LeaveHostileTerritoryAction(ai); };
+             creators["give up gathering"] = [](PlayerbotAI* ai) { return new GiveUpGatheringAction(ai); };
+             creators["keep away from enemy player"] = [](PlayerbotAI* ai) { return new KeepAwayFromEnemyPlayerAction(ai); };
++            creators["bind to default home"] = [](PlayerbotAI* ai) { return new BindToDefaultHomeAction(ai); };
+ 
+ #ifdef GenerateBotTests
+             creators["test"] = [](PlayerbotAI* ai) { return new TestAction(ai); };
+diff --git a/playerbot/strategy/actions/BindToDefaultHomeAction.cpp b/playerbot/strategy/actions/BindToDefaultHomeAction.cpp
+new file mode 100644
+index 0000000..222e329
+--- /dev/null
++++ b/playerbot/strategy/actions/BindToDefaultHomeAction.cpp
+@@ -0,0 +1,15 @@
++#include "playerbot/playerbot.h"
++#include "BindToDefaultHomeAction.h"
++#include "playerbot/strategy/values/HomeBinds.h"
++#include "playerbot/TravelMgr.h"
++
++using namespace ai;
++
++bool BindToDefaultHomeAction::Execute(Event& event)
++{
++    if (!HomeBinds::BindToDefault(bot))
++        return false;
++
++    RESET_AI_VALUE(WorldPosition, "home bind");
++    return true;
++}
+diff --git a/playerbot/strategy/actions/BindToDefaultHomeAction.h b/playerbot/strategy/actions/BindToDefaultHomeAction.h
+new file mode 100644
+index 0000000..cc50310
+--- /dev/null
++++ b/playerbot/strategy/actions/BindToDefaultHomeAction.h
+@@ -0,0 +1,14 @@
++#pragma once
++#include "playerbot/strategy/Action.h"
++
++namespace ai
++{
++    // kalimdor: put the bot's hearthstone back to its default home - its
++    // starting area below 20, its capital from 20 (values/HomeBinds.h).
++    class BindToDefaultHomeAction : public Action
++    {
++    public:
++        BindToDefaultHomeAction(PlayerbotAI* ai) : Action(ai, "bind to default home") {}
++        bool Execute(Event& event) override;
++    };
++}
+diff --git a/playerbot/strategy/actions/MoveAwayFromEnemyGuardAction.cpp b/playerbot/strategy/actions/MoveAwayFromEnemyGuardAction.cpp
+index 7b3d24e..c21187c 100644
+--- a/playerbot/strategy/actions/MoveAwayFromEnemyGuardAction.cpp
++++ b/playerbot/strategy/actions/MoveAwayFromEnemyGuardAction.cpp
+@@ -167,7 +167,15 @@ bool LeaveHostileTerritoryAction::Execute(Event& event)
+     if (!exit)
+     {
+         // The last resort (owner, 2026-10-30): no way out on foot, or two
+-        // that could not be walked.
++        // that could not be walked. Tried at most every HearthRetry; each try
++        // forgets the failed ways out, so meanwhile the bot walks again.
++        time_t const now = time(nullptr);
++        if (now - AI_VALUE2(time_t, "manual time", "hearth tried") < EnemyGuards::HearthRetry)
++            return false;
++        SET_AI_VALUE2(time_t, "manual time", "hearth tried", now);
++        RESET_AI_VALUE2(std::string, "manual string", "failed exits");
++        RESET_AI_VALUE2(int32, "manual int", "failed exit count");
++
+         sLog.outString("Bot #%d %s:%d <%s> in %s: %s - %s uses the hearthstone", bot->GetGUIDLow(),
+             bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), botPosition.getAreaName().c_str(),
+             failedCount >= EnemyGuards::ExitsBeforeHearth ? "two ways out could not be walked" : "no way out on foot",
+diff --git a/playerbot/strategy/generic/AvoidMobsStrategy.cpp b/playerbot/strategy/generic/AvoidMobsStrategy.cpp
+index 5654a64..b9ecd08 100644
+--- a/playerbot/strategy/generic/AvoidMobsStrategy.cpp
++++ b/playerbot/strategy/generic/AvoidMobsStrategy.cpp
+@@ -29,6 +29,11 @@ void AvoidMobsStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
+     triggers.push_back(new TriggerNode(
+         "strong enemy player near",
+         NextAction::array(0, new NextAction("keep away from enemy player", ACTION_EMERGENCY + 4), NULL)));
++    // kalimdor: a hearthstone bound where it may not be goes back to the
++    // bot's default home (values/HomeBinds.h; owner, 2026-10-31).
++    triggers.push_back(new TriggerNode(
++        "home bind not allowed",
++        NextAction::array(0, new NextAction("bind to default home", ACTION_NORMAL + 1), NULL)));
+     triggers.push_back(new TriggerNode(
+         "blocked in hostile territory",
+         NextAction::array(0, new NextAction("leave hostile territory", ACTION_EMERGENCY + 1), NULL)));
+diff --git a/playerbot/strategy/triggers/HomeBindNotAllowedTrigger.cpp b/playerbot/strategy/triggers/HomeBindNotAllowedTrigger.cpp
+new file mode 100644
+index 0000000..e0cf84a
+--- /dev/null
++++ b/playerbot/strategy/triggers/HomeBindNotAllowedTrigger.cpp
+@@ -0,0 +1,15 @@
++#include "playerbot/playerbot.h"
++#include "HomeBindNotAllowedTrigger.h"
++#include "playerbot/strategy/values/HomeBinds.h"
++#include "playerbot/TravelMgr.h"
++
++using namespace ai;
++
++bool HomeBindNotAllowedTrigger::IsActive()
++{
++    if (ai->IsRealPlayer() || bot->InBattleGround() || bot->GetInstanceId())
++        return false;
++
++    WorldPosition const bind = AI_VALUE(WorldPosition, "home bind");
++    return bind && !HomeBinds::Allowed(bot, bind);
++}
+diff --git a/playerbot/strategy/triggers/HomeBindNotAllowedTrigger.h b/playerbot/strategy/triggers/HomeBindNotAllowedTrigger.h
+new file mode 100644
+index 0000000..ef5f0f7
+--- /dev/null
++++ b/playerbot/strategy/triggers/HomeBindNotAllowedTrigger.h
+@@ -0,0 +1,15 @@
++#pragma once
++#include "playerbot/strategy/Trigger.h"
++
++namespace ai
++{
++    // kalimdor: the bot's hearthstone is bound where it may not be - outside
++    // its default home, in a zone not of its level or in hostile territory
++    // (values/HomeBinds.h). Checked once a minute.
++    class HomeBindNotAllowedTrigger : public Trigger
++    {
++    public:
++        HomeBindNotAllowedTrigger(PlayerbotAI* ai) : Trigger(ai, "home bind not allowed", 60) {}
++        virtual bool IsActive() override;
++    };
++}
+diff --git a/playerbot/strategy/triggers/RpgTriggers.cpp b/playerbot/strategy/triggers/RpgTriggers.cpp
+index 7055492..99eb8a6 100644
+--- a/playerbot/strategy/triggers/RpgTriggers.cpp
++++ b/playerbot/strategy/triggers/RpgTriggers.cpp
+@@ -8,6 +8,7 @@
+ #include "playerbot/strategy/values/ItemUsageValue.h"
+ #include "playerbot/TravelMgr.h"
+ #include "AI/ScriptDevAI/ScriptDevAIMgr.h"
++#include "playerbot/strategy/values/HomeBinds.h"
+ 
+ using namespace ai;
+ 
+@@ -479,6 +480,11 @@ bool RpgHomeBindTrigger::IsActive()
+     if (guidP.IsHostileTo(bot))
+         return false;
+ 
++    // kalimdor: a bot binds only where it may (values/HomeBinds.h) - its
++    // default home, or a zone of its level outside hostile territory.
++    if (!ai->IsRealPlayer() && !HomeBinds::Allowed(bot, guidP))
++        return false;
++
+     //Do not update for realplayers/always online when at max level.
+     if ((ai->IsRealPlayer() || sPlayerbotAIConfig.IsFreeAltBot(bot)) && bot->GetLevel() == DEFAULT_MAX_LEVEL)
+         return false;
+diff --git a/playerbot/strategy/triggers/TriggerContext.h b/playerbot/strategy/triggers/TriggerContext.h
+index 4831614..661008d 100644
+--- a/playerbot/strategy/triggers/TriggerContext.h
++++ b/playerbot/strategy/triggers/TriggerContext.h
+@@ -3,6 +3,7 @@
+ #include "HealthTriggers.h"
+ #include "GatheringStalledTrigger.h"
+ #include "StrongEnemyPlayerNearTrigger.h"
++#include "HomeBindNotAllowedTrigger.h"
+ #include "GenericTriggers.h"
+ #include "LootTriggers.h"
+ #include "GenericTriggers.h"
+@@ -88,6 +89,7 @@ namespace ai
+             creators["blocked in hostile territory"] = [](PlayerbotAI* ai) { return new BlockedInHostileTerritoryTrigger(ai); };
+             creators["gathering stalled"] = [](PlayerbotAI* ai) { return new GatheringStalledTrigger(ai); };
+             creators["strong enemy player near"] = [](PlayerbotAI* ai) { return new StrongEnemyPlayerNearTrigger(ai); };
++            creators["home bind not allowed"] = [](PlayerbotAI* ai) { return new HomeBindNotAllowedTrigger(ai); };
+             creators["enemy player near"] = [](PlayerbotAI* ai) { return new EnemyPlayerNear(ai); };
+ 
+             creators["combat start"] = [](PlayerbotAI* ai) { return new CombatStartTrigger(ai); };
+diff --git a/playerbot/strategy/values/EnemyGuards.h b/playerbot/strategy/values/EnemyGuards.h
+index cb29291..41ff2c5 100644
+--- a/playerbot/strategy/values/EnemyGuards.h
++++ b/playerbot/strategy/values/EnemyGuards.h
+@@ -102,6 +102,10 @@ namespace ai
+         // ExitsBeforeHearth failures the hearthstone (owner: fallback first).
+         static constexpr time_t ExitStallTime = 2 * 60;
+         static constexpr int ExitsBeforeHearth = 2;
++        // The hearthstone at most this often: one that does not go off (on
++        // cooldown, or cancelled) was tried every tick - 91 times in a row
++        // for a level-2 bot stranded in Durotar (meksha, 2026-10-31).
++        static constexpr time_t HearthRetry = 10 * 60;
+         // A way out is remembered by its coordinates, to the yard.
+         static std::string ExitKey(const WorldPosition& position);
+     };
+diff --git a/playerbot/strategy/values/HomeBinds.cpp b/playerbot/strategy/values/HomeBinds.cpp
+new file mode 100644
+index 0000000..4688841
+--- /dev/null
++++ b/playerbot/strategy/values/HomeBinds.cpp
+@@ -0,0 +1,102 @@
++#include "playerbot/playerbot.h"
++#include "HomeBinds.h"
++#include "EnemyGuards.h"
++#include "playerbot/TravelMgr.h"
++
++#include <cstdlib>
++#include <map>
++#include <mutex>
++
++using namespace ai;
++
++namespace
++{
++    // The classic default inns, by innkeeper (one spawn each, checked in
++    // the world database): the race's starting area's and its capital's.
++    std::pair<uint32, uint32> RaceInnkeepers(uint8 race)
++    {
++        switch (race)
++        {
++            case RACE_HUMAN:    return { 295, 6740 };   // Farley, Goldshire; Allison, Stormwind
++            case RACE_DWARF:
++            case RACE_GNOME:    return { 1247, 5111 };  // Belm, Kharanos; Firebrew, Ironforge
++            case RACE_NIGHTELF: return { 6736, 6735 };  // Keldamyr, Dolanaar; Saelienne, Darnassus
++            case RACE_ORC:
++            case RACE_TROLL:    return { 6928, 6929 };  // Grosk, Razor Hill; Gryshka, Orgrimmar
++            case RACE_UNDEAD:   return { 5688, 6741 };  // Renee, Brill; Norman, Undercity
++            case RACE_TAUREN:   return { 6747, 6746 };  // Kauth, Bloodhoof Village; Pala, Thunder Bluff
++            default:            return { 0, 0 };
++        }
++    }
++
++    struct Inn { uint32 map, zone, area; float x, y, z; };
++    std::map<uint32, Inn> innsByEntry;
++    std::once_flag innsLoaded;
++
++    struct InnCollector
++    {
++        bool operator()(CreatureDataPair const& pair)
++        {
++            CreatureData const& data = pair.second;
++            bool wanted = false;
++            for (uint8 race : { RACE_HUMAN, RACE_DWARF, RACE_NIGHTELF, RACE_ORC, RACE_UNDEAD, RACE_TAUREN })
++            {
++                auto const [start, capital] = RaceInnkeepers(race);
++                wanted |= data.id == start || data.id == capital;
++            }
++            if (!wanted)
++                return false;
++
++            // The zone needs the map loaded there (an unloaded grid reads 0).
++            WorldPosition(data.mapid, data.posX, data.posY, data.posZ).loadMapAndVMap(0);
++            uint32 zone = 0, area = 0;
++            sTerrainMgr.GetZoneAndAreaId(zone, area, data.mapid, data.posX, data.posY, data.posZ);
++            innsByEntry[data.id] = { data.mapid, zone, area, data.posX, data.posY, data.posZ };
++            return false;
++        }
++    };
++
++    Inn const* DefaultInn(Player* bot)
++    {
++        std::call_once(innsLoaded, [] { InnCollector collector; sObjectMgr.DoCreatureData(collector); });
++
++        auto const [start, capital] = RaceInnkeepers(bot->getRace());
++        auto it = innsByEntry.find(bot->GetLevel() < HomeBinds::CapitalFromLevel ? start : capital);
++        return it == innsByEntry.end() ? nullptr : &it->second;
++    }
++}
++
++bool HomeBinds::Allowed(Player* bot, const WorldPosition& bind)
++{
++    bind.loadMapAndVMap(0);
++    uint32 zone = 0, area = 0;
++    sTerrainMgr.GetZoneAndAreaId(zone, area, bind.getMapId(), bind.getX(), bind.getY(), bind.getZ());
++
++    Inn const* home = DefaultInn(bot);
++    if (home && zone && zone == home->zone)
++        return true;
++
++    if (EnemyGuards::IsHostileTerritory(bind, bot))
++        return false;
++
++    // The level of the spot (its sub-area's, else its zone's from its
++    // sub-areas or creatures): a zone's own level is 0 in the game data.
++    int32 const level = sTravelMgr.GetAreaLevel(area ? area : zone);
++    if (level <= 0)
++        return false;
++
++    return std::abs(int(bot->GetLevel()) - level) <= LevelSpread;
++}
++
++bool HomeBinds::BindToDefault(Player* bot)
++{
++    Inn const* inn = DefaultInn(bot);
++    if (!inn)
++        return false;
++
++    bot->SetHomebindToLocation(WorldLocation(inn->map, inn->x, inn->y, inn->z, 0.0f), inn->area);
++    sLog.outString("Bot #%d %s:%d <%s>: hearthstone bound to its %s, %s", bot->GetGUIDLow(),
++        bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(),
++        bot->GetLevel() < CapitalFromLevel ? "starting area" : "capital", WorldPosition(inn->map, inn->x, inn->y, inn->z).getAreaName().c_str());
++    return true;
++}
+diff --git a/playerbot/strategy/values/HomeBinds.h b/playerbot/strategy/values/HomeBinds.h
+new file mode 100644
+index 0000000..b4a4538
+--- /dev/null
++++ b/playerbot/strategy/values/HomeBinds.h
+@@ -0,0 +1,33 @@
++#pragma once
++
++#include "Entities/ObjectGuid.h"
++
++// kalimdor: where a bot's hearthstone may lead (owner, 2026-10-31). Every bot
++// is bound to its race's starting area below level 20 and to its race's
++// capital from 20 - the innkeeper there. It may bind elsewhere, a neutral town
++// included, only where the zone's level matches its own (LevelSpread), and
++// never in hostile territory. A level-2 Alliance bot carried to Ratchet on a
++// world-PvP trip bound itself there, and every hearthstone home took it back
++// among the Horde (meksha). A bind breaking the rule is put back to the
++// default (trigger "home bind not allowed"). A zone has no level in the
++// game data; the level of the inn's spot is used (TravelMgr::GetAreaLevel).
++
++class Player;
++
++namespace ai
++{
++    class WorldPosition;
++
++    class HomeBinds
++    {
++    public:
++        static constexpr uint32 CapitalFromLevel = 20;
++        static constexpr int LevelSpread = 5;
++
++        // Whether the bot may have its hearthstone bound there.
++        static bool Allowed(Player* bot, const WorldPosition& bind);
++        // Bind the bot to its default home - its starting area's or capital's
++        // innkeeper - if one is known. Says so in the log.
++        static bool BindToDefault(Player* bot);
++    };
++}
