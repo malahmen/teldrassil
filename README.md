@@ -247,7 +247,11 @@ See `examples/roster.example.json`. The rules it enforces:
   has `activities`, most wanted first, from `quests`, `grind`, `gather`, `ah`,
   `wpvp`, `bosses`, `explore`, `rpg`: what the bot travels to do between its
   upkeep (vendors, repairs, trainers, mail, bank), which stays first. An
-  activity not listed is still done, after the listed ones. It also has `pvp`:
+  activity not listed is still done, after the listed ones. Quests, wpvp and
+  grind are every archetype's fallback - its way to the level cap - added after
+  its list when it lacks them (wpvp before quests only if it lists wpvp and
+  not quests); world PvP starts at level 55 (`AiPlayerbot.WorldPvpMinLevel`).
+  It also has `pvp`:
   how much stronger the bot's side must be to start a fight with an enemy
   player (`1.2`, the default; `1` an even fight), or `"always"` (every enemy
   player on sight, guards or not) or `"never"` (none, and it keeps away from
@@ -277,7 +281,7 @@ See `examples/roster.example.json`. The rules it enforces:
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries eleven changes to playerbots (`templates/patches/playerbots/`)
+teldrassil carries twelve changes to playerbots (`templates/patches/playerbots/`)
 and two to the core (`templates/patches/mangos-classic/`), applied before
 every build:
 
@@ -353,6 +357,16 @@ every build:
   nothing to do is skipped for 60 minutes; one pursued past its budget (bosses
   30 minutes, the rest 2 hours) is skipped for 60 minutes too, and the bot
   moves to its next. The log says which, why and for how long.
+- **playerbots 0012:** a goal is not reachable only after finding nothing 3
+  times in a row over at least 5 minutes (one miss is often a moment; a
+  level-1 quester with quests in its log lost questing for an hour on one).
+  Quests, wpvp and grind are every archetype's fallback, so every bot heads
+  for the level cap in the end; world PvP starts at 55; below level 20 a bot
+  with an archetype earns its money questing, not grinding
+  (`AiPlayerbot.MoneyGrindMinLevel`). The safe-graveyard
+  rule (3 deaths) holds only in hostile territory - elsewhere upstream's 8
+  and 10 deaths (a level-4 dwarf who died thrice in Coldridge revived in
+  Goldshire). (meksha, 2026-10-31.)
 
 `roster apply` writes the database only while the world server is stopped:
 guilds and characters live in its memory, and a change made under it is

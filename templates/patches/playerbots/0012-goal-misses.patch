@@ -1,0 +1,320 @@
+diff --git a/playerbot/PlayerbotAIConfig.cpp b/playerbot/PlayerbotAIConfig.cpp
+index 9b8147f..0e493c0 100644
+--- a/playerbot/PlayerbotAIConfig.cpp
++++ b/playerbot/PlayerbotAIConfig.cpp
+@@ -689,6 +689,11 @@ bool PlayerbotAIConfig::Initialize()
+     // no level gate).
+     worldPvpShare = config.GetIntDefault("AiPlayerbot.WorldPvpShare", 10);
+     worldPvpMinutes = config.GetIntDefault("AiPlayerbot.WorldPvpMinutes", 15);
++    // World PvP before 55 is pointless (owner, 2026-10-31).
++    worldPvpMinLevel = config.GetIntDefault("AiPlayerbot.WorldPvpMinLevel", 55);
++    // Below this, a bot with an archetype earns its money questing, not
++    // grinding for it (owner, 2026-10-31; strategy/values/Goals.h).
++    moneyGrindMinLevel = config.GetIntDefault("AiPlayerbot.MoneyGrindMinLevel", 20);
+ 
+     llmPrompt = config.GetStringDefault("AiPlayerbot.LLMPrompt", "<receiver name>:<initial message>");
+     llmPostPrompt = config.GetStringDefault("AiPlayerbot.LLMPostPrompt", "<sender name>:");
+diff --git a/playerbot/PlayerbotAIConfig.h b/playerbot/PlayerbotAIConfig.h
+index 165e0c7..985a897 100644
+--- a/playerbot/PlayerbotAIConfig.h
++++ b/playerbot/PlayerbotAIConfig.h
+@@ -406,7 +406,7 @@ public:
+     // the world-PvP travel gates for bots whose archetype does not seek it
+     // (Kamino 211).
+     std::map<std::string, std::string> archetypes;
+-    uint32 worldPvpShare, worldPvpMinutes;
++    uint32 worldPvpShare, worldPvpMinutes, worldPvpMinLevel, moneyGrindMinLevel;
+     uint32 llmEnabled, llmContextLength, llmBotToBotChatChance, llmGenerationTimeout, llmMaxSimultaniousGenerations, llmRpgAIChatChance;
+     bool llmGlobalContext;
+     ParsedUrl llmEndPointUrl;
+diff --git a/playerbot/strategy/actions/ChooseTravelTargetAction.cpp b/playerbot/strategy/actions/ChooseTravelTargetAction.cpp
+index 5cc98b8..918e95f 100644
+--- a/playerbot/strategy/actions/ChooseTravelTargetAction.cpp
++++ b/playerbot/strategy/actions/ChooseTravelTargetAction.cpp
+@@ -75,7 +75,8 @@ bool ChooseTravelTargetAction::Execute(Event& event)
+     }
+ 
+     // kalimdor: the goal this request was for, if any (values/Goals.h):
+-    // nothing found makes it not reachable now; a target starts its clock.
++    // nothing found counts as a miss (enough of them make it not reachable
++    // now); a target starts its clock.
+     std::string const goal = Goals::OfCondition(AI_VALUE2(std::string, "manual string", "future travel condition"));
+ 
+     if (!SetBestTarget(requester, &newTarget, destinationList))
+@@ -83,7 +84,7 @@ bool ChooseTravelTargetAction::Execute(Event& event)
+         SET_AI_VALUE2(bool, "no active travel destinations", futureTravelPurpose, true);
+         ai->TellDebug(ai->GetMaster(), "No target set", "debug travel");
+         if (!goal.empty())
+-            Goals::NotReachable(ai, goal, "not reachable now (nothing found)");
++            Goals::Missed(ai, goal);
+         return false;
+     }
+ 
+diff --git a/playerbot/strategy/generic/TravelStrategy.cpp b/playerbot/strategy/generic/TravelStrategy.cpp
+index cc59839..b46a9f5 100644
+--- a/playerbot/strategy/generic/TravelStrategy.cpp
++++ b/playerbot/strategy/generic/TravelStrategy.cpp
+@@ -144,6 +144,10 @@ void TravelStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
+         float const ranked = condition.empty() ? relevanceOf(activityOf(purpose), relevance) : relevance;
+         if (condition.empty())
+             trigger = goalTrigger(trigger, activityOf(purpose));
++        // kalimdor: grinding for money waits for MoneyGrindMinLevel for a bot
++        // with an archetype - below it questing earns (values/Goals.h).
++        else if (archetype && purpose == TravelDestinationPurpose::Grind)
++            trigger = "val::and::{" + trigger.substr(5) + ",money grind allowed}";
+         triggers.push_back(new TriggerNode(
+             trigger,
+             NextAction::array(0, new NextAction("request travel target::" + std::to_string((uint32)purpose), ranked), NULL)));
+diff --git a/playerbot/strategy/values/Archetypes.cpp b/playerbot/strategy/values/Archetypes.cpp
+index 90740c4..31384ba 100644
+--- a/playerbot/strategy/values/Archetypes.cpp
++++ b/playerbot/strategy/values/Archetypes.cpp
+@@ -89,6 +89,23 @@ namespace
+                     sLog.outError("Archetype %s: unknown part '%s' left out", name.c_str(), field.c_str());
+             }
+ 
++            // Quests and world PvP are every archetype's fallback when the
++            // rest fails, and in the end every bot aims for the level cap
++            // (owner, 2026-10-31 - a trader is not to stay level 10, trading):
++            // one it does not list comes after its list - wpvp before quests
++            // if it lists wpvp alone, else quests first - then grind, which is
++            // reached at the cap.
++            auto has = [&archetype](const char* activity)
++            {
++                return std::find(archetype.activities.begin(), archetype.activities.end(), activity) != archetype.activities.end();
++            };
++            bool const favoursPvp = has("wpvp") && !has("quests");
++            for (const char* fallback : favoursPvp ? std::vector<const char*>{ "wpvp", "quests", "grind" } : std::vector<const char*>{ "quests", "wpvp", "grind" })
++            {
++                if (!has(fallback))
++                    archetype.activities.push_back(fallback);
++            }
++
+             archetypes[name] = archetype;
+         }
+ 
+diff --git a/playerbot/strategy/values/Archetypes.h b/playerbot/strategy/values/Archetypes.h
+index 539f79c..7799c51 100644
+--- a/playerbot/strategy/values/Archetypes.h
++++ b/playerbot/strategy/values/Archetypes.h
+@@ -16,8 +16,12 @@
+ //
+ // activities: what the bot travels to do, most wanted first - between its
+ //   upkeep (vendor, repair, trainers, mail, bank), which stays first. One not
+-//   listed keeps upstream's place, below the listed ones. A bot whose
+-//   archetype lists wpvp is not held by the world-PvP gates.
++//   listed keeps upstream's place, below the listed ones - except quests,
++//   wpvp and grind, every archetype's fallback (and its way to the level
++//   cap), added after its list when missing: wpvp before quests only if it
++//   lists wpvp and not quests, grind last. A
++//   bot whose archetype lists wpvp is not held by the world-PvP share and
++//   hour gates; the level gate holds for all (AiPlayerbot.WorldPvpMinLevel).
+ // pvp: how much stronger its side must be to start a fight with an enemy
+ //   player (values/EngageOdds.h; 1.2 without an archetype) - "always": every
+ //   enemy player on sight, guards or not; "never": none, and it keeps away
+diff --git a/playerbot/strategy/values/DeadValues.cpp b/playerbot/strategy/values/DeadValues.cpp
+index 728374c..4c39770 100644
+--- a/playerbot/strategy/values/DeadValues.cpp
++++ b/playerbot/strategy/values/DeadValues.cpp
+@@ -148,7 +148,10 @@ GuidPosition BestGraveyardValue::Calculate()
+     uint32 deathCount = AI_VALUE(uint32, "death count");
+ 
+     //attempt to revive at other same map graveyards which are not enemy territory
+-    if (!ai->HasActivePlayerMaster() && deathCount >= DEATH_COUNT_BEFORE_TRYING_ANOTHER_GRAVEYARD)
++    // kalimdor: sooner when the corpse lies in hostile territory (DeadValues.h).
++    bool const hostileCorpse = EnemyGuards::IsHostileTerritory(WorldPosition(corpse), bot);
++    if (!ai->HasActivePlayerMaster() && (deathCount >= DEATH_COUNT_BEFORE_TRYING_ANOTHER_GRAVEYARD ||
++        (hostileCorpse && deathCount >= DEATH_COUNT_IN_HOSTILE_TERRITORY)))
+     {
+         GuidPosition anotherGraveyard = AI_VALUE2(GuidPosition, "graveyard", "another closest appropriate");
+         if (anotherGraveyard)
+@@ -226,6 +229,10 @@ bool ShouldSpiritHealerValue::Calculate()
+         return true;
+     }
+ 
++    // kalimdor: sooner when the corpse lies in hostile territory (DeadValues.h).
++    if (deathCount > DEATH_COUNT_IN_HOSTILE_TERRITORY && EnemyGuards::IsHostileTerritory(WorldPosition(corpse), bot))
++        return true;
++
+     // kalimdor: a corpse inside the reach of the other faction's guards well
+     // above the bot's level - one that died in or by their town - is not
+     // gone back to: reviving there is dying again, and the ghost wandered
+diff --git a/playerbot/strategy/values/DeadValues.h b/playerbot/strategy/values/DeadValues.h
+index 98e6596..8a7c818 100644
+--- a/playerbot/strategy/values/DeadValues.h
++++ b/playerbot/strategy/values/DeadValues.h
+@@ -6,12 +6,15 @@ namespace ai
+     enum DeadValueConstants
+     {
+         DEATH_COUNT_BEFORE_EVAC = 15,
+-        // kalimdor: a bot dying again and again on the way back to its body
+-        // gives up on it sooner - at the third death it takes the spirit
+-        // healer at the nearest safe graveyard (owner, 2026-10-30). Upstream:
+-        // 10 and 8.
+-        DEATH_COUNT_BEFORE_TRYING_ANOTHER_GRAVEYARD = 3,
+-        DEATH_COUNT_BEFORE_REVIVING_AT_SPIRIT_HEALER = 3
++        DEATH_COUNT_BEFORE_TRYING_ANOTHER_GRAVEYARD = 10,
++        DEATH_COUNT_BEFORE_REVIVING_AT_SPIRIT_HEALER = 8,
++        // kalimdor: in hostile territory a bot dying again and again on the
++        // way back to its body gives up on it sooner - at the third death it
++        // takes the spirit healer at the nearest safe graveyard (owner,
++        // 2026-10-30) - and only there (owner, 2026-10-31): at 3 everywhere,
++        // a level-4 dwarf who died thrice in Coldridge Valley revived in
++        // Goldshire, the nearest graveyard of another zone (meksha).
++        DEATH_COUNT_IN_HOSTILE_TERRITORY = 3
+     };
+ 
+     class GraveyardValue : public GuidPositionCalculatedValue, public Qualified
+diff --git a/playerbot/strategy/values/Goals.cpp b/playerbot/strategy/values/Goals.cpp
+index 2bbd2db..ddbedab 100644
+--- a/playerbot/strategy/values/Goals.cpp
++++ b/playerbot/strategy/values/Goals.cpp
+@@ -1,6 +1,7 @@
+ #include "playerbot/playerbot.h"
+ #include "Goals.h"
+ #include "Archetypes.h"
++#include "playerbot/PlayerbotAIConfig.h"
+ #include "World/World.h"
+ 
+ using namespace ai;
+@@ -32,12 +33,27 @@ std::string Goals::OfCondition(const std::string& condition)
+     return condition.substr(from, to == std::string::npos ? std::string::npos : to - from);
+ }
+ 
++void Goals::Missed(PlayerbotAI* ai, const std::string& activity)
++{
++    AiObjectContext* context = ai->GetAiObjectContext();
++    time_t const now = time(nullptr);
++
++    int32 const misses = AI_VALUE2(int32, "manual int", "goal misses " + activity) + 1;
++    if (misses == 1)
++        SET_AI_VALUE2(time_t, "manual time", "goal first miss " + activity, now);
++    SET_AI_VALUE2(int32, "manual int", "goal misses " + activity, misses);
++
++    if (misses >= MissesBeforeSkip && now - AI_VALUE2(time_t, "manual time", "goal first miss " + activity) >= MissWindow)
++        NotReachable(ai, activity, "not reachable now (nothing found " + std::to_string(misses) + " times in a row)");
++}
++
+ void Goals::NotReachable(PlayerbotAI* ai, const std::string& activity, const std::string& why)
+ {
+     AiObjectContext* context = ai->GetAiObjectContext();
+     Player* bot = ai->GetBot();
+ 
+     SET_AI_VALUE2(time_t, "manual time", "goal cooldown " + activity, time(nullptr) + Cooldown);
++    SET_AI_VALUE2(int32, "manual int", "goal misses " + activity, 0);
+     if (AI_VALUE2(std::string, "manual string", "goal") == activity)
+         RESET_AI_VALUE2(std::string, "manual string", "goal");
+ 
+@@ -48,6 +64,7 @@ void Goals::NotReachable(PlayerbotAI* ai, const std::string& activity, const std
+ void Goals::Started(PlayerbotAI* ai, const std::string& activity)
+ {
+     AiObjectContext* context = ai->GetAiObjectContext();
++    SET_AI_VALUE2(int32, "manual int", "goal misses " + activity, 0);
+ 
+     if (AI_VALUE2(std::string, "manual string", "goal") == activity)
+         return;
+@@ -82,3 +99,8 @@ bool GoalOpenValue::Calculate()
+ 
+     return true;
+ }
++
++bool MoneyGrindAllowedValue::Calculate()
++{
++    return bot->GetLevel() >= sPlayerbotAIConfig.moneyGrindMinLevel;
++}
+diff --git a/playerbot/strategy/values/Goals.h b/playerbot/strategy/values/Goals.h
+index cdd8ceb..1fcace2 100644
+--- a/playerbot/strategy/values/Goals.h
++++ b/playerbot/strategy/values/Goals.h
+@@ -8,8 +8,12 @@
+ // (Kamino 215; owner's rules, 2026-10-27 and 2026-10-31). A goal - one of the
+ // archetype's activities - is
+ //   reached:            done for good, skipped (grind - "lvl60" - at the cap);
+-//   not reachable now:  its request found nothing - skipped, retried after
+-//                       Cooldown;
++//   not reachable now:  its requests found nothing MissesBeforeSkip times in a
++//                       row over at least MissWindow - skipped, retried
++//                       after Cooldown (one miss is often a moment: right
++//                       after login, or while a search is still prepared -
++//                       a level-1 quester with quests in its log lost
++//                       questing for an hour on one, on meksha 2026-10-31);
+ //   out of time:        pursued past its budget (bosses BossBudget, the rest
+ //                       Budget) - then not reachable now.
+ // For a bot with an archetype only (values/Archetypes.h): its activity
+@@ -27,20 +31,37 @@ namespace ai
+         // 151), the time to find a group.
+         static constexpr time_t BossBudget = 30 * 60;
+         static constexpr time_t Budget = 2 * 60 * 60;
++        static constexpr int MissesBeforeSkip = 3;
++        static constexpr time_t MissWindow = 5 * 60;
+ 
+         static bool Reached(PlayerbotAI* ai, const std::string& activity);
+         static time_t BudgetOf(const std::string& activity);
+         // The goal a travel condition asks for ("and::{...,goal open::quests}"),
+         // or "".
+         static std::string OfCondition(const std::string& condition);
+-        // Its request found nothing, or its time ran out: skipped for Cooldown.
++        // Its request found nothing: counted; enough in a row and long enough
++        // makes it not reachable now.
++        static void Missed(PlayerbotAI* ai, const std::string& activity);
++        // Not reachable now, or its time ran out: skipped for Cooldown.
+         static void NotReachable(PlayerbotAI* ai, const std::string& activity, const std::string& why);
+-        // A target was chosen for it: the bot's current goal, timed from the
+-        // first target (a change of goal restarts the clock; upkeep between
+-        // targets does not).
++        // A target was chosen for it: its misses are forgotten, and it is the
++        // bot's current goal, timed from the first target (a change of goal
++        // restarts the clock; upkeep between targets does not).
+         static void Started(PlayerbotAI* ai, const std::string& activity);
+     };
+ 
++    // Whether a bot with an archetype may grind for money: from
++    // AiPlayerbot.MoneyGrindMinLevel. Below it questing earns its money -
++    // broke at levels 1-4, as every new bot is, it ground for gold instead of
++    // following its list, and died at it (meksha, 2026-10-31).
++    class MoneyGrindAllowedValue : public BoolCalculatedValue
++    {
++    public:
++        MoneyGrindAllowedValue(PlayerbotAI* ai, std::string name = "money grind allowed") : BoolCalculatedValue(ai, name, 10) {}
++
++        virtual bool Calculate() override;
++    };
++
+     // Whether a goal may be pursued now: not reached, not cooling down, and
+     // (as the bot's current goal) within its budget.
+     class GoalOpenValue : public BoolCalculatedValue, public Qualified
+diff --git a/playerbot/strategy/values/TravelValues.cpp b/playerbot/strategy/values/TravelValues.cpp
+index 5f12d24..25a0e81 100644
+--- a/playerbot/strategy/values/TravelValues.cpp
++++ b/playerbot/strategy/values/TravelValues.cpp
+@@ -349,10 +349,14 @@ bool ShouldTravelNamedValue::Calculate()
+     }
+     else if (name == "pvp")
+     {
+-        // kalimdor: world PvP has no level gate (owner, 2026-10-27; upstream:
+-        // above 50 only), and a bot whose archetype lists it is not held by
+-        // the share and hour gates; for the rest they are settings,
+-        // AiPlayerbot.WorldPvpShare and WorldPvpMinutes (Kamino 211).
++        // kalimdor: world PvP from AiPlayerbot.WorldPvpMinLevel (55: before it
++        // is pointless, owner 2026-10-31; upstream: above 50), and a bot whose
++        // archetype lists it is not held by the share and hour gates; for the
++        // rest they are settings, WorldPvpShare and WorldPvpMinutes (Kamino
++        // 211).
++        if (bot->GetLevel() < sPlayerbotAIConfig.worldPvpMinLevel)
++            return false;
++
+         if (Archetypes::Rank(Archetypes::Of(bot), "wpvp") < 0)
+         {
+             int32 rpgStyle = AI_VALUE2(int32, "manual saved int", "rpg style override");
+diff --git a/playerbot/strategy/values/ValueContext.h b/playerbot/strategy/values/ValueContext.h
+index 7baa298..805ab96 100644
+--- a/playerbot/strategy/values/ValueContext.h
++++ b/playerbot/strategy/values/ValueContext.h
+@@ -460,6 +460,7 @@ namespace ai
+             creators["trigger active"] = [](PlayerbotAI* ai) { return new TriggerActiveValue(ai); };
+             creators["has strategy"] = [](PlayerbotAI* ai) { return new HasStrategyValue(ai); };
+             creators["goal open"] = [](PlayerbotAI* ai) { return new GoalOpenValue(ai); };
++            creators["money grind allowed"] = [](PlayerbotAI* ai) { return new MoneyGrindAllowedValue(ai); };
+ 
+             creators["party tank without lifebloom"] = [](PlayerbotAI* ai) { return new PartyTankWithoutLifebloomValue(ai); };
+             creators["move style"] = [](PlayerbotAI* ai) { return new MoveStyleValue(ai); };
