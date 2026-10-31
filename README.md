@@ -250,7 +250,9 @@ See `examples/roster.example.json`. The rules it enforces:
   activity not listed is still done, after the listed ones. Quests, wpvp and
   grind are every archetype's fallback - its way to the level cap - added after
   its list when it lacks them (wpvp before quests only if it lists wpvp and
-  not quests); world PvP starts at level 55 (`AiPlayerbot.WorldPvpMinLevel`).
+  not quests). Below the level cap, world PvP is hunting where the bot is: once
+  it has reached the top of its zone's level range, outside a neutral town,
+  while an enemy player is in the zone (patch 0014).
   It also has `pvp`:
   how much stronger the bot's side must be to start a fight with an enemy
   player (`1.2`, the default; `1` an even fight), or `"always"` (every enemy
@@ -281,7 +283,7 @@ See `examples/roster.example.json`. The rules it enforces:
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries thirteen changes to playerbots (`templates/patches/playerbots/`)
+teldrassil carries fourteen changes to playerbots (`templates/patches/playerbots/`)
 and two to the core (`templates/patches/mangos-classic/`), applied before
 every build:
 
@@ -361,7 +363,7 @@ every build:
   times in a row over at least 5 minutes (one miss is often a moment; a
   level-1 quester with quests in its log lost questing for an hour on one).
   Quests, wpvp and grind are every archetype's fallback, so every bot heads
-  for the level cap in the end; world PvP starts at 55; below level 20 a bot
+  for the level cap in the end; below level 20 a bot
   with an archetype earns its money questing, not grinding
   (`AiPlayerbot.MoneyGrindMinLevel`). The safe-graveyard
   rule (3 deaths) holds only in hostile territory - elsewhere upstream's 8
@@ -377,6 +379,13 @@ every build:
   a stranded bot's last resort, is tried at most every 10 minutes, each try
   letting it walk its ways out again meanwhile - one that did not go off was
   tried every tick, 91 times in a row. (meksha, 2026-10-31.)
+- **playerbots 0014:** world PvP by zone. Below the level cap a bot hunts
+  enemy players where it is - once it has reached the top of its zone's level
+  range (the classic ranges: Elwynn 1-10, the Barrens 10-25, Stranglethorn
+  30-45, ...), outside a neutral town, while an enemy player is in the zone;
+  with no one to hunt, it quests. Only at the cap is it sent to the world-PvP
+  spots. This replaces 0012's level-55 gate: a level-1 wpvper sent to a spot
+  was stranded at Ratchet (meksha, 2026-10-31).
 
 `roster apply` writes the database only while the world server is stopped:
 guilds and characters live in its memory, and a change made under it is

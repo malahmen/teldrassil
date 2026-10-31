@@ -1,0 +1,234 @@
+diff --git a/playerbot/PlayerbotAIConfig.cpp b/playerbot/PlayerbotAIConfig.cpp
+index 0e493c0..debd1ff 100644
+--- a/playerbot/PlayerbotAIConfig.cpp
++++ b/playerbot/PlayerbotAIConfig.cpp
+@@ -689,8 +689,6 @@ bool PlayerbotAIConfig::Initialize()
+     // no level gate).
+     worldPvpShare = config.GetIntDefault("AiPlayerbot.WorldPvpShare", 10);
+     worldPvpMinutes = config.GetIntDefault("AiPlayerbot.WorldPvpMinutes", 15);
+-    // World PvP before 55 is pointless (owner, 2026-10-31).
+-    worldPvpMinLevel = config.GetIntDefault("AiPlayerbot.WorldPvpMinLevel", 55);
+     // Below this, a bot with an archetype earns its money questing, not
+     // grinding for it (owner, 2026-10-31; strategy/values/Goals.h).
+     moneyGrindMinLevel = config.GetIntDefault("AiPlayerbot.MoneyGrindMinLevel", 20);
+diff --git a/playerbot/PlayerbotAIConfig.h b/playerbot/PlayerbotAIConfig.h
+index 985a897..68ced53 100644
+--- a/playerbot/PlayerbotAIConfig.h
++++ b/playerbot/PlayerbotAIConfig.h
+@@ -406,7 +406,7 @@ public:
+     // the world-PvP travel gates for bots whose archetype does not seek it
+     // (Kamino 211).
+     std::map<std::string, std::string> archetypes;
+-    uint32 worldPvpShare, worldPvpMinutes, worldPvpMinLevel, moneyGrindMinLevel;
++    uint32 worldPvpShare, worldPvpMinutes, moneyGrindMinLevel;
+     uint32 llmEnabled, llmContextLength, llmBotToBotChatChance, llmGenerationTimeout, llmMaxSimultaniousGenerations, llmRpgAIChatChance;
+     bool llmGlobalContext;
+     ParsedUrl llmEndPointUrl;
+diff --git a/playerbot/strategy/actions/ChooseTravelTargetAction.cpp b/playerbot/strategy/actions/ChooseTravelTargetAction.cpp
+index 918e95f..e752240 100644
+--- a/playerbot/strategy/actions/ChooseTravelTargetAction.cpp
++++ b/playerbot/strategy/actions/ChooseTravelTargetAction.cpp
+@@ -830,6 +830,12 @@ bool RequestNamedTravelTargetAction::Execute(Event& event)
+         else                                                        //Last 200 minutes
+             WorldPvpLocation = "Strangletorn Vale";
+ 
++        // kalimdor: below the level cap, the bot's own zone - it hunts where
++        // it is (values/ZoneLevels.h; owner, 2026-10-31).
++        if (bot->GetLevel() < sWorld.getConfig(CONFIG_UINT32_MAX_PLAYER_LEVEL))
++            if (AreaTableEntry const* zone = GetAreaEntryByAreaID(bot->GetZoneId()))
++                WorldPvpLocation = zone->area_name[0];
++
+         *AI_VALUE(FutureDestinations*, "future travel destinations") = std::async(std::launch::async, [travelInfo = PlayerTravelInfo(bot), center, WorldPvpLocation]()
+             {
+                 PartitionedTravelList list;
+diff --git a/playerbot/strategy/values/Archetypes.h b/playerbot/strategy/values/Archetypes.h
+index 7799c51..5f055cb 100644
+--- a/playerbot/strategy/values/Archetypes.h
++++ b/playerbot/strategy/values/Archetypes.h
+@@ -21,7 +21,8 @@
+ //   cap), added after its list when missing: wpvp before quests only if it
+ //   lists wpvp and not quests, grind last. A
+ //   bot whose archetype lists wpvp is not held by the world-PvP share and
+-//   hour gates; the level gate holds for all (AiPlayerbot.WorldPvpMinLevel).
++//   hour gates; below the level cap world PvP is hunting in the bot's own
++//   zone once it has outlevelled it (values/ZoneLevels.h).
+ // pvp: how much stronger its side must be to start a fight with an enemy
+ //   player (values/EngageOdds.h; 1.2 without an archetype) - "always": every
+ //   enemy player on sight, guards or not; "never": none, and it keeps away
+diff --git a/playerbot/strategy/values/TravelValues.cpp b/playerbot/strategy/values/TravelValues.cpp
+index 25a0e81..99ddca1 100644
+--- a/playerbot/strategy/values/TravelValues.cpp
++++ b/playerbot/strategy/values/TravelValues.cpp
+@@ -6,6 +6,7 @@
+ #include "GuildValues.h"
+ #include "Guilds/GuildMgr.h"
+ #include "Archetypes.h"
++#include "ZoneLevels.h"
+ 
+ using namespace ai;
+ 
+@@ -349,12 +350,14 @@ bool ShouldTravelNamedValue::Calculate()
+     }
+     else if (name == "pvp")
+     {
+-        // kalimdor: world PvP from AiPlayerbot.WorldPvpMinLevel (55: before it
+-        // is pointless, owner 2026-10-31; upstream: above 50), and a bot whose
+-        // archetype lists it is not held by the share and hour gates; for the
+-        // rest they are settings, WorldPvpShare and WorldPvpMinutes (Kamino
+-        // 211).
+-        if (bot->GetLevel() < sPlayerbotAIConfig.worldPvpMinLevel)
++        // kalimdor: below the level cap world PvP is hunting where the bot
++        // is - once it has reached the top of its zone's range, outside a
++        // neutral town, while an enemy player is in the zone (owner,
++        // 2026-10-31; values/ZoneLevels.h; upstream: above level 50, sent to
++        // fixed spots). A bot whose archetype lists it is not held by the
++        // share and hour gates; for the rest they are settings,
++        // WorldPvpShare and WorldPvpMinutes (Kamino 211).
++        if (bot->GetLevel() < sWorld.getConfig(CONFIG_UINT32_MAX_PLAYER_LEVEL) && !ZoneLevels::MayHuntHere(bot))
+             return false;
+ 
+         if (Archetypes::Rank(Archetypes::Of(bot), "wpvp") < 0)
+diff --git a/playerbot/strategy/values/ZoneLevels.cpp b/playerbot/strategy/values/ZoneLevels.cpp
+new file mode 100644
+index 0000000..c7f0bf4
+--- /dev/null
++++ b/playerbot/strategy/values/ZoneLevels.cpp
+@@ -0,0 +1,101 @@
++#include "playerbot/playerbot.h"
++#include "ZoneLevels.h"
++#include "EnemyGuards.h"
++#include "playerbot/ServerFacade.h"
++#include "playerbot/TravelMgr.h"
++
++#include <map>
++
++using namespace ai;
++
++namespace
++{
++    struct LevelRange { uint32_t min, max; };
++
++    // The owner's list (2026-10-31), ids checked against AreaTable.dbc.
++    const std::map<uint32_t, LevelRange>& Ranges()
++    {
++        static const std::map<uint32_t, LevelRange> ranges = {
++            { 1, { 1, 10 } },    // Dun Morogh
++            { 14, { 1, 10 } },   // Durotar
++            { 12, { 1, 10 } },   // Elwynn Forest
++            { 215, { 1, 10 } },  // Mulgore
++            { 141, { 1, 10 } },  // Teldrassil
++            { 85, { 1, 10 } },   // Tirisfal Glades
++            { 148, { 10, 20 } }, // Darkshore
++            { 38, { 10, 20 } },  // Loch Modan
++            { 130, { 10, 20 } }, // Silverpine Forest
++            { 40, { 10, 20 } },  // Westfall
++            { 17, { 10, 25 } },  // The Barrens
++            { 44, { 15, 25 } },  // Redridge Mountains
++            { 406, { 15, 27 } }, // Stonetalon Mountains
++            { 331, { 18, 30 } }, // Ashenvale
++            { 10, { 18, 30 } },  // Duskwood
++            { 11, { 20, 30 } },  // Wetlands
++            { 267, { 20, 35 } }, // Hillsbrad Foothills
++            { 400, { 25, 35 } }, // Thousand Needles
++            { 36, { 30, 40 } },  // Alterac Mountains
++            { 45, { 30, 40 } },  // Arathi Highlands
++            { 405, { 30, 40 } }, // Desolace
++            { 33, { 30, 45 } },  // Stranglethorn Vale
++            { 15, { 35, 45 } },  // Dustwallow Marsh
++            { 3, { 35, 45 } },   // Badlands
++            { 8, { 35, 45 } },   // Swamp of Sorrows
++            { 357, { 40, 50 } }, // Feralas
++            { 47, { 40, 50 } },  // The Hinterlands
++            { 440, { 40, 50 } }, // Tanaris
++            { 51, { 45, 50 } },  // Searing Gorge
++            { 16, { 45, 55 } },  // Azshara
++            { 4, { 45, 55 } },   // Blasted Lands
++            { 490, { 48, 55 } }, // Un'Goro Crater
++            { 361, { 48, 55 } }, // Felwood
++            { 46, { 50, 58 } },  // Burning Steppes
++            { 28, { 51, 58 } },  // Western Plaguelands
++            { 139, { 53, 60 } }, // Eastern Plaguelands
++            { 618, { 53, 60 } }, // Winterspring
++            { 41, { 55, 60 } },  // Deadwind Pass
++            { 493, { 55, 60 } }, // Moonglade
++            { 1377, { 55, 60 } },// Silithus
++        };
++        return ranges;
++    }
++}
++
++bool ZoneLevels::Range(uint32_t zoneId, uint32_t& min, uint32_t& max)
++{
++    auto it = Ranges().find(zoneId);
++    if (it == Ranges().end())
++        return false;
++
++    min = it->second.min;
++    max = it->second.max;
++    return true;
++}
++
++bool ZoneLevels::Outlevelled(Player* bot)
++{
++    uint32_t min = 0, max = 0;
++    return Range(bot->GetZoneId(), min, max) && bot->GetLevel() >= max;
++}
++
++bool ZoneLevels::EnemyPlayerInZone(Player* bot)
++{
++    uint32 const zone = bot->GetZoneId();
++    Map::PlayerList const& players = bot->GetMap()->GetPlayers();
++    for (auto itr = players.begin(); itr != players.end(); ++itr)
++    {
++        Player* player = itr->getSource();
++        if (!player || player == bot || player->GetZoneId() != zone || !sServerFacade.IsAlive(player))
++            continue;
++
++        if (sServerFacade.IsHostileTo(bot, player) && bot->CanAttack(player))
++            return true;
++    }
++
++    return false;
++}
++
++bool ZoneLevels::MayHuntHere(Player* bot)
++{
++    return Outlevelled(bot) && !EnemyGuards::IsSafeHaven(WorldPosition(bot), bot) && EnemyPlayerInZone(bot);
++}
+diff --git a/playerbot/strategy/values/ZoneLevels.h b/playerbot/strategy/values/ZoneLevels.h
+new file mode 100644
+index 0000000..53d259e
+--- /dev/null
++++ b/playerbot/strategy/values/ZoneLevels.h
+@@ -0,0 +1,31 @@
++#pragma once
++
++#include <cstdint>
++#include <string>
++
++// kalimdor: the classic zones' level ranges (owner, 2026-10-31), by zone id
++// - the game data gives an outdoor zone no level of its own - and when a bot
++// with a world-PvP archetype turns on the enemy players around it: once it
++// has reached the top of its zone's range, outside a neutral town, while an
++// enemy player is in that zone. Below the level cap it hunts there, in its
++// own zone, never sent across the world; with no one to hunt, it quests. A
++// level-1 wpvper sent to a world-PvP spot was stranded at Ratchet (meksha).
++
++class Player;
++
++namespace ai
++{
++    class ZoneLevels
++    {
++    public:
++        // The zone's range, false for one not in the list.
++        static bool Range(uint32_t zoneId, uint32_t& min, uint32_t& max);
++        // The bot is at or above the top of its zone's range.
++        static bool Outlevelled(Player* bot);
++        // An enemy player, alive and attackable, in the bot's zone.
++        static bool EnemyPlayerInZone(Player* bot);
++        // The bot may hunt enemy players where it is (all three above, and
++        // not in a neutral town).
++        static bool MayHuntHere(Player* bot);
++    };
++}
