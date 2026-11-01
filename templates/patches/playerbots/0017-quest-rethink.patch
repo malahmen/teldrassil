@@ -1,0 +1,164 @@
+diff --git a/playerbot/strategy/actions/ActionContext.h b/playerbot/strategy/actions/ActionContext.h
+index f1e9e7c..489faf5 100644
+--- a/playerbot/strategy/actions/ActionContext.h
++++ b/playerbot/strategy/actions/ActionContext.h
+@@ -5,6 +5,7 @@
+ #include "GiveUpGatheringAction.h"
+ #include "KeepAwayFromEnemyPlayerAction.h"
+ #include "BindToDefaultHomeAction.h"
++#include "RethinkQuestTargetAction.h"
+ #include "EmoteAction.h"
+ #include "AddLootAction.h"
+ #include "LootAction.h"
+@@ -438,6 +439,7 @@ namespace ai
+             creators["give up gathering"] = [](PlayerbotAI* ai) { return new GiveUpGatheringAction(ai); };
+             creators["keep away from enemy player"] = [](PlayerbotAI* ai) { return new KeepAwayFromEnemyPlayerAction(ai); };
+             creators["bind to default home"] = [](PlayerbotAI* ai) { return new BindToDefaultHomeAction(ai); };
++            creators["rethink quest target"] = [](PlayerbotAI* ai) { return new RethinkQuestTargetAction(ai); };
+ 
+ #ifdef GenerateBotTests
+             creators["test"] = [](PlayerbotAI* ai) { return new TestAction(ai); };
+diff --git a/playerbot/strategy/actions/RethinkQuestTargetAction.cpp b/playerbot/strategy/actions/RethinkQuestTargetAction.cpp
+new file mode 100644
+index 0000000..2575b54
+--- /dev/null
++++ b/playerbot/strategy/actions/RethinkQuestTargetAction.cpp
+@@ -0,0 +1,15 @@
++#include "playerbot/playerbot.h"
++#include "RethinkQuestTargetAction.h"
++#include "playerbot/TravelMgr.h"
++
++using namespace ai;
++
++bool RethinkQuestTargetAction::Execute(Event& event)
++{
++    // As upstream releases a travel target (PlayerbotAI::ResetStrategies).
++    TravelTarget* target = AI_VALUE(TravelTarget*, "travel target");
++    sTravelMgr.SetNullTravelTarget(target);
++    target->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
++    target->SetExpireIn(1000);
++    return true;
++}
+diff --git a/playerbot/strategy/actions/RethinkQuestTargetAction.h b/playerbot/strategy/actions/RethinkQuestTargetAction.h
+new file mode 100644
+index 0000000..a510cba
+--- /dev/null
++++ b/playerbot/strategy/actions/RethinkQuestTargetAction.h
+@@ -0,0 +1,15 @@
++#pragma once
++#include "playerbot/strategy/Action.h"
++
++namespace ai
++{
++    // kalimdor: release the quest-objective travel target, so the travel
++    // system chooses again - the nearest doable objective of any quest
++    // (Kamino 231; triggers/QuestProgressTrigger.h).
++    class RethinkQuestTargetAction : public Action
++    {
++    public:
++        RethinkQuestTargetAction(PlayerbotAI* ai) : Action(ai, "rethink quest target") {}
++        bool Execute(Event& event) override;
++    };
++}
+diff --git a/playerbot/strategy/generic/TravelStrategy.cpp b/playerbot/strategy/generic/TravelStrategy.cpp
+index 549b9b5..4164969 100644
+--- a/playerbot/strategy/generic/TravelStrategy.cpp
++++ b/playerbot/strategy/generic/TravelStrategy.cpp
+@@ -139,6 +139,13 @@ void TravelStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
+         "gathering stalled",
+         NextAction::array(0, new NextAction("give up gathering", 7.0f), NULL)));
+ 
++    // kalimdor: after progress on any quest, the quest objective being
++    // pursued is chosen again - the nearest doable one of any quest goes
++    // next (triggers/QuestProgressTrigger.h; Kamino 231).
++    triggers.push_back(new TriggerNode(
++        "quest progress",
++        NextAction::array(0, new NextAction("rethink quest target", 7.0f), NULL)));
++
+     for (auto& [condition, purpose, relevance] : PurposeActions)
+     {
+         std::string trigger = condition.empty() ? "val::need travel purpose::" + std::to_string((uint32)purpose) : condition;
+diff --git a/playerbot/strategy/triggers/QuestProgressTrigger.cpp b/playerbot/strategy/triggers/QuestProgressTrigger.cpp
+new file mode 100644
+index 0000000..ebac52a
+--- /dev/null
++++ b/playerbot/strategy/triggers/QuestProgressTrigger.cpp
+@@ -0,0 +1,34 @@
++#include "playerbot/playerbot.h"
++#include "QuestProgressTrigger.h"
++#include "playerbot/TravelMgr.h"
++
++using namespace ai;
++
++bool QuestProgressTrigger::IsActive()
++{
++    // Progress over all quests in the log: what counted toward their
++    // objectives, a finished one weighing more.
++    int32 progress = 0;
++    for (auto const& [questId, status] : bot->getQuestStatusMap())
++    {
++        if (status.m_rewarded || (status.m_status != QUEST_STATUS_INCOMPLETE && status.m_status != QUEST_STATUS_COMPLETE))
++            continue;
++
++        for (uint32 i = 0; i < QUEST_OBJECTIVES_COUNT; ++i)
++            progress += status.m_creatureOrGOcount[i];
++        for (uint32 i = 0; i < QUEST_ITEM_OBJECTIVES_COUNT; ++i)
++            progress += status.m_itemcount[i];
++        if (status.m_status == QUEST_STATUS_COMPLETE)
++            progress += 1000;
++    }
++
++    int32 const last = AI_VALUE2(int32, "manual int", "quest progress");
++    bool const known = AI_VALUE2(bool, "manual bool", "quest progress known");
++    SET_AI_VALUE2(int32, "manual int", "quest progress", progress);
++    SET_AI_VALUE2(bool, "manual bool", "quest progress known", true);
++    if (!known || progress <= last)
++        return false;
++
++    TravelTarget* target = AI_VALUE(TravelTarget*, "travel target");
++    return target && dynamic_cast<QuestObjectiveTravelDestination*>(target->GetDestination());
++}
+diff --git a/playerbot/strategy/triggers/QuestProgressTrigger.h b/playerbot/strategy/triggers/QuestProgressTrigger.h
+new file mode 100644
+index 0000000..a1d82eb
+--- /dev/null
++++ b/playerbot/strategy/triggers/QuestProgressTrigger.h
+@@ -0,0 +1,18 @@
++#pragma once
++#include "playerbot/strategy/Trigger.h"
++
++namespace ai
++{
++    // kalimdor: the bot made progress on a quest - a kill, an object or an
++    // item counted - while its travel target is a quest objective (Kamino
++    // 231). The nearest objective may now be another quest's (owner,
++    // 2026-11-01): with quests x and y, after killing an x mob a nearer y mob
++    // goes next. Upstream re-chose only once the objective was done, walking
++    // past other quests' objectives out of sight.
++    class QuestProgressTrigger : public Trigger
++    {
++    public:
++        QuestProgressTrigger(PlayerbotAI* ai) : Trigger(ai, "quest progress", 2) {}
++        virtual bool IsActive() override;
++    };
++}
+diff --git a/playerbot/strategy/triggers/TriggerContext.h b/playerbot/strategy/triggers/TriggerContext.h
+index 661008d..c5d507b 100644
+--- a/playerbot/strategy/triggers/TriggerContext.h
++++ b/playerbot/strategy/triggers/TriggerContext.h
+@@ -4,6 +4,7 @@
+ #include "GatheringStalledTrigger.h"
+ #include "StrongEnemyPlayerNearTrigger.h"
+ #include "HomeBindNotAllowedTrigger.h"
++#include "QuestProgressTrigger.h"
+ #include "GenericTriggers.h"
+ #include "LootTriggers.h"
+ #include "GenericTriggers.h"
+@@ -90,6 +91,7 @@ namespace ai
+             creators["gathering stalled"] = [](PlayerbotAI* ai) { return new GatheringStalledTrigger(ai); };
+             creators["strong enemy player near"] = [](PlayerbotAI* ai) { return new StrongEnemyPlayerNearTrigger(ai); };
+             creators["home bind not allowed"] = [](PlayerbotAI* ai) { return new HomeBindNotAllowedTrigger(ai); };
++            creators["quest progress"] = [](PlayerbotAI* ai) { return new QuestProgressTrigger(ai); };
+             creators["enemy player near"] = [](PlayerbotAI* ai) { return new EnemyPlayerNear(ai); };
+ 
+             creators["combat start"] = [](PlayerbotAI* ai) { return new CombatStartTrigger(ai); };
