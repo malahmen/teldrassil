@@ -1,0 +1,66 @@
+diff --git a/playerbot/strategy/actions/MoveAwayFromEnemyGuardAction.cpp b/playerbot/strategy/actions/MoveAwayFromEnemyGuardAction.cpp
+index c21187c..5345ad1 100644
+--- a/playerbot/strategy/actions/MoveAwayFromEnemyGuardAction.cpp
++++ b/playerbot/strategy/actions/MoveAwayFromEnemyGuardAction.cpp
+@@ -1,6 +1,7 @@
+ #include "playerbot/playerbot.h"
+ #include "MoveAwayFromEnemyGuardAction.h"
+ #include "playerbot/strategy/values/EnemyGuards.h"
++#include "playerbot/strategy/values/ZoneLevels.h"
+ #include "playerbot/TravelMgr.h"
+ #include "playerbot/TravelNode.h"
+ 
+@@ -124,6 +125,16 @@ bool LeaveHostileTerritoryAction::Execute(Event& event)
+             if (!position->GetArea() || EnemyGuards::IsHostileTerritory(*position, bot))
+                 continue;
+ 
++            // Not into a zone above the bot's level either (owner,
++            // 2026-11-01; values/ZoneLevels.h): a level-5 troll pushed out of
++            // Elwynn was sent to Redridge's Three Corners and slid on to the
++            // Blasted Lands. With no such way out, the hearthstone takes it
++            // home.
++            uint32 zoneMin = 0, zoneMax = 0;
++            if (ZoneLevels::Range(sTerrainMgr.GetZoneId(position->getMapId(), position->getX(), position->getY(), position->getZ()), zoneMin, zoneMax) &&
++                bot->GetLevel() < zoneMin)
++                continue;
++
+             if (!start->hasRouteTo(node))
+                 continue;
+ 
+diff --git a/playerbot/strategy/values/Goals.cpp b/playerbot/strategy/values/Goals.cpp
+index b9d4b32..4f4f6de 100644
+--- a/playerbot/strategy/values/Goals.cpp
++++ b/playerbot/strategy/values/Goals.cpp
+@@ -25,6 +25,11 @@ bool Goals::Reached(PlayerbotAI* ai, const std::string& activity)
+ 
+ time_t Goals::BudgetOf(const std::string& activity)
+ {
++    // Quests have no time budget (owner, 2026-11-01): questing is every
++    // bot's way forward, and 2 hours cut productive questing off for an hour
++    // (8 bots in 12 hours on meksha). 0 means none.
++    if (activity == "quests")
++        return 0;
+     return activity == "bosses" ? BossBudget : Budget;
+ }
+ 
+@@ -82,8 +87,9 @@ void Goals::Started(PlayerbotAI* ai, const std::string& activity)
+     // Said when the bot takes up a goal - not per target - so the log shows
+     // its way down the list.
+     Player* bot = ai->GetBot();
+-    sLog.outString("Bot #%d %s:%d <%s>: takes up %s (budget %d minutes)", bot->GetGUIDLow(),
+-        bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), activity.c_str(), int(BudgetOf(activity) / 60));
++    sLog.outString("Bot #%d %s:%d <%s>: takes up %s (%s)", bot->GetGUIDLow(),
++        bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), activity.c_str(),
++        BudgetOf(activity) ? ("budget " + std::to_string(BudgetOf(activity) / 60) + " minutes").c_str() : "no time budget");
+ }
+ 
+ bool GoalOpenValue::Calculate()
+@@ -105,7 +111,7 @@ bool GoalOpenValue::Calculate()
+     if (AI_VALUE2(time_t, "manual time", "goal cooldown " + activity) > now)
+         return false;
+ 
+-    if (AI_VALUE2(std::string, "manual string", "goal") == activity &&
++    if (Goals::BudgetOf(activity) && AI_VALUE2(std::string, "manual string", "goal") == activity &&
+         now - AI_VALUE2(time_t, "manual time", "goal since") > Goals::BudgetOf(activity))
+     {
+         Goals::NotReachable(ai, activity, "out of time (" + std::to_string(Goals::BudgetOf(activity) / 60) + " minutes)");

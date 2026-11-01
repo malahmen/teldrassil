@@ -283,7 +283,7 @@ See `examples/roster.example.json`. The rules it enforces:
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries fifteen changes to playerbots (`templates/patches/playerbots/`)
+teldrassil carries sixteen changes to playerbots (`templates/patches/playerbots/`)
 and two to the core (`templates/patches/mangos-classic/`), applied before
 every build:
 
@@ -394,6 +394,11 @@ every build:
   `gather` goal, no longer above everything (farmers farmed and never
   quested), and gathering needs a profession it can use: herbalism, mining
   with a Mining Pick, skinning with a Skinning Knife. (meksha, 2026-11-01.)
+- **playerbots 0016:** quests have no time budget - questing is every bot's
+  way forward, and 2 hours cut it off for an hour; and a way out of hostile
+  territory never leads into a zone above the bot's level (a level-5 troll
+  pushed out of Elwynn slid on to the Blasted Lands) - with none, the
+  hearthstone takes it home. (meksha, 2026-11-01.)
 
 `roster apply` writes the database only while the world server is stopped:
 guilds and characters live in its memory, and a change made under it is
