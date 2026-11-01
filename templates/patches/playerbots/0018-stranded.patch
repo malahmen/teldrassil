@@ -1,0 +1,291 @@
+diff --git a/playerbot/strategy/actions/ChooseTravelTargetAction.cpp b/playerbot/strategy/actions/ChooseTravelTargetAction.cpp
+index e752240..f4136f5 100644
+--- a/playerbot/strategy/actions/ChooseTravelTargetAction.cpp
++++ b/playerbot/strategy/actions/ChooseTravelTargetAction.cpp
+@@ -1,6 +1,7 @@
+ 
+ #include "playerbot/playerbot.h"
+ #include "playerbot/strategy/values/GatheringStalls.h"
++#include "playerbot/strategy/values/EnemyGuards.h"
+ #include "playerbot/LootObjectStack.h"
+ #include "ChooseTravelTargetAction.h"
+ #include "playerbot/PlayerbotAIConfig.h"
+@@ -328,6 +329,20 @@ inline std::string PrintPartion(uint32 sqPartition)
+ //Sets the target to the best destination.
+ bool ChooseTravelTargetAction::SetBestTarget(Player* requester, TravelTarget* target, PartitionedTravelList& partitionedList, bool onlyActive)
+ {
++    // kalimdor: below the level cap, upkeep - vendors, repairs, the auction
++    // house, mail, bank, trainers, mounts, cities - never sends a bot into
++    // hostile territory; the nearest place on friendly or neutral ground
++    // instead (owner, 2026-11-01). Horde bots went to sell to the Defias
++    // Profiteer in Westfall, were pushed out by its guards and slid on into
++    // the Swamp of Sorrows (dev server).
++    std::string const purpose = AI_VALUE2(std::string, "manual string", "future travel purpose");
++    static const std::set<std::string> upkeep = {
++        std::to_string((uint32)TravelDestinationPurpose::AH), std::to_string((uint32)TravelDestinationPurpose::Vendor),
++        std::to_string((uint32)TravelDestinationPurpose::Repair), std::to_string((uint32)TravelDestinationPurpose::Mail),
++        std::to_string((uint32)TravelDestinationPurpose::Bank), "trainer class", "trainer mount", "trainer trade",
++        "mount", "city", "reagent vendor" };
++    bool const keepOffHostile = upkeep.count(purpose) && bot->GetLevel() < sWorld.getConfig(CONFIG_UINT32_MAX_PLAYER_LEVEL);
++
+     bool distanceCheck = true;
+     std::unordered_map<TravelDestination*, bool> isActive;
+ 
+@@ -347,6 +362,9 @@ bool ChooseTravelTargetAction::SetBestTarget(Player* requester, TravelTarget* ta
+             if (dynamic_cast<GatherTravelDestination*>(destination) && GatheringStalls::IsGivenUp(ai, position))
+                 continue;
+ 
++            if (keepOffHostile && EnemyGuards::IsHostileTerritory(*position, bot))
++                continue;
++
+             if (distanceCheck) //Check if we have moved significantly after getting the destinations.
+             {
+                 WorldPosition center(requester ? requester : bot);
+diff --git a/playerbot/strategy/actions/MoveAwayFromEnemyGuardAction.cpp b/playerbot/strategy/actions/MoveAwayFromEnemyGuardAction.cpp
+index 5345ad1..9625254 100644
+--- a/playerbot/strategy/actions/MoveAwayFromEnemyGuardAction.cpp
++++ b/playerbot/strategy/actions/MoveAwayFromEnemyGuardAction.cpp
+@@ -130,10 +130,23 @@ bool LeaveHostileTerritoryAction::Execute(Event& event)
+             // Elwynn was sent to Redridge's Three Corners and slid on to the
+             // Blasted Lands. With no such way out, the hearthstone takes it
+             // home.
++            // A zone of the owner's list must not start above the bot's level;
++            // one not on it (cities, dungeon entrances) must be its own
++            // faction's - stranded bots were sent to the Sunken Temple's
++            // entrance zone (dev server, 2026-11-01).
++            uint32 const zone = sTerrainMgr.GetZoneId(position->getMapId(), position->getX(), position->getY(), position->getZ());
+             uint32 zoneMin = 0, zoneMax = 0;
+-            if (ZoneLevels::Range(sTerrainMgr.GetZoneId(position->getMapId(), position->getX(), position->getY(), position->getZ()), zoneMin, zoneMax) &&
+-                bot->GetLevel() < zoneMin)
+-                continue;
++            if (ZoneLevels::Range(zone, zoneMin, zoneMax))
++            {
++                if (bot->GetLevel() < zoneMin)
++                    continue;
++            }
++            else
++            {
++                AreaTableEntry const* zoneEntry = GetAreaEntryByAreaID(zone);
++                if (!zoneEntry || !(zoneEntry->team & (bot->GetTeam() == ALLIANCE ? AREATEAM_ALLY : AREATEAM_HORDE)))
++                    continue;
++            }
+ 
+             if (!start->hasRouteTo(node))
+                 continue;
+@@ -210,7 +223,15 @@ bool LeaveHostileTerritoryAction::Execute(Event& event)
+     std::string const here = botPosition.getAreaName();
+     std::string const there = exit->getAreaName();
+     bool const together = leader != bot || bot->GetGroup();
+-    std::vector<std::string> const lines = {
++    // Out of its depth rather than among the enemy (ZoneLevels::Stranded).
++    std::string const from = AI_VALUE2(std::string, "manual string", "leave from");
++    bool const outOfDepth = from == "a zone above its level";
++    std::vector<std::string> const deep = {
++        here + " is too much for " + std::string(together ? "us" : "me") + ". Heading back to " + there + ".",
++        "Everything in " + here + " wants " + std::string(together ? "us" : "me") + " dead. Making for " + there + ".",
++        "Wrong place for " + std::string(together ? "us" : "me") + " - " + here + " can wait. Off to " + there + ".",
++    };
++    std::vector<std::string> const lines = outOfDepth ? deep : std::vector<std::string>{
+         "Too many guards in " + here + " for the likes of " + std::string(together ? "us" : "me") + ". Heading for " + there + ".",
+         here + " is crawling with guards. " + std::string(together ? "We're" : "I'm") + " making for " + there + ".",
+         "No getting past the guards here. Back towards " + there + " it is.",
+@@ -218,9 +239,10 @@ bool LeaveHostileTerritoryAction::Execute(Event& event)
+     };
+     ai->SayToGeneral(lines[urand(0, lines.size() - 1)]);
+ 
+-    sLog.outString("Bot #%d %s:%d <%s> in %s (%s): %s walks out of hostile territory to %s", bot->GetGUIDLow(),
++    sLog.outString("Bot #%d %s:%d <%s> in %s (%s): %s walks out of %s to %s", bot->GetGUIDLow(),
+         bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), here.c_str(),
+         AI_VALUE2(std::string, "manual string", "leave reason").c_str(),
+-        leader == bot ? "it" : (std::string("its group, led by ") + leader->GetName() + ",").c_str(), there.c_str());
++        leader == bot ? "it" : (std::string("its group, led by ") + leader->GetName() + ",").c_str(),
++        from.empty() ? "hostile territory" : from.c_str(), there.c_str());
+     return true;
+ }
+diff --git a/playerbot/strategy/triggers/GenericTriggers.cpp b/playerbot/strategy/triggers/GenericTriggers.cpp
+index 6423bd2..01e1b21 100644
+--- a/playerbot/strategy/triggers/GenericTriggers.cpp
++++ b/playerbot/strategy/triggers/GenericTriggers.cpp
+@@ -2,6 +2,7 @@
+ #include "playerbot/playerbot.h"
+ #include "GenericTriggers.h"
+ #include "playerbot/strategy/values/EnemyGuards.h"
++#include "playerbot/strategy/values/ZoneLevels.h"
+ #include "playerbot/TravelMgr.h"
+ #include "playerbot/LootObjectStack.h"
+ #include "playerbot/PlayerbotAIConfig.h"
+@@ -800,7 +801,12 @@ bool BlockedInHostileTerritoryTrigger::IsActive()
+     // Sent out lately: not judged again - unless the way out stalls (below).
+     bool const leaving = now - AI_VALUE2(time_t, "manual time", "left hostile territory") < EnemyGuards::LeaveTime;
+ 
+-    if (!EnemyGuards::IsHostileTerritory(WorldPosition(bot), bot))
++    // kalimdor: or stranded - in a zone more than 5 levels above the bot,
++    // contested or hostile (owner, 2026-11-01; values/ZoneLevels.h): judged
++    // the same way, an objective counting only in this zone or a neighbour.
++    bool const hostile = EnemyGuards::IsHostileTerritory(WorldPosition(bot), bot);
++    bool const stranded = !hostile && ZoneLevels::Stranded(bot);
++    if (!hostile && !stranded)
+     {
+         SET_AI_VALUE2(time_t, "manual time", "no objective since", 0);
+         SET_AI_VALUE2(std::string, "manual string", "hostile objective logged", "");
+@@ -831,6 +837,18 @@ bool BlockedInHostileTerritoryTrigger::IsActive()
+     // ...and one the bot is getting to: on this continent, and nearer by
+     // ProgressYards within NoObjectiveTime unless already within WorkRange.
+     std::string lacking = "no objective here";
++    if (stranded)
++    {
++        lacking = "no objective in this zone or a neighbouring one";
++        if (objective && !toExit && target->GetPosition())
++        {
++            WorldPosition const* goal = target->GetPosition();
++            goal->loadMapAndVMap(0);
++            uint32 const goalZone = sTerrainMgr.GetZoneId(goal->getMapId(), goal->getX(), goal->getY(), goal->getZ());
++            if (goal->getMapId() != bot->GetMapId() || !ZoneLevels::SameOrNeighbour(bot->GetZoneId(), goalZone))
++                objective = false;
++        }
++    }
+     if (objective && target->GetPosition())
+     {
+         WorldPosition const* goal = target->GetPosition();
+@@ -869,9 +887,9 @@ bool BlockedInHostileTerritoryTrigger::IsActive()
+     if (doing != AI_VALUE2(std::string, "manual string", "hostile objective logged"))
+     {
+         SET_AI_VALUE2(std::string, "manual string", "hostile objective logged", doing);
+-        sLog.outString("Bot #%d %s:%d <%s> in %s (hostile territory): objective %s%s", bot->GetGUIDLow(),
++        sLog.outString("Bot #%d %s:%d <%s> in %s (%s): objective %s%s", bot->GetGUIDLow(),
+             bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), WorldPosition(bot).getAreaName().c_str(),
+-            doing.c_str(), judged != ai ? " (its group leader's)" : "");
++            stranded ? "above its level" : "hostile territory", doing.c_str(), judged != ai ? " (its group leader's)" : "");
+     }
+ 
+     // Sent out lately: only a stalled way out is judged again, at once - it
+@@ -885,6 +903,7 @@ bool BlockedInHostileTerritoryTrigger::IsActive()
+         SET_AI_VALUE2(std::string, "manual string", "failed exits", failed + EnemyGuards::ExitKey(*target->GetPosition()) + " ");
+         SET_AI_VALUE2(int32, "manual int", "failed exit count", AI_VALUE2(int32, "manual int", "failed exit count") + 1);
+         SET_AI_VALUE2(std::string, "manual string", "leave reason", lacking);
++        SET_AI_VALUE2(std::string, "manual string", "leave from", stranded ? "a zone above its level" : "hostile territory");
+         return true;
+     }
+ 
+@@ -929,6 +948,7 @@ bool BlockedInHostileTerritoryTrigger::IsActive()
+         return false;
+ 
+     SET_AI_VALUE2(std::string, "manual string", "leave reason", reason);
++    SET_AI_VALUE2(std::string, "manual string", "leave from", stranded ? "a zone above its level" : "hostile territory");
+     return true;
+ }
+ 
+diff --git a/playerbot/strategy/values/HomeBinds.cpp b/playerbot/strategy/values/HomeBinds.cpp
+index 4688841..40af6ee 100644
+--- a/playerbot/strategy/values/HomeBinds.cpp
++++ b/playerbot/strategy/values/HomeBinds.cpp
+@@ -72,7 +72,13 @@ bool HomeBinds::Allowed(Player* bot, const WorldPosition& bind)
+     uint32 zone = 0, area = 0;
+     sTerrainMgr.GetZoneAndAreaId(zone, area, bind.getMapId(), bind.getX(), bind.getY(), bind.getZ());
+ 
++    // The default home is known by where its innkeeper stands, not by a zone
++    // lookup - that needs the map loaded there, and failing, a tauren was
++    // bound to Bloodhoof Village once a minute, forever (dev server,
++    // 2026-11-01).
+     Inn const* home = DefaultInn(bot);
++    if (home && home->map == bind.getMapId() && bind.distance(WorldPosition(home->map, home->x, home->y, home->z)) < 50.0f)
++        return true;
+     if (home && zone && zone == home->zone)
+         return true;
+ 
+diff --git a/playerbot/strategy/values/ZoneLevels.cpp b/playerbot/strategy/values/ZoneLevels.cpp
+index 3e6e143..7a06d7b 100644
+--- a/playerbot/strategy/values/ZoneLevels.cpp
++++ b/playerbot/strategy/values/ZoneLevels.cpp
+@@ -3,6 +3,7 @@
+ #include "EnemyGuards.h"
+ #include "playerbot/ServerFacade.h"
+ #include "playerbot/TravelMgr.h"
++#include "playerbot/TravelNode.h"
+ 
+ #include <map>
+ #include <mutex>
+@@ -119,3 +120,61 @@ bool ZoneLevels::MayShortcutTo(Player* bot, const WorldPosition& to)
+             bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), to.getAreaName().c_str(), min);
+     return false;
+ }
++
++bool ZoneLevels::Stranded(Player* bot)
++{
++    uint32_t min = 0, max = 0;
++    if (!Range(bot->GetZoneId(), min, max) || min <= bot->GetLevel() + StrandedAbove)
++        return false;
++
++    // Not its own faction's zone: contested, or the other faction's.
++    AreaTableEntry const* zone = GetAreaEntryByAreaID(bot->GetZoneId());
++    uint32 const own = bot->GetTeam() == ALLIANCE ? AREATEAM_ALLY : AREATEAM_HORDE;
++    return !zone || !(zone->team & own);
++}
++
++namespace
++{
++    std::set<std::pair<uint32_t, uint32_t>> neighbours;
++    std::once_flag neighboursFound;
++
++    // Every pair of zones a walking link of the travel graph joins - read
++    // once; a node's zone needs its map loaded there.
++    void FindNeighbours()
++    {
++        std::map<TravelNode*, uint32_t> zoneOf;
++        for (TravelNode* node : sTravelNodeMap.getNodes())
++        {
++            WorldPosition* position = node->getPosition();
++            position->loadMapAndVMap(0);
++            zoneOf[node] = sTerrainMgr.GetZoneId(position->getMapId(), position->getX(), position->getY(), position->getZ());
++        }
++
++        for (auto const& [node, zone] : zoneOf)
++        {
++            for (auto const& [other, path] : *node->getLinks())
++            {
++                if (!path || path->getPathType() != TravelNodePathType::walk)
++                    continue;
++
++                auto it = zoneOf.find(other);
++                if (it != zoneOf.end() && it->second != zone && zone && it->second)
++                {
++                    neighbours.insert({ zone, it->second });
++                    neighbours.insert({ it->second, zone });
++                }
++            }
++        }
++
++        sLog.outString("Zone neighbours on foot: %u pairs, from the travel graph.", uint32(neighbours.size() / 2));
++    }
++}
++
++bool ZoneLevels::SameOrNeighbour(uint32_t zoneA, uint32_t zoneB)
++{
++    if (zoneA == zoneB)
++        return true;
++
++    std::call_once(neighboursFound, FindNeighbours);
++    return neighbours.count({ zoneA, zoneB }) > 0;
++}
+diff --git a/playerbot/strategy/values/ZoneLevels.h b/playerbot/strategy/values/ZoneLevels.h
+index f96079a..b7fe94e 100644
+--- a/playerbot/strategy/values/ZoneLevels.h
++++ b/playerbot/strategy/values/ZoneLevels.h
+@@ -34,5 +34,17 @@ namespace ai
+         // Blasted Lands, a level-2 human in Westfall (meksha). A GM's
+         // teleports do not come here.
+         static bool MayShortcutTo(Player* bot, const class WorldPosition& to);
++        // Stranded: the bot stands in a zone whose range starts more than
++        // StrandedAbove levels above its own, contested or hostile - not its
++        // own faction's (owner, 2026-11-01). With no objective there or in a
++        // neighbouring zone it walks out, as from hostile territory (210): a
++        // level-5 troll sat 5 hours in the Swamp of Sorrows, his quests
++        // across the sea.
++        static constexpr uint32_t StrandedAbove = 5;
++        static bool Stranded(Player* bot);
++        // Two zones are the same, or neighbours on foot - linked by a walking
++        // route of the travel graph (boats, flights and portals do not make
++        // neighbours).
++        static bool SameOrNeighbour(uint32_t zoneA, uint32_t zoneB);
+     };
+ }
