@@ -126,10 +126,19 @@ index 1fcace2..d7de254 100644
          // The goal a travel condition asks for ("and::{...,goal open::quests}"),
          // or "".
 diff --git a/playerbot/strategy/values/ZoneLevels.cpp b/playerbot/strategy/values/ZoneLevels.cpp
-index c7f0bf4..f10d970 100644
+index c7f0bf4..3e6e143 100644
 --- a/playerbot/strategy/values/ZoneLevels.cpp
 +++ b/playerbot/strategy/values/ZoneLevels.cpp
-@@ -99,3 +99,13 @@ bool ZoneLevels::MayHuntHere(Player* bot)
+@@ -5,6 +5,8 @@
+ #include "playerbot/TravelMgr.h"
+ 
+ #include <map>
++#include <mutex>
++#include <set>
+ 
+ using namespace ai;
+ 
+@@ -99,3 +101,21 @@ bool ZoneLevels::MayHuntHere(Player* bot)
  {
      return Outlevelled(bot) && !EnemyGuards::IsSafeHaven(WorldPosition(bot), bot) && EnemyPlayerInZone(bot);
  }
@@ -138,10 +147,18 @@ index c7f0bf4..f10d970 100644
 +{
 +    to.loadMapAndVMap(0);
 +    uint32_t min = 0, max = 0;
-+    if (!Range(sTerrainMgr.GetZoneId(to.getMapId(), to.getX(), to.getY(), to.getZ()), min, max))
++    uint32_t const zone = sTerrainMgr.GetZoneId(to.getMapId(), to.getX(), to.getY(), to.getZ());
++    if (!Range(zone, min, max) || bot->GetLevel() >= min)
 +        return true;
 +
-+    return bot->GetLevel() >= min;
++    // Said once per bot and zone, so the log shows who had to walk where.
++    static std::mutex saidLock;
++    static std::set<std::string> said;
++    std::lock_guard<std::mutex> guard(saidLock);
++    if (said.insert(std::to_string(bot->GetGUIDLow()) + ":" + std::to_string(zone)).second)
++        sLog.outString("Bot #%d %s:%d <%s>: walks into %s (from level %u), no shortcut", bot->GetGUIDLow(),
++            bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), to.getAreaName().c_str(), min);
++    return false;
 +}
 diff --git a/playerbot/strategy/values/ZoneLevels.h b/playerbot/strategy/values/ZoneLevels.h
 index 53d259e..f96079a 100644
