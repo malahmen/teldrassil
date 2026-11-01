@@ -283,7 +283,7 @@ See `examples/roster.example.json`. The rules it enforces:
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries seventeen changes to playerbots (`templates/patches/playerbots/`)
+teldrassil carries eighteen changes to playerbots (`templates/patches/playerbots/`)
 and two to the core (`templates/patches/mangos-classic/`), applied before
 every build:
 
@@ -399,6 +399,14 @@ every build:
   one of any quest. With quests x and y, after killing an x mob a nearer y
   mob goes next; upstream finished one objective before looking past its
   sight, walking past other quests' objectives (Kamino 231, 2026-11-01).
+- **playerbots 0018:** a bot stranded in a zone more than 5 levels above it,
+  contested or hostile, with no objective there or in a neighbouring zone,
+  walks out as from hostile territory - to a zone at its level or its own
+  faction's city, the hearthstone home after two failed ways out (a level-5
+  troll sat 5 hours in the Swamp of Sorrows; meksha, 2026-11-01). Below the
+  level cap, upkeep (vendors, repairs, the auction house, mail, bank,
+  trainers) never sends a bot into hostile territory, and the default home
+  is known by its innkeeper's position (a bot was rebound once a minute).
 - **playerbots 0016:** quests have no time budget - questing is every bot's
   way forward, and 2 hours cut it off for an hour; and a way out of hostile
   territory never leads into a zone above the bot's level (a level-5 troll
