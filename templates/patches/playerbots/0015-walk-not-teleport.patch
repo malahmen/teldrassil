@@ -1,0 +1,162 @@
+diff --git a/playerbot/strategy/actions/MovementActions.cpp b/playerbot/strategy/actions/MovementActions.cpp
+index 79f6a2b..7ba9051 100644
+--- a/playerbot/strategy/actions/MovementActions.cpp
++++ b/playerbot/strategy/actions/MovementActions.cpp
+@@ -16,6 +16,7 @@
+ #include "Entities/Vehicle.h"
+ #endif
+ #include "playerbot/strategy/generic/CombatStrategy.h"
++#include "playerbot/strategy/values/ZoneLevels.h"
+ 
+ using namespace ai;
+ 
+@@ -209,7 +210,8 @@ bool MovementAction::FlyDirect(const WorldPosition &startPosition, const WorldPo
+             movePosition = movePosition.limit(startPosition, maxDist);
+     }
+ 
+-    if (totalDistance > maxDist && !detailedMove && !ai->HasPlayerNearby(movePosition)) //Why walk if you can fly?
++    // kalimdor: ... but walk into a zone above the bot's level (values/ZoneLevels.h).
++    if (totalDistance > maxDist && !detailedMove && !ai->HasPlayerNearby(movePosition) && ZoneLevels::MayShortcutTo(bot, movePosition)) //Why walk if you can fly?
+     {
+         time_t now = time(0);
+ 
+@@ -1224,7 +1226,8 @@ bool MovementAction::MoveTo2(const WorldPosition& endPos, bool idle, bool react,
+     if (totalDistance > sPlayerbotAIConfig.reactDistance && !detailedMove)
+     {
+         WorldPosition teleportPosition = movePath.getBack();
+-        if (!ai->HasPlayerNearby(teleportPosition))
++        // kalimdor: but walk into a zone above the bot's level (values/ZoneLevels.h).
++        if (!ai->HasPlayerNearby(teleportPosition) && ZoneLevels::MayShortcutTo(bot, teleportPosition))
+         {
+             time_t now = time(0);
+             lastMove.nextTeleport = now + (time_t)MoveDelay(startPos.distance(teleportPosition));
+@@ -2069,7 +2072,8 @@ bool MovementAction::MoveTo(uint32 mapId, float x, float y, float z, bool idle,
+             mover->InterruptMoving(true);
+     }
+ 
+-    if (totalDistance > maxDist && !detailedMove && !ai->HasPlayerNearby(movePosition)) //Why walk if you can fly?
++    // kalimdor: ... but walk into a zone above the bot's level (values/ZoneLevels.h).
++    if (totalDistance > maxDist && !detailedMove && !ai->HasPlayerNearby(movePosition) && ZoneLevels::MayShortcutTo(bot, movePosition)) //Why walk if you can fly?
+     {
+         time_t now = time(0);
+ 
+diff --git a/playerbot/strategy/generic/TravelStrategy.cpp b/playerbot/strategy/generic/TravelStrategy.cpp
+index b46a9f5..549b9b5 100644
+--- a/playerbot/strategy/generic/TravelStrategy.cpp
++++ b/playerbot/strategy/generic/TravelStrategy.cpp
+@@ -21,7 +21,10 @@ float TravelActionMultiplier::GetValue(Action* action)
+             return 1.0f;
+         if (name.find("reagent vendor") != std::string::npos)
+             return 1.0f;
+-        if (name.find("guild order") != std::string::npos)
++        // kalimdor: for a bot with an archetype a farm order is its gather
++        // goal (owner, 2026-11-01) and waits its turn like one - it does not
++        // cut in on a target being pursued.
++        if (name.find("guild order") != std::string::npos && !Archetypes::Of(ai->GetBot()))
+             return 1.0f;
+ 
+         return 0.0f;
+@@ -183,6 +186,12 @@ void TravelStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
+             goal = "wpvp";
+         else if (trigger == "val::has strategy::rpg quest")
+             goal = "quests";
++        // kalimdor: a farm order (guild order) is the gather goal of a bot
++        // with an archetype (owner, 2026-11-01): ranked and held as gather.
++        // It ranked above everything - a level-6 farmer farmed for his guild
++        // and never quested (meksha).
++        else if (archetype && trigger == "val::should travel named::guild order")
++            goal = "gather";
+         if (!goal.empty())
+             ranked = relevanceOf(goal, relevance);
+ 
+diff --git a/playerbot/strategy/values/Goals.cpp b/playerbot/strategy/values/Goals.cpp
+index ddbedab..b9d4b32 100644
+--- a/playerbot/strategy/values/Goals.cpp
++++ b/playerbot/strategy/values/Goals.cpp
+@@ -6,6 +6,13 @@
+ 
+ using namespace ai;
+ 
++bool Goals::CanGather(Player* bot)
++{
++    return bot->GetSkillValue(SKILL_HERBALISM) ||
++        (bot->GetSkillValue(SKILL_MINING) && bot->HasItemCount(2901, 1)) ||    // Mining Pick
++        (bot->GetSkillValue(SKILL_SKINNING) && bot->HasItemCount(7005, 1));    // Skinning Knife
++}
++
+ bool Goals::Reached(PlayerbotAI* ai, const std::string& activity)
+ {
+     // lvl60 - grinding to level - is reached at the cap. Grinding for money
+@@ -86,6 +93,14 @@ bool GoalOpenValue::Calculate()
+     if (Goals::Reached(ai, activity))
+         return false;
+ 
++    // Gathering - farm orders included - needs a gathering profession it can
++    // use: herbalism, or mining with a Mining Pick, or skinning with a
++    // Skinning Knife (owner, 2026-11-01). With levels from 1 a bot has none
++    // until it learns one, and buys the tool (upstream counts it as needed
++    // once it has the skill).
++    if (activity == "gather" && !Goals::CanGather(bot))
++        return false;
++
+     time_t const now = time(nullptr);
+     if (AI_VALUE2(time_t, "manual time", "goal cooldown " + activity) > now)
+         return false;
+diff --git a/playerbot/strategy/values/Goals.h b/playerbot/strategy/values/Goals.h
+index 1fcace2..d7de254 100644
+--- a/playerbot/strategy/values/Goals.h
++++ b/playerbot/strategy/values/Goals.h
+@@ -16,6 +16,8 @@
+ //                       questing for an hour on one, on meksha 2026-10-31);
+ //   out of time:        pursued past its budget (bosses BossBudget, the rest
+ //                       Budget) - then not reachable now.
++// gather (farm orders included, TravelStrategy) is open only to a bot with a
++// gathering profession it can use - and its tool (CanGather).
+ // For a bot with an archetype only (values/Archetypes.h): its activity
+ // triggers ask "goal open::<activity>" (TravelStrategy), and the travel target
+ // choice reports what it found (ChooseTravelTargetAction). Upkeep - vendors,
+@@ -35,6 +37,9 @@ namespace ai
+         static constexpr time_t MissWindow = 5 * 60;
+ 
+         static bool Reached(PlayerbotAI* ai, const std::string& activity);
++        // A gathering profession it can use: herbalism, mining with a Mining
++        // Pick, skinning with a Skinning Knife.
++        static bool CanGather(Player* bot);
+         static time_t BudgetOf(const std::string& activity);
+         // The goal a travel condition asks for ("and::{...,goal open::quests}"),
+         // or "".
+diff --git a/playerbot/strategy/values/ZoneLevels.cpp b/playerbot/strategy/values/ZoneLevels.cpp
+index c7f0bf4..f10d970 100644
+--- a/playerbot/strategy/values/ZoneLevels.cpp
++++ b/playerbot/strategy/values/ZoneLevels.cpp
+@@ -99,3 +99,13 @@ bool ZoneLevels::MayHuntHere(Player* bot)
+ {
+     return Outlevelled(bot) && !EnemyGuards::IsSafeHaven(WorldPosition(bot), bot) && EnemyPlayerInZone(bot);
+ }
++
++bool ZoneLevels::MayShortcutTo(Player* bot, const WorldPosition& to)
++{
++    to.loadMapAndVMap(0);
++    uint32_t min = 0, max = 0;
++    if (!Range(sTerrainMgr.GetZoneId(to.getMapId(), to.getX(), to.getY(), to.getZ()), min, max))
++        return true;
++
++    return bot->GetLevel() >= min;
++}
+diff --git a/playerbot/strategy/values/ZoneLevels.h b/playerbot/strategy/values/ZoneLevels.h
+index 53d259e..f96079a 100644
+--- a/playerbot/strategy/values/ZoneLevels.h
++++ b/playerbot/strategy/values/ZoneLevels.h
+@@ -27,5 +27,12 @@ namespace ai
+         // The bot may hunt enemy players where it is (all three above, and
+         // not in a neutral town).
+         static bool MayHuntHere(Player* bot);
++        // The bot may be moved there by playerbots' travel shortcut - the
++        // jump along its path while no player is near: not into a zone whose
++        // range starts above its level (owner, 2026-11-01). There it walks,
++        // and the way's dangers are real; a level-5 troll was found in the
++        // Blasted Lands, a level-2 human in Westfall (meksha). A GM's
++        // teleports do not come here.
++        static bool MayShortcutTo(Player* bot, const class WorldPosition& to);
+     };
+ }

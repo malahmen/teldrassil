@@ -283,7 +283,7 @@ See `examples/roster.example.json`. The rules it enforces:
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries fourteen changes to playerbots (`templates/patches/playerbots/`)
+teldrassil carries fifteen changes to playerbots (`templates/patches/playerbots/`)
 and two to the core (`templates/patches/mangos-classic/`), applied before
 every build:
 
@@ -386,6 +386,14 @@ every build:
   with no one to hunt, it quests. Only at the cap is it sent to the world-PvP
   spots. This replaces 0012's level-55 gate: a level-1 wpvper sent to a spot
   was stranded at Ratchet (meksha, 2026-10-31).
+- **playerbots 0015:** bots walk into zones above their level: playerbots'
+  shortcut - jumping a bot along its path while no player is near - never
+  lands it in a zone whose range starts above its level (a level-5 troll was
+  found in the Blasted Lands); flight paths, boats, portals and a GM's
+  teleports are untouched. For a bot with an archetype a farm order is its
+  `gather` goal, no longer above everything (farmers farmed and never
+  quested), and gathering needs a profession it can use: herbalism, mining
+  with a Mining Pick, skinning with a Skinning Knife. (meksha, 2026-11-01.)
 
 `roster apply` writes the database only while the world server is stopped:
 guilds and characters live in its memory, and a change made under it is
