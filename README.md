@@ -314,7 +314,7 @@ See `examples/roster.example.json`. The rules it enforces:
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries eighteen changes to playerbots (`templates/patches/playerbots/`)
+teldrassil carries nineteen changes to playerbots (`templates/patches/playerbots/`)
 and two to the core (`templates/patches/mangos-classic/`), applied before
 every build:
 
@@ -438,6 +438,10 @@ every build:
   level cap, upkeep (vendors, repairs, the auction house, mail, bank,
   trainers) never sends a bot into hostile territory, and the default home
   is known by its innkeeper's position (a bot was rebound once a minute).
+- **playerbots 0019:** a fix for a crash. The quest re-choice (0017) emptied
+  the travel target while a cached "travelling" still let the move action
+  read its missing position; the target is now only expired, and the move
+  action skips a target without a position (dev server, 2026-11-02).
 - **playerbots 0016:** quests have no time budget - questing is every bot's
   way forward, and 2 hours cut it off for an hour; and a way out of hostile
   territory never leads into a zone above the bot's level (a level-5 troll
