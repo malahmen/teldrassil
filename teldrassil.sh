@@ -85,7 +85,14 @@ Server:
                                 argument with a line break is refused).
                                 Refuses 'rndbot c' and 'rndbot do': a bot chat
                                 command from the console gets no answer and has
-                                crashed the server - send those in game.
+                                crashed the server - send those in game. Refuses
+                                'account create' and 'account set password' as
+                                arguments: they carry a password
+  console --stdin               the same, one command per line of stdin (blank
+                                lines skipped; a line with a carriage return is
+                                refused, and nothing is sent). Password commands
+                                are allowed here and printed masked; exits non-
+                                zero if the console reports a command failed
   console-account [--file F]    create teldrassil's console account (TELDRASSIL,
                                 level 3) with a new random password kept in F
                                 (default ~/.config/teldrassil/console-PROFILE.txt),
@@ -95,6 +102,9 @@ Server:
 Accounts:
   create-account --name N (--pass-file F | --pass-stdin) [--level 0-3]
                                 not a name starting with BOT_ACCOUNT_PREFIX
+  set-account-password --name N --pass-stdin
+                                a new password (the first line of stdin, 4-16
+                                characters) for an existing account; not a bot's
   set-account-level --name N --level 0-3     takes effect at the next full login
   list-accounts [--bots]
   delete-account --name N --yes              only an account with no characters
@@ -118,10 +128,20 @@ Administration:
                                 gzipped, 0600, to ~/.config/teldrassil/dumps by
                                 default. Carries CREATE DATABASE, except --tables.
                                 An existing file is replaced only with --force;
-                                a dump that fails leaves no file
+                                a dump that fails leaves no file.
+                                --db DB_REALMD with --tables among "account
+                                account_banned realmcharacters" (account
+                                included) is an accounts-only dump: rows only,
+                                no DROP or CREATE TABLE, marked as such
   restore --file PATH --yes [--db NAME]
                                 DESTRUCTIVE: replaces the databases the dump
-                                names; with the world server stopped
+                                names; with the world server stopped.
+                                An accounts-only dump is MERGED instead, by
+                                name, into DB_REALMD (or --db): an account of
+                                the same name gets the dump's password, GM
+                                level and lock; a new one is added. The
+                                target's bot accounts (BOT_ACCOUNT_PREFIX) and
+                                console account are never touched
 
 Roster (one JSON file: shaped bots, guilds, ranks, tabards, cards, LLM, population):
   roster check [--file F]       validate it
@@ -226,6 +246,7 @@ main() {
         console)            cmd_console "$@" ;;
         console-account)    cmd_console_account "$@" ;;
         create-account)     cmd_create_account "$@" ;;
+        set-account-password) cmd_set_account_password "$@" ;;
         set-account-level)  cmd_set_account_level "$@" ;;
         list-accounts)      cmd_list_accounts "$@" ;;
         delete-account)     cmd_delete_account "$@" ;;

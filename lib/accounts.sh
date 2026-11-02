@@ -1,6 +1,6 @@
 # shellcheck shell=bash
-# lib/accounts.sh — Accounts: create-account, set-account-level, list-accounts,
-# delete-account.
+# lib/accounts.sh — Accounts: create-account, set-account-password,
+# set-account-level, list-accounts, delete-account.
 #
 # Part of teldrassil.sh, which sources it; not meant to run on its own.
 
@@ -37,18 +37,57 @@ cmd_create_account() {
     else
         error_exit "Give the password with --pass-file FILE or --pass-stdin; it is never taken as an argument."
     fi
-    [[ ${#password} -ge 4 && ${#password} -le 16 ]] || error_exit "A 1.12.1 password is 4-16 characters."
+    _password_ok "$password"
     _require_db
     name="${name^^}"
     [[ "$(_db_value "SELECT COUNT(*) FROM ${DB_REALMD}.account WHERE username=$(_sql_str "$name");")" == "0" ]] \
         || error_exit "Account ${name} already exists."
-    read -r v s < <(printf '%s\n' "$password" | helper srp6 --user "$name")
+    read -r v s < <(_srp6 "$name" "$password")
     unset password
     printf '%s\n' \
         "INSERT INTO ${DB_REALMD}.account (username, v, s, gmlevel, joindate) VALUES ($(_sql_str "$name"), '${v}', '${s}', ${level}, NOW());" \
         "INSERT INTO ${DB_REALMD}.realmcharacters (realmid, acctid, numchars) SELECT r.id, a.id, 0 FROM ${DB_REALMD}.realmlist r JOIN ${DB_REALMD}.account a ON a.username=$(_sql_str "$name") LEFT JOIN ${DB_REALMD}.realmcharacters rc ON rc.acctid=a.id AND rc.realmid=r.id WHERE rc.acctid IS NULL;" \
         | _db_raw
     success "Account ${name} created (level ${level})."
+}
+
+# _password_ok <password> — what a 1.12.1 client can log in with.
+_password_ok() {
+    [[ ${#1} -ge 4 && ${#1} -le 16 ]] || error_exit "A 1.12.1 password is 4-16 characters."
+}
+
+# _srp6 <NAME> <password> — "verifier salt". The password goes to the helper
+# on its stdin (printf is a builtin: it is on no command line).
+_srp6() { printf '%s\n' "$2" | helper srp6 --user "$1"; }
+
+# set-account-password --name NAME --pass-stdin — a new SRP6 verifier and salt
+# for an existing account, as create-account makes them; the password is the
+# first line of stdin, never an argument (nor one of podman's: only the
+# verifier and salt reach the database, on its stdin).
+cmd_set_account_password() {
+    local name="" from_stdin=0 password="" v s
+    while [[ $# -gt 0 ]]; do case "$1" in
+        --name)       _need_value "$@"; name="$2"; shift 2 ;;
+        --pass-stdin) from_stdin=1; shift ;;
+        *) error_exit "set-account-password: unknown flag $1" ;;
+    esac; done
+    [[ -n "$name" ]] || error_exit "Usage: set-account-password --name NAME --pass-stdin   (the password is the first line of stdin)"
+    (( from_stdin )) || error_exit "Give the password with --pass-stdin (the first line of stdin); it is never taken as an argument."
+    _account_name_ok "$name"
+    _not_bot_account "$name"
+    IFS= read -r password || true
+    _password_ok "$password"
+    _require_db
+    name="${name^^}"
+    [[ "$(_db_value "SELECT COUNT(*) FROM ${DB_REALMD}.account WHERE username=$(_sql_str "$name");")" == "1" ]] \
+        || error_exit "No account ${name}: create it with create-account."
+    read -r v s < <(_srp6 "$name" "$password")
+    unset password
+    [[ "$v" =~ ^[0-9A-Fa-f]+$ && "$s" =~ ^[0-9A-Fa-f]+$ ]] || error_exit "Could not compute the account's verifier."
+    printf '%s\n' "UPDATE ${DB_REALMD}.account SET v='${v}', s='${s}' WHERE username=$(_sql_str "$name");" | _db_raw
+    success "${name}'s password is changed. It takes effect at its next login."
+    [[ "$name" == "${RA_USER^^}" ]] && warn "${name} is the console account: put the new password in RA_PASS_FILE (${RA_PASS_FILE}), or 'console' cannot log in."
+    return 0
 }
 
 cmd_set_account_level() {

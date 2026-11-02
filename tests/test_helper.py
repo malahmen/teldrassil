@@ -604,6 +604,68 @@ class Misc(unittest.TestCase):
             os.unlink(f.name)
 
 
+class ConsoleStdin(unittest.TestCase):
+    """console --stdin (Kamino 232): password commands are recognised and
+    masked, and a failure the console reports is one."""
+
+    def test_password_commands(self):
+        for c in ["account create Alice pw", ".ACCOUNT SET PASSWORD Bob a a",
+                  "  account   set  password Bob a a", "account create"]:
+            self.assertTrue(t.PASSWORD_COMMAND.match(c), c)
+        for c in ["account set gmlevel Bob 1", "account onlinelist", "server info",
+                  "account setpassword", "say account create x y"]:
+            self.assertFalse(t.PASSWORD_COMMAND.match(c), c)
+
+    def test_masked(self):
+        self.assertEqual(t.console_shown("account create Alice S3cret"), "account create Alice ****")
+        self.assertEqual(t.console_shown(".ACCOUNT SET PASSWORD Bob N3w N3w"),
+                         ".ACCOUNT SET PASSWORD Bob **** ****")
+        self.assertEqual(t.console_shown("server info"), "server info")
+
+    def test_failures(self):
+        for out in ["There is no such command.", "Incorrect syntax.", "Account BOB does not exist",
+                    "Account with this name already exist!"]:
+            self.assertTrue(t.CONSOLE_FAILED.search(out), out)
+        self.assertFalse(t.CONSOLE_FAILED.search("Players online: 3\nUptime: 1 hour"))
+
+    def _ra(self, stdin, *args):
+        sent = []
+
+        def fake_send(host, port, user, password, commands, wait, ssh):
+            sent.extend(commands)
+            return [(c, "There is no such command." if c.startswith("bogus") else "ok") for c in commands]
+
+        with tempfile.NamedTemporaryFile("w", delete=False) as f:
+            f.write("account: ME\npassword: x\n")
+        old_send, old_stdin = t.ra_send, sys.stdin
+        t.ra_send, sys.stdin = fake_send, io.StringIO(stdin)
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out):
+                t.main(["ra", "--pass-file", f.name, *args])
+            return sent, out.getvalue(), None
+        except SystemExit as e:
+            return sent, out.getvalue(), e
+        finally:
+            t.ra_send, sys.stdin = old_send, old_stdin
+            os.unlink(f.name)
+
+    def test_commands_from_stdin(self):
+        sent, out, err = self._ra("saveall\n\n  \naccount create A S3cret\n", "--commands-stdin", "--check")
+        self.assertIsNone(err)
+        self.assertEqual(sent, ["saveall", "account create A S3cret"])
+        self.assertIn("> account create A ****", out)
+        self.assertNotIn("S3cret", out)
+
+    def test_check_fails_on_a_reported_failure(self):
+        sent, _, err = self._ra("saveall\nbogus x\nserver info\n", "--commands-stdin", "--check")
+        self.assertEqual(sent, ["saveall", "bogus x", "server info"])
+        self.assertIsNotNone(err)
+        self.assertIn("bogus x", str(err.code))
+        _, _, err = self._ra("", "bogus x")          # without --check: as before
+        self.assertIsNone(err)
+
+
 class Search(unittest.TestCase):
     ROWS = [
         {"guid": 1, "name": "Bolshemort", "race": 5, "class": 4, "level": 8, "online": 1, "zone": 14, "bot": True, "guild": "Workers"},
