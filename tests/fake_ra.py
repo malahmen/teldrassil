@@ -3,9 +3,11 @@
   python3 fake_ra.py PORT_FILE LOG [ON_RESTART]
 
 Listens on 127.0.0.1 (a free port, written to PORT_FILE), accepts any login,
-answers every command with a prompt and logs it to LOG. A 'server restart'
-command also runs ON_RESTART in a shell: the test's stand-in for what mangosd
-and the container's restart policy do next. Runs until killed."""
+answers every command with a prompt and logs it to LOG. A command whose
+first word is 'bogus' gets mangosd's answer to an unknown command first. A
+'server restart' command also runs ON_RESTART in a shell: the test's stand-in
+for what mangosd and the container's restart policy do next. Runs until
+killed."""
 import socket
 import subprocess
 import sys
@@ -47,6 +49,8 @@ def main():
                         f.write(cmd + "\n")
                     if cmd.startswith("server restart") and on_restart:
                         subprocess.Popen(["bash", "-c", on_restart])
+                    if cmd.split()[:1] == ["bogus"]:
+                        conn.sendall(b"There is no such command.\r\n")
                     conn.sendall(b"mangos>")
             except (StopIteration, OSError):
                 pass

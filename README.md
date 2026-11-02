@@ -54,8 +54,12 @@ its volume - every account and character.
   players warned, the world saved, mangosd exits and is started again - by
   its container's restart policy when mangosd exits with a failure code,
   else by teldrassil; the container's start time tells which, so a restart
-  that worked is reported as one), `status`, `save`, and the remote console.
-- **Accounts:** create one, set its GM level, list them, delete one. A name
+  that worked is reported as one), `status`, `save`, and the remote console:
+  `console COMMAND...` (one command per argument) or `console --stdin` (one
+  per line of stdin; blank lines skipped, exits non-zero if the console
+  reports a command failed).
+- **Accounts:** create one, change its password (`set-account-password
+  --name N --pass-stdin`), set its GM level, list them, delete one. A name
   starting with `BOT_ACCOUNT_PREFIX` is refused: its characters would count
   as random bots everywhere.
 - **Characters:** rename one (refused while it is online: the world server
@@ -70,7 +74,7 @@ its volume - every account and character.
   an existing file is replaced only with `--force`, and a dump that fails
   or comes out empty leaves no file behind - it is written under a temporary
   name and moved into place once whole) and `restore` (with the world server
-  stopped).
+  stopped). See *Moving accounts between servers* below.
 - **The roster:** one JSON file that says which bots are shaped on purpose and
   how - name, race, class, gender, professions, priorities, guild and rank,
   farm order, character card, preferred guild size - plus the guilds
@@ -151,7 +155,34 @@ the server containers `create --force` (stopped first) to run as you.
 stdin, and the database password is read *inside* that container from
 `DB_PASS_FILE`, or from the variable `DB_PASS_ENV` names. The console password
 is read from `RA_PASS_FILE`, and an account's password from `--pass-file` or
-`--pass-stdin`.
+`--pass-stdin` (`create-account`, `set-account-password`). A console command
+that carries a password - `account create`, `account set password` - is
+refused as an argument of `console`; send it on stdin with `console --stdin`,
+which hands the commands to the console on stdin too and prints those masked.
+
+### Moving accounts between servers
+
+```sh
+./teldrassil.sh --profile old dump --db classicrealmd \
+    --tables "account account_banned realmcharacters" --out accounts.sql.gz
+./teldrassil.sh --profile new restore --file accounts.sql.gz --yes
+```
+
+`dump --db DB_REALMD --tables` with only those tables (`account` among them)
+makes an **accounts-only dump**: rows only (`mariadb-dump --no-create-info
+--replace --complete-insert`, no DROP or CREATE TABLE), under a first line
+that marks it. `restore` recognises that line and **merges** instead of
+replacing: the dump is loaded into a staging database (`teldrassil_import`,
+dropped afterwards) and merged by account name in one transaction. An account
+the target has gets the dump's password (SRP6 verifier and salt), GM level
+and lock, and keeps its id and characters; a new one is added, with a
+`realmcharacters` row per realm, and the bans of the accounts merged come
+along. The dump's bot accounts (`BOT_ACCOUNT_PREFIX`) and console accounts
+(TELDRASSIL, `RA_USER`, the `account:` line of `RA_PASS_FILE`) are left out,
+so the target's own are never touched, nor any account the dump does not
+have. The world server may run. Any other dump - including an accounts dump
+made before this, with DROP TABLE - restores as before: it replaces, with the
+world server stopped.
 
 ### Profiles, and a server elsewhere
 
@@ -444,7 +475,8 @@ running before is left running.
 - **Never send a bot a chat command from the remote console.**
   `rndbot c <bot> ...` and `rndbot do ...` get no answer and have crashed the
   world server; `console` refuses them, and any argument with a line break
-  (the console would read a second command there).
+  (the console would read a second command there) - on stdin, any line with a
+  carriage return.
 - **cmangos creates four accounts** (ADMINISTRATOR, GAMEMASTER, MODERATOR,
   PLAYER) whose passwords are well known. `status` warns while they exist.
 

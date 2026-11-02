@@ -143,6 +143,13 @@ cmd_restart() {
 # (std::bad_weak_ptr) on the prototype.
 _console_refused() { grep -qiE -e '^[[:space:]]*\.?rndbot[[:space:]]+(c|do|chat)([[:space:]]|$)' <<<"$1"; }
 
+# Commands that carry a password - 'account create NAME PASS', 'account set
+# password NAME PASS PASS' - are refused as arguments: an argument sits in the
+# process list (here, and on SSH_HOST) for as long as the command runs. They
+# go in on stdin ('console --stdin'), or through create-account and
+# set-account-password.
+_console_has_password() { grep -qiE -e '^[[:space:]]*\.?account[[:space:]]+(create|set[[:space:]]+password)([[:space:]]|$)' <<<"$1"; }
+
 _ra() {
     [[ -n "$RA_PASS_FILE" ]] || error_exit "No console password file: set RA_PASS_FILE (a file with the console account's password)."
     [[ -r "$RA_PASS_FILE" ]] || error_exit "Cannot read RA_PASS_FILE (${RA_PASS_FILE})."
@@ -162,14 +169,43 @@ cmd_save() {
     _ra --quiet saveall
 }
 
+# _console_check <command> — the refusal every console command meets, from
+# arguments or stdin.
+_console_check() {
+    _console_refused "$1" && error_exit "Refused: '${1}'. A bot chat command from the console gets no answer and has crashed the world server. Send it in game, as the bot's master."
+    return 0
+}
+
+# console COMMAND... — one command per argument.
+# console --stdin   — one command per line of stdin; blank lines are skipped.
+# Nothing is sent unless every command passes the refusals. On stdin, a
+# password command is allowed (it never reaches a command line: the helper
+# reads the commands on its stdin too, and prints it masked), and the exit
+# status is non-zero when the console reports a command failed.
 cmd_console() {
-    [[ $# -gt 0 ]] || error_exit "Usage: console COMMAND [COMMAND...]   (each argument is one console command)"
     local c
+    if [[ "${1:-}" == --stdin ]]; then
+        [[ $# -eq 1 ]] || error_exit "Usage: console --stdin   (commands on stdin, one per line; no arguments)"
+        local -a cmds=()
+        while IFS= read -r c || [[ -n "$c" ]]; do
+            [[ "$c" == *[![:space:]]* ]] || continue
+            [[ "$c" != *$'\r'* ]] || error_exit "Refused: a console command is one line (a line on stdin held a carriage return). Nothing was sent."
+            _console_check "$c"
+            cmds+=("$c")
+        done
+        unset c
+        (( ${#cmds[@]} )) || error_exit "console --stdin: no command on stdin."
+        _server_running || error_exit "The world server is not running."
+        printf '%s\n' "${cmds[@]}" | _ra --check --commands-stdin
+        return
+    fi
+    [[ $# -gt 0 ]] || error_exit "Usage: console COMMAND [COMMAND...] | console --stdin   (each argument, or each line of stdin, is one console command)"
     for c in "$@"; do
         # The console reads a line break as the end of a command: one inside
         # an argument would send a second command past the refusals below.
         [[ "$c" != *[$'\r\n']* ]] || error_exit "Refused: a console command is one line (an argument held a line break). Give each command as its own argument."
-        _console_refused "$c" && error_exit "Refused: '${c}'. A bot chat command from the console gets no answer and has crashed the world server. Send it in game, as the bot's master."
+        _console_check "$c"
+        _console_has_password "$c" && error_exit "Refused: that command carries a password, and an argument shows in the process list. Send it with 'console --stdin' (one command per line), or use create-account / set-account-password --pass-stdin."
     done
     _server_running || error_exit "The world server is not running."
     _ra "$@"

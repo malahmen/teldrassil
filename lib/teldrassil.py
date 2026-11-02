@@ -1032,16 +1032,51 @@ def cmd_srp6(a):
     print(v, s)
 
 
+# Console commands whose arguments carry a password: 'account create NAME
+# PASS' and 'account set password NAME PASS PASS' (any case, a leading dot,
+# any spacing). They may only come in on stdin, never as arguments.
+PASSWORD_COMMAND = re.compile(r"^\s*\.?account\s+(create|set\s+password)(\s|$)", re.I)
+
+# What mangosd's console answers when a command did not do what it was asked:
+# it reports no status, only text (cmangos' language strings).
+CONSOLE_FAILED = re.compile(
+    r"there is no such (sub)?command|incorrect syntax|does not exist|already exist"
+    r"|not created|too long|passwords? (do not|don't) match|unknown error", re.I)
+
+
+def console_shown(cmd):
+    """The command as it may be printed: a password command's arguments
+    after the account name are masked."""
+    m = PASSWORD_COMMAND.match(cmd)
+    if not m:
+        return cmd
+    head = cmd[:m.end(1)]
+    rest = cmd[m.end(1):].split()
+    return " ".join([head.strip()] + rest[:1] + ["****"] * len(rest[1:]))
+
+
 def cmd_ra(a):
     password = read_secret(a.pass_file)
     user = a.user or read_user(a.pass_file)
     if not user:
         raise SystemExit("no console user: set RA_USER, or put an 'account:' line in the password file")
-    for cmd, out in ra_send(a.host, a.port, user, password, a.command, a.wait, a.ssh):
+    commands = a.command
+    if a.commands_stdin:
+        if commands:
+            raise SystemExit("ra: commands on stdin or as arguments, not both")
+        commands = [l.rstrip("\n") for l in sys.stdin if l.strip()]
+    if not commands:
+        raise SystemExit("ra: no command")
+    failed = []
+    for cmd, out in ra_send(a.host, a.port, user, password, commands, a.wait, a.ssh):
         if a.quiet:
             print(out)
         else:
-            print(f"> {cmd}\n{out}")
+            print(f"> {console_shown(cmd)}\n{out}")
+        if a.check and CONSOLE_FAILED.search(out):
+            failed.append(console_shown(cmd))
+    if failed:
+        raise SystemExit("the console reported a failure for: " + "; ".join(failed))
 
 
 def chat_commands(chat_help):
@@ -1360,7 +1395,11 @@ def main(argv=None):
     s.add_argument("--wait", type=float, default=1.5)
     s.add_argument("--quiet", action="store_true")
     s.add_argument("--ssh", default="", help="reach the console through this ssh host")
-    s.add_argument("command", nargs="+")
+    s.add_argument("--commands-stdin", action="store_true",
+                   help="the commands from stdin, one per line (kept off the command line)")
+    s.add_argument("--check", action="store_true",
+                   help="exit non-zero when the console reports a command failed")
+    s.add_argument("command", nargs="*")
     s.set_defaults(fn=cmd_ra)
 
     s = sub.add_parser("srp6")
