@@ -284,7 +284,11 @@ See `examples/roster.example.json`. The rules it enforces:
   not quests). Below the level cap, world PvP is hunting where the bot is: once
   it has reached the top of its zone's level range, outside a neutral town,
   while an enemy player is in the zone (patch 0014).
-  It also has `pvp`:
+  An archetype listing `pvpi` goes to battlegrounds more often (first for a
+  free slot, no cool-down) - not a travel goal: it still levels and quests.
+  And `gray_quests`: `drop` (the default), `keep` or `at_cap` - whether a
+  quest that gives no XP any more is dropped from the bot's log and refused,
+  kept, or kept and taken only at the level cap (log space permitting). It also has `pvp`:
   how much stronger the bot's side must be to start a fight with an enemy
   player (`1.2`, the default; `1` an even fight), or `"always"` (every enemy
   player on sight, guards or not) or `"never"` (none, and it keeps away from
@@ -314,7 +318,7 @@ See `examples/roster.example.json`. The rules it enforces:
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries nineteen changes to playerbots (`templates/patches/playerbots/`)
+teldrassil carries twenty-one changes to playerbots (`templates/patches/playerbots/`)
 and two to the core (`templates/patches/mangos-classic/`), applied before
 every build:
 
@@ -442,6 +446,24 @@ every build:
   the travel target while a cached "travelling" still let the move action
   read its missing position; the target is now only expired, and the move
   action skips a target without a position (dev server, 2026-11-02).
+- **playerbots 0020:** how bots work their quest log. Quests in the log are
+  travelled to wherever they are, other continents included; a finished
+  quest is turned in first, as upkeep, unless a quest of the bot's zone is
+  unfinished; while a bot has quests of its zone that still give XP, its
+  activities stay in that zone; a quest that gives no XP is dropped (per
+  archetype, `gray_quests`); and below level 20 a hearthstone bind must be
+  on the bot's home continent. (meksha, 2026-11-02.)
+- **playerbots 0021:** a due turn-in replaces what the bot is doing (held back,
+  it was requested 9 times in 2367); grey quests are not taken by a bot that
+  drops them, and `gray_quests: at_cap` keeps them at the level cap only;
+  random teleports are off (they threw low-level bots into the other
+  faction's starting zones) - reviving still teleports, to a zone of the
+  bot's level on its home continent, never hostile, one with its quests
+  first; out of combat a cast holds the bot in place (a move used to cancel
+  it - the hearthstone never went off); and battleground slots per side and
+  level band - 10-19: 10, 20-29: 10, 30-39: 15, 40-59: 15 for `pvpi`
+  archetypes only, the cap: 40 - `pvpi` archetypes first, the rest with 45
+  minutes between battlegrounds. (2026-11-03.)
 - **playerbots 0016:** quests have no time budget - questing is every bot's
   way forward, and 2 hours cut it off for an hour; and a way out of hostile
   territory never leads into a zone above the bot's level (a level-5 troll

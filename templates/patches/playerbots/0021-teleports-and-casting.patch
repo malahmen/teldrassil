@@ -1,0 +1,588 @@
+diff --git a/playerbot/PlayerbotAIConfig.cpp b/playerbot/PlayerbotAIConfig.cpp
+index debd1ff..ee7bc34 100644
+--- a/playerbot/PlayerbotAIConfig.cpp
++++ b/playerbot/PlayerbotAIConfig.cpp
+@@ -224,7 +224,13 @@ bool PlayerbotAIConfig::Initialize()
+     maxRandomBotChangeStrategyTime = config.GetIntDefault("AiPlayerbot.MaxRandomBotChangeStrategyTime", 2 * 3600);
+     minRandomBotReviveTime = config.GetIntDefault("AiPlayerbot.MinRandomBotReviveTime", 60);
+     maxRandomBotReviveTime = config.GetIntDefault("AiPlayerbot.MaxRandomReviveTime", 300);
+-    enableRandomTeleports = config.GetBoolDefault("AiPlayerbot.EnableRandomTeleports", true);
++    // kalimdor: off unless set (owner, 2026-11-02): bots have goals and travel
++    // on their own; the periodic jumps - a level spot or an inn every 30
++    // minutes to 2 hours, a grind spot every 2 to 48 hours - threw Horde
++    // level-4s into Elwynn and Alliance ones into Tirisfal (the enemy check
++    // reads a sub-area's faction, which the game data leaves empty).
++    // Reviving still teleports, by ZoneLevels::MayPlaceAt.
++    enableRandomTeleports = config.GetBoolDefault("AiPlayerbot.EnableRandomTeleports", false);
+     enableMinimalMove = config.GetBoolDefault("AiPlayerbot.EnableMinimalMove", true);
+     
+     randomBotTeleportDistance = config.GetIntDefault("AiPlayerbot.RandomBotTeleportDistance", 1000);
+diff --git a/playerbot/RandomPlayerbotMgr.cpp b/playerbot/RandomPlayerbotMgr.cpp
+index c23086c..30af108 100644
+--- a/playerbot/RandomPlayerbotMgr.cpp
++++ b/playerbot/RandomPlayerbotMgr.cpp
+@@ -67,6 +67,8 @@ INSTANTIATE_SINGLETON_1(RandomPlayerbotMgr);
+ 
+ #ifdef CMANGOS
+ #include <boost/thread/thread.hpp>
++#include "playerbot/strategy/values/ZoneLevels.h"
++#include "playerbot/strategy/values/BattlegroundSlots.h"
+ #endif
+ 
+ #ifdef MANGOS
+@@ -1509,6 +1511,9 @@ void RandomPlayerbotMgr::CheckBgQueue()
+     }
+ 
+     sLog.outDetail("Checking BG Queue...");
++    // kalimdor: the owner's battleground slots, counted here in the world
++    // thread (values/BattlegroundSlots.h).
++    ai::BattlegroundSlots::Count();
+ 
+     for (int i = BG_BRACKET_ID_FIRST; i < MAX_BATTLEGROUND_BRACKETS; ++i)
+     {
+@@ -2545,6 +2550,38 @@ void RandomPlayerbotMgr::RandomTeleport(Player* bot, std::vector<WorldLocation>&
+         return;
+     }
+ 
++    // kalimdor: only where the owner's rules allow (ZoneLevels::MayPlaceAt:
++    // home continent below 20, a zone of the bot's level, never hostile),
++    // a zone with one of its quests first - judged on the 40 nearest
++    // candidates, each a zone lookup that loads map tiles. None: no teleport.
++    {
++        std::set<int32> questZones;
++        for (auto const& [questId, status] : bot->getQuestStatusMap())
++            if (!status.m_rewarded && (status.m_status == QUEST_STATUS_INCOMPLETE || status.m_status == QUEST_STATUS_COMPLETE))
++                if (Quest const* quest = sObjectMgr.GetQuestTemplate(questId))
++                    if (quest->GetZoneOrSort() > 0)
++                        questZones.insert(quest->GetZoneOrSort());
++
++        int chosen = -1, fallback = -1;
++        for (size_t i = 0; i < tlocs.size() && i < 40; ++i)
++        {
++            uint32_t zone = 0;
++            if (!ai::ZoneLevels::MayPlaceAt(bot, tlocs[i], zone))
++                continue;
++            if (questZones.count(int32(zone))) { chosen = int(i); break; }
++            if (fallback < 0)
++                fallback = int(i);
++        }
++        if (chosen < 0)
++            chosen = fallback;
++        if (chosen < 0)
++        {
++            sLog.outDetail("Bot %s not teleported - no place its level, on its home continent, off hostile ground", bot->GetName());
++            return;
++        }
++        tlocs = { tlocs[chosen] };
++    }
++
+     auto pmo = sPerformanceMonitor.start(PERF_MON_RNDBOT, "RandomTeleportByLocations");
+ 
+     for (size_t i = 0; i < tlocs.size(); ++i)
+diff --git a/playerbot/strategy/actions/BattleGroundJoinAction.cpp b/playerbot/strategy/actions/BattleGroundJoinAction.cpp
+index 35d511f..dec5d26 100644
+--- a/playerbot/strategy/actions/BattleGroundJoinAction.cpp
++++ b/playerbot/strategy/actions/BattleGroundJoinAction.cpp
+@@ -27,6 +27,7 @@
+ #include "BattleGround/BattleGround.h"
+ #include "BattleGround/BattleGroundMgr.h"
+ #include "BattleGroundJoinAction.h"
++#include "playerbot/strategy/values/BattlegroundSlots.h"
+ #ifndef MANGOSBOT_ZERO
+ #ifdef CMANGOS
+ #include "Arena/ArenaTeam.h"
+@@ -543,7 +544,12 @@ bool BGJoinAction::isUseful()
+ 
+     // can't queue in BG
+     if (bot->InBattleGround())
++    {
++        // kalimdor: the 45-minute cool-down after a battleground runs from
++        // here (values/BattlegroundSlots.h).
++        BattlegroundSlots::SeenInside(bot);
+         return false;
++    }
+ 
+     // do not try right after login
+     if ((time(0) - bot->GetInGameTime()) < 30)
+@@ -552,6 +558,11 @@ bool BGJoinAction::isUseful()
+     // check level
+     if (bot->GetLevel() < 10)
+         return false;
++    // kalimdor: within the owner's caps per side and level band, pvpi
++    // archetypes first, the rest with a 45-minute cool-down
++    // (values/BattlegroundSlots.h).
++    if (!ai->IsRealPlayer() && !BattlegroundSlots::MayQueue(bot))
++        return false;
+ 
+ #ifdef MANGOSBOT_TWO
+     if (bot->getClass() == CLASS_DEATH_KNIGHT && bot->GetLevel() < 60)
+diff --git a/playerbot/strategy/actions/ChooseTravelTargetAction.cpp b/playerbot/strategy/actions/ChooseTravelTargetAction.cpp
+index 44c1983..7400aa5 100644
+--- a/playerbot/strategy/actions/ChooseTravelTargetAction.cpp
++++ b/playerbot/strategy/actions/ChooseTravelTargetAction.cpp
+@@ -1510,6 +1510,24 @@ bool RequestQuestTravelTargetAction::Execute(Event& event)
+     return true;
+ }
+ 
++bool RequestQuestTravelTargetAction::isUseful()
++{
++    if (getQualifier() != "turnin")
++        return RequestTravelTargetAction::isUseful();
++
++    // As RequestTravelTargetAction::isUseful, but an active travel target does
++    // not hold it back: a due turn-in fired 2367 times in 10 minutes on the
++    // dev server and was requested 9 times, waiting behind fishing, gathering,
++    // trainers and quest objectives (2026-11-02).
++    if (bot->InBattleGround() || !ai->AllowActivity(TRAVEL_ACTIVITY))
++        return false;
++    if (AI_VALUE(TravelTarget*, "travel target")->GetStatus() == TravelStatus::TRAVEL_STATUS_PREPARE)
++        return false;
++    if (AI_VALUE2(bool, "no active travel destinations", "turnin"))
++        return false;
++    return AI_VALUE(bool, "can move around");
++}
++
+ bool RequestQuestTravelTargetAction::isAllowed() const
+ {
+ #ifdef GenerateBotTests
+diff --git a/playerbot/strategy/actions/ChooseTravelTargetAction.h b/playerbot/strategy/actions/ChooseTravelTargetAction.h
+index 6e910ef..61dd261 100644
+--- a/playerbot/strategy/actions/ChooseTravelTargetAction.h
++++ b/playerbot/strategy/actions/ChooseTravelTargetAction.h
+@@ -64,9 +64,12 @@ namespace ai
+     class RequestTravelTargetAction : public Action, public Qualified {
+     public:
+         RequestTravelTargetAction(PlayerbotAI* ai, std::string name = "request travel target") : Action(ai, name), Qualified() {}
++    protected:
++        // kalimdor: protected, not private - the quest request's turn-in
++        // variant falls back on it (RequestQuestTravelTargetAction::isUseful).
++        virtual bool isUseful() override;
+     private:
+         virtual bool Execute(Event& event) override;
+-        virtual bool isUseful() override;
+         virtual bool isAllowed() const;
+     };
+ 
+@@ -81,6 +84,9 @@ namespace ai
+     class RequestQuestTravelTargetAction : public RequestTravelTargetAction {
+     public:
+         RequestQuestTravelTargetAction(PlayerbotAI* ai, std::string name = "request quest travel target") : RequestTravelTargetAction(ai, name) {}
++        // kalimdor: a turn-in request (::turnin) is not held back by the
++        // travel target being pursued - it replaces it (values/QuestFlow.h).
++        virtual bool isUseful() override;
+     private:
+         virtual bool Execute(Event& event) override;
+         virtual bool isAllowed() const override;
+diff --git a/playerbot/strategy/actions/MovementActions.cpp b/playerbot/strategy/actions/MovementActions.cpp
+index 7ba9051..55c3c05 100644
+--- a/playerbot/strategy/actions/MovementActions.cpp
++++ b/playerbot/strategy/actions/MovementActions.cpp
+@@ -1089,6 +1089,14 @@ Unit* MovementAction::GetMover(Player* bot)
+ 
+ bool MovementAction::MoveTo2(const WorldPosition& endPos, bool idle, bool react, bool noPath, bool ignoreEnemyTargets)
+ {
++    // kalimdor: out of combat, a cast in progress is not cut short by a move -
++    // the hearthstone, mounting, crafting, buffs. Upstream interrupted any
++    // cast to move, so a stranded bot's hearthstone never went off: its own
++    // travel cancelled the 10-second cast (owner, 2026-11-02). In combat a
++    // move still interrupts: a caster must be able to step out of fire.
++    if (CastHoldsMovement())
++        return false;
++
+     if (!endPos.isValid())
+         return false;
+ 
+@@ -2352,6 +2360,14 @@ void MovementAction::UpdateMovementState()
+ 
+ bool MovementAction::Follow(Unit* target, float distance, float angle)
+ {
++    // kalimdor: out of combat, a cast in progress is not cut short by a move -
++    // the hearthstone, mounting, crafting, buffs. Upstream interrupted any
++    // cast to move, so a stranded bot's hearthstone never went off: its own
++    // travel cancelled the 10-second cast (owner, 2026-11-02). In combat a
++    // move still interrupts: a caster must be able to step out of fire.
++    if (CastHoldsMovement())
++        return false;
++
+     if (!ai->IsSafe(target))
+         return MoveTo2(target);
+ 
+@@ -4554,3 +4570,8 @@ WorldPosition JumpAction::GetPossibleJumpStartForInRange(const WorldPosition& sr
+     return WorldPosition();
+ }
+ 
++
++bool MovementAction::CastHoldsMovement() const
++{
++    return !bot->IsInCombat() && bot->IsNonMeleeSpellCasted(true, false, true);
++}
+diff --git a/playerbot/strategy/actions/MovementActions.h b/playerbot/strategy/actions/MovementActions.h
+index af955bf..066378c 100644
+--- a/playerbot/strategy/actions/MovementActions.h
++++ b/playerbot/strategy/actions/MovementActions.h
+@@ -13,6 +13,9 @@ namespace ai
+     class MovementAction : public Action
+     {
+     public:
++        // kalimdor: out of combat, a non-instant cast in progress holds the bot
++        // in place (MovementActions.cpp, MoveTo2 and Follow).
++        bool CastHoldsMovement() const;
+         MovementAction(PlayerbotAI* ai, std::string name) : Action(ai, name) {}
+ 
+         static bool MinimalMove(PlayerbotAI* ai);
+diff --git a/playerbot/strategy/actions/QuestAction.cpp b/playerbot/strategy/actions/QuestAction.cpp
+index 5a49f1d..306d4e6 100644
+--- a/playerbot/strategy/actions/QuestAction.cpp
++++ b/playerbot/strategy/actions/QuestAction.cpp
+@@ -3,6 +3,8 @@
+ #include "QuestAction.h"
+ #include "playerbot/PlayerbotAIConfig.h"
+ #include "playerbot/ServerFacade.h"
++#include "playerbot/strategy/values/Archetypes.h"
++#include "playerbot/strategy/values/QuestFlow.h"
+ 
+ using namespace ai;
+ 
+@@ -199,6 +201,12 @@ bool QuestAction::AcceptQuest(Player* requester, Quest const* quest, uint64 ques
+     bool success = false;
+     const uint32 questId = quest->GetQuestId();
+ 
++    // kalimdor: a bot whose archetype drops quests that give no XP does not
++    // take them either - it took one up again after each drop (dev server,
++    // 2026-11-02; values/QuestFlow.h).
++    if (!ai->IsRealPlayer() && !QuestFlow::GivesXp(bot, quest) && !QuestFlow::HoldsGray(bot))
++        return false;
++
+     std::string outputMessage;
+     std::map<std::string, std::string> args;
+     args["%quest"] = chat->formatQuest(quest);
+diff --git a/playerbot/strategy/triggers/GrayQuestTrigger.cpp b/playerbot/strategy/triggers/GrayQuestTrigger.cpp
+index b8233fa..b28740a 100644
+--- a/playerbot/strategy/triggers/GrayQuestTrigger.cpp
++++ b/playerbot/strategy/triggers/GrayQuestTrigger.cpp
+@@ -7,8 +7,7 @@ using namespace ai;
+ 
+ bool GrayQuestTrigger::IsActive()
+ {
+-    const Archetype* archetype = Archetypes::Of(bot);
+-    if (!archetype || archetype->keepGrayQuests)
++    if (QuestFlow::HoldsGray(bot))
+         return false;
+ 
+     for (uint8 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+diff --git a/playerbot/strategy/values/Archetypes.cpp b/playerbot/strategy/values/Archetypes.cpp
+index 6128031..799e605 100644
+--- a/playerbot/strategy/values/Archetypes.cpp
++++ b/playerbot/strategy/values/Archetypes.cpp
+@@ -85,8 +85,9 @@ namespace
+                     else
+                         sLog.outError("Archetype %s: '%s' left out (pvp is a number, always or never; pvp@<level> from that level)", name.c_str(), field.c_str());
+                 }
+-                else if (key == "gray_quests" && (value == "keep" || value == "drop"))
+-                    archetype.keepGrayQuests = value == "keep";
++                else if (key == "gray_quests" && (value == "keep" || value == "drop" || value == "at_cap"))
++                    archetype.grayQuests = value == "keep" ? Archetype::GrayQuests::Keep :
++                        value == "at_cap" ? Archetype::GrayQuests::AtCap : Archetype::GrayQuests::Drop;
+                 else
+                     sLog.outError("Archetype %s: unknown part '%s' left out", name.c_str(), field.c_str());
+             }
+@@ -117,7 +118,8 @@ namespace
+ 
+ const std::vector<std::string>& Archetypes::ActivityNames()
+ {
+-    static const std::vector<std::string> names = { "quests", "grind", "gather", "ah", "wpvp", "bosses", "explore", "rpg" };
++    // pvpi: not a travel goal - battlegrounds more often (BattlegroundSlots.h).
++    static const std::vector<std::string> names = { "quests", "grind", "gather", "ah", "wpvp", "bosses", "explore", "rpg", "pvpi" };
+     return names;
+ }
+ 
+diff --git a/playerbot/strategy/values/Archetypes.h b/playerbot/strategy/values/Archetypes.h
+index d28dd7e..672cc4f 100644
+--- a/playerbot/strategy/values/Archetypes.h
++++ b/playerbot/strategy/values/Archetypes.h
+@@ -28,8 +28,9 @@
+ //   enemy player on sight, guards or not; "never": none, and it keeps away
+ //   from all of them. pvp@N applies from level N on; the highest N at or
+ //   below the bot's level wins, plain pvp below that.
+-// gray_quests: drop (the default) or keep - whether a quest that gives no
+-//   XP any more is dropped from the log (kalimdor: values/QuestFlow.h).
++// gray_quests: drop (the default), keep, or at_cap - whether a quest that
++//   gives no XP any more is dropped from the log and refused, kept, or kept
++//   and taken only at the level cap (kalimdor: values/QuestFlow.h).
+ 
+ class Player;
+ 
+@@ -40,9 +41,12 @@ namespace ai
+         std::string name;
+         std::vector<std::string> activities;
+         std::map<uint32_t, float> pvp;  // from level -> margin
+-        // Quests that give no XP any more are kept, not dropped (owner,
+-        // 2026-11-02: "gray_quests=keep"; dropping is the default).
+-        bool keepGrayQuests = false;
++        // Quests that give no XP any more: dropped and not taken (the
++        // default), kept, or kept only at the level cap (owner, 2026-11-02:
++        // questers and explorers pick them up and turn them in at the cap,
++        // log space permitting).
++        enum class GrayQuests { Drop, Keep, AtCap };
++        GrayQuests grayQuests = GrayQuests::Drop;
+     };
+ 
+     class Archetypes
+diff --git a/playerbot/strategy/values/BattlegroundSlots.cpp b/playerbot/strategy/values/BattlegroundSlots.cpp
+new file mode 100644
+index 0000000..8178412
+--- /dev/null
++++ b/playerbot/strategy/values/BattlegroundSlots.cpp
+@@ -0,0 +1,105 @@
++#include "playerbot/playerbot.h"
++#include "BattlegroundSlots.h"
++#include "Archetypes.h"
++#include "playerbot/RandomPlayerbotMgr.h"
++#include "World/World.h"
++
++#include <algorithm>
++
++using namespace ai;
++
++namespace
++{
++    uint32 taken[2][6] = {};
++    uint32 pvpiWaiting[2][6] = {};
++
++    uint32 Cap(int band, bool pvpi)
++    {
++        switch (band)
++        {
++            case 1: return 10;
++            case 2: return 10;
++            case 3: return 15;
++            case 4: return pvpi ? 15 : 0;
++            case 5: return 40;
++            default: return 0;
++        }
++    }
++}
++
++int BattlegroundSlots::Band(uint32_t level)
++{
++    if (level >= sWorld.getConfig(CONFIG_UINT32_MAX_PLAYER_LEVEL))
++        return 5;
++    if (level < 10)
++        return 0;
++    if (level < 20)
++        return 1;
++    if (level < 30)
++        return 2;
++    if (level < 40)
++        return 3;
++    return 4;
++}
++
++void BattlegroundSlots::Count()
++{
++    uint32 newTaken[2][6] = {}, newWaiting[2][6] = {};
++    for (auto const& [guid, bot] : sRandomPlayerbotMgr.GetAllBots())
++    {
++        if (!bot || !bot->IsInWorld())
++            continue;
++
++        int const side = bot->GetTeam() == ALLIANCE ? 0 : 1;
++        int const band = Band(bot->GetLevel());
++        if (bot->InBattleGround() || bot->InBattleGroundQueue())
++            ++newTaken[side][band];
++        else if (band && IsPvpi(bot))
++            ++newWaiting[side][band];
++    }
++
++    for (int side = 0; side < 2; ++side)
++        for (int band = 0; band < 6; ++band)
++        {
++            taken[side][band] = newTaken[side][band];
++            pvpiWaiting[side][band] = newWaiting[side][band];
++        }
++}
++
++bool BattlegroundSlots::IsPvpi(Player* bot)
++{
++    const Archetype* archetype = Archetypes::Of(bot);
++    return archetype && std::find(archetype->activities.begin(), archetype->activities.end(), "pvpi") != archetype->activities.end();
++}
++
++void BattlegroundSlots::SeenInside(Player* bot)
++{
++    if (PlayerbotAI* ai = bot->GetPlayerbotAI())
++        ai->GetAiObjectContext()->GetValue<time_t>("manual time", "last battleground")->Set(time(nullptr));
++}
++
++bool BattlegroundSlots::MayQueue(Player* bot)
++{
++    bool const pvpi = IsPvpi(bot);
++    int const band = Band(bot->GetLevel());
++    uint32 const cap = Cap(band, pvpi);
++    if (!cap)
++        return false;
++
++    if (!pvpi)
++    {
++        time_t const last = bot->GetPlayerbotAI()->GetAiObjectContext()->GetValue<time_t>("manual time", "last battleground")->Get();
++        if (last && time(nullptr) - last < Cooldown)
++            return false;
++    }
++
++    // Counted in the world thread (Count): its side and band.
++    int const side = bot->GetTeam() == ALLIANCE ? 0 : 1;
++    uint32 const inUse = taken[side][band];
++    // A pvpi bot counted as waiting may be this one.
++    uint32 const waiting = pvpiWaiting[side][band] - (pvpi && pvpiWaiting[side][band] ? 1 : 0);
++
++    if (pvpi)
++        return inUse < cap;
++    return inUse + waiting < cap;
++}
+diff --git a/playerbot/strategy/values/BattlegroundSlots.h b/playerbot/strategy/values/BattlegroundSlots.h
+new file mode 100644
+index 0000000..bf43f58
+--- /dev/null
++++ b/playerbot/strategy/values/BattlegroundSlots.h
+@@ -0,0 +1,40 @@
++#pragma once
++
++#include <cstdint>
++
++// kalimdor: how many bots may be in battlegrounds, and who goes (owner,
++// 2026-11-03). Per side, counting bots queued or inside, by level band:
++//   10-19: 10   20-29: 10   30-39: 15   40-59: 15, pvpi archetypes only
++//   level cap: 40
++// A bot whose archetype lists pvpi takes a free slot first; any other bot
++// only when the slots left outnumber the pvpi bots of its band and side
++// still waiting, and then not again for 45 minutes after a battleground.
++// pvpi is not a travel goal: every bot still levels and quests, also while
++// it waits in the queue - pvpi bots just go more often. Upstream sent every
++// bot: on the dev server 46 of 101 bots sat in battlegrounds, holding 181 of
++// 429 finished quests unreturned.
++
++class Player;
++
++namespace ai
++{
++    class BattlegroundSlots
++    {
++    public:
++        static constexpr long Cooldown = 45 * 60;
++
++        static bool IsPvpi(Player* bot);
++        // The owner's level band: 1 10-19, 2 20-29, 3 30-39, 4 40-59, 5 the
++        // cap; 0 below 10.
++        static int Band(uint32_t level);
++        // Counted in the world thread (RandomPlayerbotMgr's battleground
++        // check), read by the bots: per side (0 Alliance, 1 Horde) and band,
++        // bots queued or inside, and pvpi bots still out.
++        static void Count();
++        // The bot may queue now.
++        static bool MayQueue(Player* bot);
++        // To be called while the bot is in a battleground: the cool-down runs
++        // from the last time this saw it there.
++        static void SeenInside(Player* bot);
++    };
++}
+diff --git a/playerbot/strategy/values/QuestFlow.cpp b/playerbot/strategy/values/QuestFlow.cpp
+index abcbd9d..7fff086 100644
+--- a/playerbot/strategy/values/QuestFlow.cpp
++++ b/playerbot/strategy/values/QuestFlow.cpp
+@@ -1,5 +1,7 @@
+ #include "playerbot/playerbot.h"
+ #include "QuestFlow.h"
++#include "Archetypes.h"
++#include "World/World.h"
+ 
+ using namespace ai;
+ 
+@@ -52,3 +54,17 @@ bool QuestFlow::HasTurnIn(Player* bot)
+     ForEachLogQuest(bot, [&](Quest const*, bool finished) { found |= finished; });
+     return found;
+ }
++
++bool QuestFlow::HoldsGray(Player* bot)
++{
++    const Archetype* archetype = Archetypes::Of(bot);
++    if (!archetype)
++        return true;
++
++    switch (archetype->grayQuests)
++    {
++        case Archetype::GrayQuests::Keep:  return true;
++        case Archetype::GrayQuests::AtCap: return bot->GetLevel() >= sWorld.getConfig(CONFIG_UINT32_MAX_PLAYER_LEVEL);
++        default:                           return false;
++    }
++}
+diff --git a/playerbot/strategy/values/QuestFlow.h b/playerbot/strategy/values/QuestFlow.h
+index 19ecad5..d634410 100644
+--- a/playerbot/strategy/values/QuestFlow.h
++++ b/playerbot/strategy/values/QuestFlow.h
+@@ -8,8 +8,9 @@
+ //  - While the bot has quests of its zone that still give XP, it does not
+ //    leave: its activities stay in the zone and its quest choice sticks to
+ //    them. One that no longer gives XP does not hold it.
+-//  - A quest that gives no XP is dropped - for a bot whose archetype says so
+-//    (the default; "gray_quests=keep" keeps them).
++//  - A quest that gives no XP is dropped, and not taken - for a bot whose
++//    archetype says so (the default; "gray_quests=keep" keeps them,
++//    "gray_quests=at_cap" keeps and takes them at the level cap only).
+ // "Of its zone" is the quest's own zone (its ZoneOrSort).
+ 
+ class Player;
+@@ -30,5 +31,9 @@ namespace ai
+         // The quest's zone, or 0 for a quest of a sort (a class or
+         // profession quest).
+         static int32 ZoneOf(Quest const* quest);
++        // Whether the bot holds and takes quests that give no XP: without an
++        // archetype, as upstream (yes); else by its gray_quests - keep, or at
++        // the level cap only (at_cap), or not at all (drop).
++        static bool HoldsGray(Player* bot);
+     };
+ }
+diff --git a/playerbot/strategy/values/ZoneLevels.cpp b/playerbot/strategy/values/ZoneLevels.cpp
+index 7a06d7b..99dfa81 100644
+--- a/playerbot/strategy/values/ZoneLevels.cpp
++++ b/playerbot/strategy/values/ZoneLevels.cpp
+@@ -1,6 +1,7 @@
+ #include "playerbot/playerbot.h"
+ #include "ZoneLevels.h"
+ #include "EnemyGuards.h"
++#include "HomeBinds.h"
+ #include "playerbot/ServerFacade.h"
+ #include "playerbot/TravelMgr.h"
+ #include "playerbot/TravelNode.h"
+@@ -178,3 +179,17 @@ bool ZoneLevels::SameOrNeighbour(uint32_t zoneA, uint32_t zoneB)
+     std::call_once(neighboursFound, FindNeighbours);
+     return neighbours.count({ zoneA, zoneB }) > 0;
+ }
++
++bool ZoneLevels::MayPlaceAt(Player* bot, const WorldPosition& at, uint32_t& zone)
++{
++    if (bot->GetLevel() < 20 && at.getMapId() != HomeBinds::HomeMap(bot))
++        return false;
++
++    at.loadMapAndVMap(0);
++    zone = sTerrainMgr.GetZoneId(at.getMapId(), at.getX(), at.getY(), at.getZ());
++    uint32_t min = 0, max = 0;
++    if (!Range(zone, min, max) || bot->GetLevel() < min || bot->GetLevel() > max)
++        return false;
++
++    return !EnemyGuards::IsHostileTerritory(at, bot);
++}
+diff --git a/playerbot/strategy/values/ZoneLevels.h b/playerbot/strategy/values/ZoneLevels.h
+index b7fe94e..ccf187a 100644
+--- a/playerbot/strategy/values/ZoneLevels.h
++++ b/playerbot/strategy/values/ZoneLevels.h
+@@ -46,5 +46,10 @@ namespace ai
+         // route of the travel graph (boats, flights and portals do not make
+         // neighbours).
+         static bool SameOrNeighbour(uint32_t zoneA, uint32_t zoneB);
++        // Where playerbots' random teleport may put the bot (owner,
++        // 2026-11-02): below level 20 on its home continent, in a zone of the
++        // owner's list whose range holds its level, never in hostile
++        // territory. QuestZone: one where it has a quest.
++        static bool MayPlaceAt(Player* bot, const class WorldPosition& at, uint32_t& zone);
+     };
+ }

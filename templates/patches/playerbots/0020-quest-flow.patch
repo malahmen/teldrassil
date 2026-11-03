@@ -1,0 +1,500 @@
+diff --git a/playerbot/strategy/actions/ActionContext.h b/playerbot/strategy/actions/ActionContext.h
+index 489faf5..4fcaba2 100644
+--- a/playerbot/strategy/actions/ActionContext.h
++++ b/playerbot/strategy/actions/ActionContext.h
+@@ -6,6 +6,7 @@
+ #include "KeepAwayFromEnemyPlayerAction.h"
+ #include "BindToDefaultHomeAction.h"
+ #include "RethinkQuestTargetAction.h"
++#include "DropGrayQuestsAction.h"
+ #include "EmoteAction.h"
+ #include "AddLootAction.h"
+ #include "LootAction.h"
+@@ -440,6 +441,7 @@ namespace ai
+             creators["keep away from enemy player"] = [](PlayerbotAI* ai) { return new KeepAwayFromEnemyPlayerAction(ai); };
+             creators["bind to default home"] = [](PlayerbotAI* ai) { return new BindToDefaultHomeAction(ai); };
+             creators["rethink quest target"] = [](PlayerbotAI* ai) { return new RethinkQuestTargetAction(ai); };
++            creators["drop gray quests"] = [](PlayerbotAI* ai) { return new DropGrayQuestsAction(ai); };
+ 
+ #ifdef GenerateBotTests
+             creators["test"] = [](PlayerbotAI* ai) { return new TestAction(ai); };
+diff --git a/playerbot/strategy/actions/ChooseTravelTargetAction.cpp b/playerbot/strategy/actions/ChooseTravelTargetAction.cpp
+index f4136f5..44c1983 100644
+--- a/playerbot/strategy/actions/ChooseTravelTargetAction.cpp
++++ b/playerbot/strategy/actions/ChooseTravelTargetAction.cpp
+@@ -2,6 +2,7 @@
+ #include "playerbot/playerbot.h"
+ #include "playerbot/strategy/values/GatheringStalls.h"
+ #include "playerbot/strategy/values/EnemyGuards.h"
++#include "playerbot/strategy/values/QuestFlow.h"
+ #include "playerbot/LootObjectStack.h"
+ #include "ChooseTravelTargetAction.h"
+ #include "playerbot/PlayerbotAIConfig.h"
+@@ -343,6 +344,18 @@ bool ChooseTravelTargetAction::SetBestTarget(Player* requester, TravelTarget* ta
+         "mount", "city", "reagent vendor" };
+     bool const keepOffHostile = upkeep.count(purpose) && bot->GetLevel() < sWorld.getConfig(CONFIG_UINT32_MAX_PLAYER_LEVEL);
+ 
++    // kalimdor: while the bot has quests of its zone that still give XP, its
++    // activities - grinding, gathering, exploring, roleplay, bosses, world
++    // PvP, farm orders - stay in that zone (owner, 2026-11-02;
++    // values/QuestFlow.h). Upkeep and quests are not held.
++    static const std::set<std::string> activities = {
++        std::to_string((uint32)TravelDestinationPurpose::Grind), std::to_string((uint32)TravelDestinationPurpose::GatherMining),
++        std::to_string((uint32)TravelDestinationPurpose::GatherSkinning), std::to_string((uint32)TravelDestinationPurpose::GatherHerbalism),
++        std::to_string((uint32)TravelDestinationPurpose::GatherFishing), std::to_string((uint32)TravelDestinationPurpose::Explore),
++        std::to_string((uint32)TravelDestinationPurpose::GenericRpg), std::to_string((uint32)TravelDestinationPurpose::Boss),
++        "pvp", "guild order" };
++    bool const stayInZone = activities.count(purpose) && QuestFlow::HasLocalQuests(bot);
++
+     bool distanceCheck = true;
+     std::unordered_map<TravelDestination*, bool> isActive;
+ 
+@@ -365,6 +378,9 @@ bool ChooseTravelTargetAction::SetBestTarget(Player* requester, TravelTarget* ta
+             if (keepOffHostile && EnemyGuards::IsHostileTerritory(*position, bot))
+                 continue;
+ 
++            if (stayInZone && sTerrainMgr.GetZoneId(position->getMapId(), position->getX(), position->getY(), position->getZ()) != bot->GetZoneId())
++                continue;
++
+             if (distanceCheck) //Check if we have moved significantly after getting the destinations.
+             {
+                 WorldPosition center(requester ? requester : bot);
+@@ -1385,7 +1401,19 @@ bool RequestQuestTravelTargetAction::Execute(Event& event)
+ 
+     ai->TellDebug(ai->GetMaster(), "Getting new destination ranges for travel quest", "debug travel");
+ 
+-    std::vector<std::tuple<uint32, int32, float>> destinationFetches = { {(uint32)TravelDestinationPurpose::QuestGiver, 0, 400 + bot->GetLevel() * 10} };
++    // kalimdor: the quest log's own quests are travelled to wherever they are,
++    // other continents included - their distance is the walk and the ships
++    // between (owner, 2026-11-02; values/QuestFlow.h). A turn-in request
++    // ("request quest travel target::turnin") fetches only the turn-ins of
++    // finished quests. While the bot has quests of its zone that still give
++    // XP, only those are fetched - it does not leave them behind.
++    bool const turnInOnly = getQualifier() == "turnin";
++    bool const localOnly = !turnInOnly && QuestFlow::HasLocalQuests(bot);
++    float const logRange = 200000.0f;
++
++    std::vector<std::tuple<uint32, int32, float>> destinationFetches;
++    if (!turnInOnly)
++        destinationFetches.push_back({ (uint32)TravelDestinationPurpose::QuestGiver, 0, 400 + bot->GetLevel() * 10 });
+ 
+     for (ObjectGuid guid : AI_VALUE(std::list<ObjectGuid>, "group members"))
+     {
+@@ -1416,8 +1444,13 @@ bool RequestQuestTravelTargetAction::Execute(Event& event)
+             if (!questTemplate)
+                 continue;
+ 
++            if (localOnly && player == bot && (QuestFlow::ZoneOf(questTemplate) != int32(bot->GetZoneId()) || !QuestFlow::GivesXp(bot, questTemplate)))
++                continue;
++
+             if (player->CanRewardQuest(questTemplate, false))
+                 flag = (uint32)TravelDestinationPurpose::QuestTaker;
++            else if (turnInOnly)
++                continue;
+             else
+             {
+                 for (uint32 objective = 0; objective < 4; objective++)
+@@ -1434,9 +1467,9 @@ bool RequestQuestTravelTargetAction::Execute(Event& event)
+             if (!flag)
+                 continue;
+ 
+-            destinationFetches.push_back({ flag, questId, 1000 + (bot->GetLevel() * bot->GetLevel()) * 75 });
++            destinationFetches.push_back({ flag, questId, logRange });
+ 
+-            if (onlyClassQuest && destinationFetches.size() > 1) //Only do class quests if we have any.
++            if (onlyClassQuest && !turnInOnly && destinationFetches.size() > 1) //Only do class quests if we have any.
+             {
+                 Quest const* firstQuest = sObjectMgr.GetQuestTemplate(std::get<1>(destinationFetches[1]));
+ 
+@@ -1468,7 +1501,9 @@ bool RequestQuestTravelTargetAction::Execute(Event& event)
+     );
+ 
+     AI_VALUE(TravelTarget*, "travel target")->SetStatus(TravelStatus::TRAVEL_STATUS_PREPARE);
+-    SET_AI_VALUE2(std::string, "manual string", "future travel purpose", "quest");
++    // kalimdor: a turn-in request is its own purpose, so finding nothing
++    // marks it, not the quest request.
++    SET_AI_VALUE2(std::string, "manual string", "future travel purpose", getQualifier() == "turnin" ? "turnin" : "quest");
+     SET_AI_VALUE2(std::string, "manual string", "future travel condition", event.getSource());
+     SET_AI_VALUE2(int, "manual int", "future travel relevance", relevance * 100);
+ 
+diff --git a/playerbot/strategy/actions/DropGrayQuestsAction.cpp b/playerbot/strategy/actions/DropGrayQuestsAction.cpp
+new file mode 100644
+index 0000000..4652266
+--- /dev/null
++++ b/playerbot/strategy/actions/DropGrayQuestsAction.cpp
+@@ -0,0 +1,29 @@
++#include "playerbot/playerbot.h"
++#include "DropGrayQuestsAction.h"
++#include "playerbot/strategy/values/QuestFlow.h"
++
++using namespace ai;
++
++bool DropGrayQuestsAction::Execute(Event& event)
++{
++    bool dropped = false;
++    for (uint8 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
++    {
++        uint32 const questId = bot->GetQuestSlotQuestId(slot);
++        Quest const* quest = sObjectMgr.GetQuestTemplate(questId);
++        if (!quest || QuestFlow::GivesXp(bot, quest))
++            continue;
++
++        // As DropQuestAction does.
++        bot->SetQuestSlot(slot, 0);
++        bot->TakeQuestSourceItem(questId, false);
++        bot->SetQuestStatus(questId, QUEST_STATUS_NONE);
++        bot->getQuestStatusMap()[questId].m_rewarded = false;
++        dropped = true;
++
++        sLog.outString("Bot #%d %s:%d <%s>: drops quest %s (level %d) - no XP any more", bot->GetGUIDLow(),
++            bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), quest->GetTitle().c_str(), quest->GetQuestLevel());
++    }
++
++    return dropped;
++}
+diff --git a/playerbot/strategy/actions/DropGrayQuestsAction.h b/playerbot/strategy/actions/DropGrayQuestsAction.h
+new file mode 100644
+index 0000000..4b15e12
+--- /dev/null
++++ b/playerbot/strategy/actions/DropGrayQuestsAction.h
+@@ -0,0 +1,14 @@
++#pragma once
++#include "playerbot/strategy/Action.h"
++
++namespace ai
++{
++    // kalimdor: drop the quests in the log that give no XP any more (owner,
++    // 2026-11-02; triggers/GrayQuestTrigger.h), as the drop command does.
++    class DropGrayQuestsAction : public Action
++    {
++    public:
++        DropGrayQuestsAction(PlayerbotAI* ai) : Action(ai, "drop gray quests") {}
++        bool Execute(Event& event) override;
++    };
++}
+diff --git a/playerbot/strategy/generic/TravelStrategy.cpp b/playerbot/strategy/generic/TravelStrategy.cpp
+index 4164969..8e20d57 100644
+--- a/playerbot/strategy/generic/TravelStrategy.cpp
++++ b/playerbot/strategy/generic/TravelStrategy.cpp
+@@ -26,6 +26,10 @@ float TravelActionMultiplier::GetValue(Action* action)
+         // cut in on a target being pursued.
+         if (name.find("guild order") != std::string::npos && !Archetypes::Of(ai->GetBot()))
+             return 1.0f;
++        // kalimdor: a due turn-in cuts in on what the bot is doing (owner,
++        // 2026-11-02; triggers/QuestTurnInDueTrigger.h).
++        if (name == "request quest travel target::turnin")
++            return 1.0f;
+ 
+         return 0.0f;
+     }
+@@ -146,6 +150,18 @@ void TravelStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
+         "quest progress",
+         NextAction::array(0, new NextAction("rethink quest target", 7.0f), NULL)));
+ 
++    // kalimdor: a finished quest is turned in first, as upkeep - unless a
++    // quest of this zone is unfinished (values/QuestFlow.h).
++    // kalimdor: quests that give no XP any more are dropped, if the bot's
++    // archetype says so (values/QuestFlow.h).
++    triggers.push_back(new TriggerNode(
++        "gray quest",
++        NextAction::array(0, new NextAction("drop gray quests", 7.0f), NULL)));
++
++    triggers.push_back(new TriggerNode(
++        "quest turn in due",
++        NextAction::array(0, new NextAction("request quest travel target::turnin", 6.62f), NULL)));
++
+     for (auto& [condition, purpose, relevance] : PurposeActions)
+     {
+         std::string trigger = condition.empty() ? "val::need travel purpose::" + std::to_string((uint32)purpose) : condition;
+diff --git a/playerbot/strategy/triggers/GrayQuestTrigger.cpp b/playerbot/strategy/triggers/GrayQuestTrigger.cpp
+new file mode 100644
+index 0000000..b8233fa
+--- /dev/null
++++ b/playerbot/strategy/triggers/GrayQuestTrigger.cpp
+@@ -0,0 +1,22 @@
++#include "playerbot/playerbot.h"
++#include "GrayQuestTrigger.h"
++#include "playerbot/strategy/values/Archetypes.h"
++#include "playerbot/strategy/values/QuestFlow.h"
++
++using namespace ai;
++
++bool GrayQuestTrigger::IsActive()
++{
++    const Archetype* archetype = Archetypes::Of(bot);
++    if (!archetype || archetype->keepGrayQuests)
++        return false;
++
++    for (uint8 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
++    {
++        if (Quest const* quest = sObjectMgr.GetQuestTemplate(bot->GetQuestSlotQuestId(slot)))
++            if (!QuestFlow::GivesXp(bot, quest))
++                return true;
++    }
++
++    return false;
++}
+diff --git a/playerbot/strategy/triggers/GrayQuestTrigger.h b/playerbot/strategy/triggers/GrayQuestTrigger.h
+new file mode 100644
+index 0000000..f710be5
+--- /dev/null
++++ b/playerbot/strategy/triggers/GrayQuestTrigger.h
+@@ -0,0 +1,14 @@
++#pragma once
++#include "playerbot/strategy/Trigger.h"
++
++namespace ai
++{
++    // kalimdor: a quest in the log gives no XP any more, and the bot's
++    // archetype drops such quests (owner, 2026-11-02; values/QuestFlow.h).
++    class GrayQuestTrigger : public Trigger
++    {
++    public:
++        GrayQuestTrigger(PlayerbotAI* ai) : Trigger(ai, "gray quest", 30) {}
++        virtual bool IsActive() override;
++    };
++}
+diff --git a/playerbot/strategy/triggers/QuestTurnInDueTrigger.cpp b/playerbot/strategy/triggers/QuestTurnInDueTrigger.cpp
+new file mode 100644
+index 0000000..f49d5ca
+--- /dev/null
++++ b/playerbot/strategy/triggers/QuestTurnInDueTrigger.cpp
+@@ -0,0 +1,15 @@
++#include "playerbot/playerbot.h"
++#include "QuestTurnInDueTrigger.h"
++#include "playerbot/strategy/values/QuestFlow.h"
++#include "playerbot/TravelMgr.h"
++
++using namespace ai;
++
++bool QuestTurnInDueTrigger::IsActive()
++{
++    if (!QuestFlow::HasTurnIn(bot) || QuestFlow::HasUnfinishedLocalQuest(bot))
++        return false;
++
++    TravelTarget* target = AI_VALUE(TravelTarget*, "travel target");
++    return !(target && dynamic_cast<QuestRelationTravelDestination*>(target->GetDestination()));
++}
+diff --git a/playerbot/strategy/triggers/QuestTurnInDueTrigger.h b/playerbot/strategy/triggers/QuestTurnInDueTrigger.h
+new file mode 100644
+index 0000000..2101443
+--- /dev/null
++++ b/playerbot/strategy/triggers/QuestTurnInDueTrigger.h
+@@ -0,0 +1,16 @@
++#pragma once
++#include "playerbot/strategy/Trigger.h"
++
++namespace ai
++{
++    // kalimdor: a finished quest waits to be turned in, and no quest of the
++    // zone the bot is in is unfinished (owner, 2026-11-02; values/
++    // QuestFlow.h) - returning it comes first, as upkeep. Not while the bot
++    // is already on its way to a quest NPC.
++    class QuestTurnInDueTrigger : public Trigger
++    {
++    public:
++        QuestTurnInDueTrigger(PlayerbotAI* ai) : Trigger(ai, "quest turn in due", 5) {}
++        virtual bool IsActive() override;
++    };
++}
+diff --git a/playerbot/strategy/triggers/TriggerContext.h b/playerbot/strategy/triggers/TriggerContext.h
+index c5d507b..6a19141 100644
+--- a/playerbot/strategy/triggers/TriggerContext.h
++++ b/playerbot/strategy/triggers/TriggerContext.h
+@@ -5,6 +5,8 @@
+ #include "StrongEnemyPlayerNearTrigger.h"
+ #include "HomeBindNotAllowedTrigger.h"
+ #include "QuestProgressTrigger.h"
++#include "QuestTurnInDueTrigger.h"
++#include "GrayQuestTrigger.h"
+ #include "GenericTriggers.h"
+ #include "LootTriggers.h"
+ #include "GenericTriggers.h"
+@@ -92,6 +94,8 @@ namespace ai
+             creators["strong enemy player near"] = [](PlayerbotAI* ai) { return new StrongEnemyPlayerNearTrigger(ai); };
+             creators["home bind not allowed"] = [](PlayerbotAI* ai) { return new HomeBindNotAllowedTrigger(ai); };
+             creators["quest progress"] = [](PlayerbotAI* ai) { return new QuestProgressTrigger(ai); };
++            creators["quest turn in due"] = [](PlayerbotAI* ai) { return new QuestTurnInDueTrigger(ai); };
++            creators["gray quest"] = [](PlayerbotAI* ai) { return new GrayQuestTrigger(ai); };
+             creators["enemy player near"] = [](PlayerbotAI* ai) { return new EnemyPlayerNear(ai); };
+ 
+             creators["combat start"] = [](PlayerbotAI* ai) { return new CombatStartTrigger(ai); };
+diff --git a/playerbot/strategy/values/Archetypes.cpp b/playerbot/strategy/values/Archetypes.cpp
+index 31384ba..6128031 100644
+--- a/playerbot/strategy/values/Archetypes.cpp
++++ b/playerbot/strategy/values/Archetypes.cpp
+@@ -85,6 +85,8 @@ namespace
+                     else
+                         sLog.outError("Archetype %s: '%s' left out (pvp is a number, always or never; pvp@<level> from that level)", name.c_str(), field.c_str());
+                 }
++                else if (key == "gray_quests" && (value == "keep" || value == "drop"))
++                    archetype.keepGrayQuests = value == "keep";
+                 else
+                     sLog.outError("Archetype %s: unknown part '%s' left out", name.c_str(), field.c_str());
+             }
+diff --git a/playerbot/strategy/values/Archetypes.h b/playerbot/strategy/values/Archetypes.h
+index 5f055cb..d28dd7e 100644
+--- a/playerbot/strategy/values/Archetypes.h
++++ b/playerbot/strategy/values/Archetypes.h
+@@ -28,6 +28,8 @@
+ //   enemy player on sight, guards or not; "never": none, and it keeps away
+ //   from all of them. pvp@N applies from level N on; the highest N at or
+ //   below the bot's level wins, plain pvp below that.
++// gray_quests: drop (the default) or keep - whether a quest that gives no
++//   XP any more is dropped from the log (kalimdor: values/QuestFlow.h).
+ 
+ class Player;
+ 
+@@ -38,6 +40,9 @@ namespace ai
+         std::string name;
+         std::vector<std::string> activities;
+         std::map<uint32_t, float> pvp;  // from level -> margin
++        // Quests that give no XP any more are kept, not dropped (owner,
++        // 2026-11-02: "gray_quests=keep"; dropping is the default).
++        bool keepGrayQuests = false;
+     };
+ 
+     class Archetypes
+diff --git a/playerbot/strategy/values/HomeBinds.cpp b/playerbot/strategy/values/HomeBinds.cpp
+index 40af6ee..5e7c813 100644
+--- a/playerbot/strategy/values/HomeBinds.cpp
++++ b/playerbot/strategy/values/HomeBinds.cpp
+@@ -82,6 +82,12 @@ bool HomeBinds::Allowed(Player* bot, const WorldPosition& bind)
+     if (home && zone && zone == home->zone)
+         return true;
+ 
++    // Below CapitalFromLevel, on the bot's home continent only (owner,
++    // 2026-11-02): a troll bound in Undercity hearthed away from all his
++    // quests, across the sea.
++    if (home && bot->GetLevel() < CapitalFromLevel && bind.getMapId() != home->map)
++        return false;
++
+     if (EnemyGuards::IsHostileTerritory(bind, bot))
+         return false;
+ 
+@@ -106,3 +112,12 @@ bool HomeBinds::BindToDefault(Player* bot)
+         bot->GetLevel() < CapitalFromLevel ? "starting area" : "capital", WorldPosition(inn->map, inn->x, inn->y, inn->z).getAreaName().c_str());
+     return true;
+ }
++
++uint32 HomeBinds::HomeMap(Player* bot)
++{
++    std::call_once(innsLoaded, [] { InnCollector collector; sObjectMgr.DoCreatureData(collector); });
++
++    auto const [start, capital] = RaceInnkeepers(bot->getRace());
++    auto it = innsByEntry.find(start);
++    return it == innsByEntry.end() ? bot->GetMapId() : it->second.map;
++}
+diff --git a/playerbot/strategy/values/HomeBinds.h b/playerbot/strategy/values/HomeBinds.h
+index b4a4538..6f2b328 100644
+--- a/playerbot/strategy/values/HomeBinds.h
++++ b/playerbot/strategy/values/HomeBinds.h
+@@ -29,5 +29,8 @@ namespace ai
+         // Bind the bot to its default home - its starting area's or capital's
+         // innkeeper - if one is known. Says so in the log.
+         static bool BindToDefault(Player* bot);
++        // The continent of the bot's starting area - its home continent - or
++        // its current map if unknown.
++        static uint32 HomeMap(Player* bot);
+     };
+ }
+diff --git a/playerbot/strategy/values/QuestFlow.cpp b/playerbot/strategy/values/QuestFlow.cpp
+new file mode 100644
+index 0000000..abcbd9d
+--- /dev/null
++++ b/playerbot/strategy/values/QuestFlow.cpp
+@@ -0,0 +1,54 @@
++#include "playerbot/playerbot.h"
++#include "QuestFlow.h"
++
++using namespace ai;
++
++namespace
++{
++    // Each quest in the bot's log, with whether it is finished.
++    template <typename F>
++    void ForEachLogQuest(Player* bot, F f)
++    {
++        for (auto const& [questId, status] : bot->getQuestStatusMap())
++        {
++            if (status.m_rewarded || (status.m_status != QUEST_STATUS_INCOMPLETE && status.m_status != QUEST_STATUS_COMPLETE))
++                continue;
++
++            if (Quest const* quest = sObjectMgr.GetQuestTemplate(questId))
++                f(quest, status.m_status == QUEST_STATUS_COMPLETE);
++        }
++    }
++}
++
++bool QuestFlow::GivesXp(Player* bot, Quest const* quest)
++{
++    return quest && quest->XPValue(bot) > 0;
++}
++
++int32 QuestFlow::ZoneOf(Quest const* quest)
++{
++    return quest && quest->GetZoneOrSort() > 0 ? quest->GetZoneOrSort() : 0;
++}
++
++bool QuestFlow::HasLocalQuests(Player* bot)
++{
++    int32 const zone = bot->GetZoneId();
++    bool found = false;
++    ForEachLogQuest(bot, [&](Quest const* quest, bool) { found |= ZoneOf(quest) == zone && GivesXp(bot, quest); });
++    return found;
++}
++
++bool QuestFlow::HasUnfinishedLocalQuest(Player* bot)
++{
++    int32 const zone = bot->GetZoneId();
++    bool found = false;
++    ForEachLogQuest(bot, [&](Quest const* quest, bool finished) { found |= !finished && ZoneOf(quest) == zone && GivesXp(bot, quest); });
++    return found;
++}
++
++bool QuestFlow::HasTurnIn(Player* bot)
++{
++    bool found = false;
++    ForEachLogQuest(bot, [&](Quest const*, bool finished) { found |= finished; });
++    return found;
++}
+diff --git a/playerbot/strategy/values/QuestFlow.h b/playerbot/strategy/values/QuestFlow.h
+new file mode 100644
+index 0000000..19ecad5
+--- /dev/null
++++ b/playerbot/strategy/values/QuestFlow.h
+@@ -0,0 +1,34 @@
++#pragma once
++
++// kalimdor: how a bot works its quest log (owner, 2026-11-02; Kamino 231).
++//  - Quests in the log are travelled to wherever they are, other continents
++//    included (no distance cap; the nearest still first).
++//  - A finished quest is turned in first, as upkeep - unless a quest of the
++//    zone the bot is in is still unfinished.
++//  - While the bot has quests of its zone that still give XP, it does not
++//    leave: its activities stay in the zone and its quest choice sticks to
++//    them. One that no longer gives XP does not hold it.
++//  - A quest that gives no XP is dropped - for a bot whose archetype says so
++//    (the default; "gray_quests=keep" keeps them).
++// "Of its zone" is the quest's own zone (its ZoneOrSort).
++
++class Player;
++class Quest;
++
++namespace ai
++{
++    class QuestFlow
++    {
++    public:
++        static bool GivesXp(Player* bot, Quest const* quest);
++        // Quests in the log - unfinished or finished, not yet turned in - of
++        // the zone the bot is in, that still give XP.
++        static bool HasLocalQuests(Player* bot);
++        static bool HasUnfinishedLocalQuest(Player* bot);
++        // A finished quest waiting to be turned in.
++        static bool HasTurnIn(Player* bot);
++        // The quest's zone, or 0 for a quest of a sort (a class or
++        // profession quest).
++        static int32 ZoneOf(Quest const* quest);
++    };
++}

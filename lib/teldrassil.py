@@ -94,7 +94,8 @@ MOODS = ["polite", "rude", "direct", "poetic", "logical", "emotional", "evil", "
 
 # What an archetype can list, most wanted first (playerbots/0008,
 # strategy/values/Archetypes.h): the travel activities it ranks.
-ARCHETYPE_ACTIVITIES = ["quests", "grind", "gather", "ah", "wpvp", "bosses", "explore", "rpg"]
+# pvpi is not a travel goal: battlegrounds more often (playerbots/0021).
+ARCHETYPE_ACTIVITIES = ["quests", "grind", "gather", "ah", "wpvp", "bosses", "explore", "rpg", "pvpi"]
 
 # The commands a bot accepts from any player; every other one only from its
 # master (playerbots: PlayerbotAI::IsAllowedCommand).
@@ -275,7 +276,10 @@ def load_roster(data):
                     if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
                         raise RosterError(f"{where}: pvp is a number (1.2: its side 1.2x the enemy's), always or never")
                     pvp[lvl] = float(v)
-                out["archetypes"][name] = {"activities": acts, "pvp": pvp}
+                gray = str(a.get("gray_quests", "drop")).lower()
+                if gray not in ("drop", "keep", "at_cap"):
+                    raise RosterError(f"{where}: gray_quests is drop, keep or at_cap (quests that give no XP any more)")
+                out["archetypes"][name] = {"activities": acts, "pvp": pvp, "gray_quests": gray}
             except (RosterError, KeyError, ValueError, TypeError, AttributeError) as e:
                 errors.append(str(e) if isinstance(e, RosterError) else f"{where}: {e!r}")
 
@@ -546,6 +550,8 @@ def archetype_conf(a):
         v = a["pvp"][lvl]
         v = v if isinstance(v, str) else f"{v:g}"
         parts.append(f"pvp={v}" if lvl == 1 else f"pvp@{lvl}={v}")
+    if a.get("gray_quests") in ("keep", "at_cap"):
+        parts.append(f"gray_quests={a['gray_quests']}")
     return "; ".join(parts)
 
 
