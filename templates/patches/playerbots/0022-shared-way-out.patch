@@ -1,0 +1,75 @@
+diff --git a/playerbot/TravelMgr.cpp b/playerbot/TravelMgr.cpp
+index 606c038..dd86d3e 100644
+--- a/playerbot/TravelMgr.cpp
++++ b/playerbot/TravelMgr.cpp
+@@ -858,9 +858,25 @@ TravelTarget::TravelTarget(PlayerbotAI* ai) : AiObject(ai)
+     SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
+ }
+ 
++TravelTarget::~TravelTarget()
++{
++    // kalimdor: let go of a temporary destination (TemporaryTravelDestination::Hold).
++    if (TemporaryTravelDestination* temporary = dynamic_cast<TemporaryTravelDestination*>(tDestination))
++        if (temporary->Release())
++            delete temporary;
++}
++
+ void TravelTarget::SetTarget(TravelDestination* tDestination1, WorldPosition* wPosition1) {
+-    if (dynamic_cast<TemporaryTravelDestination*>(tDestination) && tDestination1 != tDestination)
+-        delete tDestination;
++    // kalimdor: a temporary destination is freed by the last target holding
++    // it, not by the first to move on (TemporaryTravelDestination::Hold).
++    if (tDestination1 != tDestination)
++    {
++        if (TemporaryTravelDestination* temporary = dynamic_cast<TemporaryTravelDestination*>(tDestination1))
++            temporary->Hold();
++        if (TemporaryTravelDestination* temporary = dynamic_cast<TemporaryTravelDestination*>(tDestination))
++            if (temporary->Release())
++                delete temporary;
++    }
+ 
+     wPosition = wPosition1;
+     tDestination = tDestination1;
+diff --git a/playerbot/TravelMgr.h b/playerbot/TravelMgr.h
+index 174e09a..eebdce3 100644
+--- a/playerbot/TravelMgr.h
++++ b/playerbot/TravelMgr.h
+@@ -5,6 +5,7 @@
+ #include "GuidPosition.h"
+ #include "strategy/values/TravelValues.h"
+ #include "WorldSquare.h"
++#include <atomic>
+ 
+ namespace ai
+ {
+@@ -178,9 +179,18 @@ namespace ai
+ 
+ 		WorldPosition* GetPosition() { return &destination; }
+         void SetPosition(WorldPosition newDestination) { destination = newDestination; }
++
++        // kalimdor: held by every travel target pointing at it, freed by the
++        // last to let go (TravelTarget::SetTarget). Upstream freed it when any
++        // one target moved on - and a group member copies its leader's target:
++        // the leader's way out (MoveAwayFromEnemyGuardAction) was freed under
++        // it, a core dump read the freed one (dev server, 2026-11-03).
++        void Hold() { ++holders; }
++        bool Release() { return --holders == 0; }
+     private:
+         int32 entry = 0;
+         WorldPosition destination;
++        std::atomic<uint32> holders{ 0 };
+     };
+ 
+ 	class EntryTravelDestination : public TravelDestination
+@@ -356,7 +366,10 @@ namespace ai
+ 	public:
+ 		TravelTarget(PlayerbotAI* ai);
+ 		TravelTarget(PlayerbotAI* ai, TravelDestination* tDestination1, WorldPosition* wPosition1) : AiObject(ai) { SetTarget(tDestination1, wPosition1); }
+-		~TravelTarget() = default;
++		~TravelTarget();
++		// kalimdor: a copy would hold a temporary destination without counting.
++		TravelTarget(const TravelTarget&) = delete;
++		TravelTarget& operator=(const TravelTarget&) = delete;
+ 
+ 		float Distance(Player* bot) const { WorldPosition pos(bot);  return wPosition->distance(pos); };
+ 		TravelDestination* GetDestination() const { return tDestination; };
