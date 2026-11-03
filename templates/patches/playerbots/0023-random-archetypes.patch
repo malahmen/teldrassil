@@ -1,0 +1,179 @@
+diff --git a/playerbot/PlayerbotAI.cpp b/playerbot/PlayerbotAI.cpp
+index 98e6965..a492638 100644
+--- a/playerbot/PlayerbotAI.cpp
++++ b/playerbot/PlayerbotAI.cpp
+@@ -4,6 +4,7 @@
+ #include <iomanip>
+ 
+ #include "playerbot/AiFactory.h"
++#include "playerbot/strategy/values/Archetypes.h"
+ 
+ #include "MotionGenerators/MovementGenerator.h"
+ #include "Grids/GridNotifiers.h"
+@@ -2842,6 +2843,13 @@ void PlayerbotAI::ResetStrategies(bool autoLoad)
+ 
+     if (autoLoad && (HasPlayerRelation() || sPlayerbotDbStore.HasStoredRows(bot->GetObjectGuid().GetRawValue()))) sPlayerbotDbStore.Load(this);
+ 
++    // kalimdor: a random bot's drawn archetype brings the strategies teldrassil
++    // writes for a roster bot's (owner, 2026-11-03): quests first - take every
++    // quest. world PvP's "pvp" every random bot has already.
++    if (const Archetype* drawn = Archetypes::Drawn(bot))
++        if (!drawn->activities.empty() && drawn->activities.front() == "quests")
++            ChangeStrategy("+accept all quests", BotState::BOT_STATE_NON_COMBAT);
++
+ #ifdef GenerateBotTests
+     for (auto& [state, strats] : testStrategies)
+     {
+diff --git a/playerbot/PlayerbotAI.h b/playerbot/PlayerbotAI.h
+index 0c61ebe..f665884 100644
+--- a/playerbot/PlayerbotAI.h
++++ b/playerbot/PlayerbotAI.h
+@@ -293,7 +293,8 @@ enum class BotTypeNumber : uint8
+     RPG_PHASE_NUMBER = 6,
+     RPG_STYLE_NUMBER = 7,
+     WORLD_PVP_LOCATION = 8,
+-    MOOD_NUMBER = 9  // kalimdor: a bot's mood (strategy/values/Moods.h)
++    MOOD_NUMBER = 9,  // kalimdor: a bot's mood (strategy/values/Moods.h)
++    ARCHETYPE_NUMBER = 10  // kalimdor: a random bot's archetype (strategy/values/Archetypes.h)
+ };
+ 
+ enum class GrouperType : uint8
+diff --git a/playerbot/strategy/values/Archetypes.cpp b/playerbot/strategy/values/Archetypes.cpp
+index 799e605..de57c2e 100644
+--- a/playerbot/strategy/values/Archetypes.cpp
++++ b/playerbot/strategy/values/Archetypes.cpp
+@@ -5,6 +5,7 @@
+ 
+ #include <algorithm>
+ #include <mutex>
++#include <set>
+ 
+ using namespace ai;
+ 
+@@ -13,6 +14,13 @@ namespace
+     std::map<std::string, Archetype> archetypes;
+     std::once_flag archetypesParsed;
+ 
++    // Bots the roster gave an archetype: at login strategies are built - and
++    // read the archetype - before the stored values load, so these must not
++    // draw one meanwhile (dev server, 2026-11-03: roster bots drew). Read
++    // once; the roster is applied with the world server stopped.
++    std::set<uint32> rosterArchetypes;
++    std::once_flag rosterArchetypesRead;
++
+     std::string Trim(const std::string& text)
+     {
+         size_t const first = text.find_first_not_of(" \t");
+@@ -85,6 +93,8 @@ namespace
+                     else
+                         sLog.outError("Archetype %s: '%s' left out (pvp is a number, always or never; pvp@<level> from that level)", name.c_str(), field.c_str());
+                 }
++                else if (key == "share" && !value.empty() && value.find_first_not_of("0123456789") == std::string::npos && value.size() <= 4)
++                    archetype.share = std::stoul(value);
+                 else if (key == "gray_quests" && (value == "keep" || value == "drop" || value == "at_cap"))
+                     archetype.grayQuests = value == "keep" ? Archetype::GrayQuests::Keep :
+                         value == "at_cap" ? Archetype::GrayQuests::AtCap : Archetype::GrayQuests::Drop;
+@@ -139,7 +149,7 @@ const Archetype* Archetypes::Of(Player* bot)
+ 
+     std::string const name = ai->GetAiObjectContext()->GetValue<std::string>("manual saved string", "archetype")->Get();
+     if (name.empty())
+-        return nullptr;
++        return Drawn(bot);
+ 
+     const Archetype* archetype = Find(name);
+     if (!archetype)
+@@ -155,6 +165,55 @@ const Archetype* Archetypes::Of(Player* bot)
+     return archetype;
+ }
+ 
++const Archetype* Archetypes::Drawn(Player* bot)
++{
++    // Only random bots draw: a player's own bots (.bot add) stay as they are.
++    PlayerbotAI* ai = bot->GetPlayerbotAI();
++    if (ai->IsRealPlayer() || !sPlayerbotAIConfig.IsInRandomAccountList(bot->GetSession()->GetAccountId()))
++        return nullptr;
++
++    std::call_once(rosterArchetypesRead, []()
++    {
++        auto results = CharacterDatabase.Query("SELECT DISTINCT `guid` FROM `ai_playerbot_db_store` WHERE `preset` = '' AND `key` = 'value' AND `value` LIKE 'manual saved string::archetype>%'");
++        if (results)
++        {
++            do
++            {
++                rosterArchetypes.insert(ObjectGuid(results->Fetch()[0].GetUInt64()).GetCounter());
++            } while (results->NextRow());
++        }
++    });
++    if (rosterArchetypes.count(bot->GetGUIDLow()))
++        return nullptr;
++
++    std::call_once(archetypesParsed, Parse);
++
++    uint32 total = 0;
++    for (const auto& [name, archetype] : archetypes)
++        total += archetype.share;
++    if (!total)
++        return nullptr;
++
++    // By name, so the same config gives every bot the same archetype.
++    uint32 number = ai->GetFixedBotNumber(BotTypeNumber::ARCHETYPE_NUMBER, total - 1);
++    for (const auto& [name, archetype] : archetypes)
++    {
++        if (number < archetype.share)
++        {
++            // Said once per bot.
++            static std::mutex saidLock;
++            static std::set<uint32> said;
++            std::lock_guard<std::mutex> guard(saidLock);
++            if (said.insert(bot->GetGUIDLow()).second)
++                sLog.outString("Bot #%u <%s> draws the archetype %s", bot->GetGUIDLow(), bot->GetName(), archetype.name.c_str());
++            return &archetype;
++        }
++        number -= archetype.share;
++    }
++
++    return nullptr;
++}
++
+ int Archetypes::Rank(const Archetype* archetype, const std::string& activity)
+ {
+     if (!archetype)
+diff --git a/playerbot/strategy/values/Archetypes.h b/playerbot/strategy/values/Archetypes.h
+index 672cc4f..112529a 100644
+--- a/playerbot/strategy/values/Archetypes.h
++++ b/playerbot/strategy/values/Archetypes.h
+@@ -31,6 +31,11 @@
+ // gray_quests: drop (the default), keep, or at_cap - whether a quest that
+ //   gives no XP any more is dropped from the log and refused, kept, or kept
+ //   and taken only at the level cap (kalimdor: values/QuestFlow.h).
++// share: how many of the random bots draw it, against the other archetypes'
++//   shares (default 1: equal shares; 0: none). A random bot - one on a
++//   random-bot account that the roster gives no archetype - draws one from
++//   its fixed number, the same at every start, nothing stored (owner,
++//   2026-11-03: every random bot follows an archetype, equal shares).
+ 
+ class Player;
+ 
+@@ -47,6 +52,8 @@ namespace ai
+         // log space permitting).
+         enum class GrayQuests { Drop, Keep, AtCap };
+         GrayQuests grayQuests = GrayQuests::Drop;
++        // Its share of the random bots, against the other archetypes'.
++        uint32_t share = 1;
+     };
+ 
+     class Archetypes
+@@ -59,8 +66,12 @@ namespace ai
+         static const std::vector<std::string>& ActivityNames();
+ 
+         static const Archetype* Find(const std::string& name);
+-        // The bot's archetype, or none.
++        // The bot's archetype: the roster's, else drawn for a random bot by
++        // the shares; or none.
+         static const Archetype* Of(Player* bot);
++        // The archetype a random bot draws, or none (not a random bot, or no
++        // shares).
++        static const Archetype* Drawn(Player* bot);
+         // Where the activity is in the archetype's list, first 0, or -1.
+         static int Rank(const Archetype* archetype, const std::string& activity);
+         // The margin for starting a fight with an enemy player, at the bot's

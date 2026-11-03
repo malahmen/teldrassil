@@ -286,6 +286,9 @@ See `examples/roster.example.json`. The rules it enforces:
   while an enemy player is in the zone (patch 0014).
   An archetype listing `pvpi` goes to battlegrounds more often (first for a
   free slot, no cool-down) - not a travel goal: it still levels and quests.
+  Random bots - those the roster does not list - each draw one of the
+  archetypes, by `share` (default 1 each: equal shares; 0: none), the same
+  at every start (patch 0023).
   And `gray_quests`: `drop` (the default), `keep` or `at_cap` - whether a
   quest that gives no XP any more is dropped from the bot's log and refused,
   kept, or kept and taken only at the level cap (log space permitting). It also has `pvp`:
@@ -318,7 +321,7 @@ See `examples/roster.example.json`. The rules it enforces:
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries twenty-two changes to playerbots (`templates/patches/playerbots/`)
+teldrassil carries twenty-three changes to playerbots (`templates/patches/playerbots/`)
 and two to the core (`templates/patches/mangos-classic/`), applied before
 every build:
 
@@ -469,6 +472,12 @@ every build:
   group member copies its leader's target, so the member freed the leader's
   way out under it (dev server core dump, 2026-11-03). Now the last target
   holding one frees it.
+- **playerbots 0023:** every random bot follows an archetype: one the roster
+  does not list draws one of the roster's archetypes from its fixed number -
+  equal shares unless an archetype sets `share` - the same at every start,
+  nothing stored, logged once ("draws the archetype"), with the strategies a
+  roster bot's archetype gets (quests first: take every quest). Before, only roster
+  bots had one. (Owner, 2026-11-03.)
 - **playerbots 0016:** quests have no time budget - questing is every bot's
   way forward, and 2 hours cut it off for an hour; and a way out of hostile
   territory never leads into a zone above the bot's level (a level-5 troll

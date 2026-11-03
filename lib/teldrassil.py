@@ -279,7 +279,12 @@ def load_roster(data):
                 gray = str(a.get("gray_quests", "drop")).lower()
                 if gray not in ("drop", "keep", "at_cap"):
                     raise RosterError(f"{where}: gray_quests is drop, keep or at_cap (quests that give no XP any more)")
-                out["archetypes"][name] = {"activities": acts, "pvp": pvp, "gray_quests": gray}
+                # How many of the random bots draw it, against the others'
+                # shares (playerbots/0023): 1 each - equal - unless set.
+                share = a.get("share", 1)
+                if isinstance(share, bool) or not isinstance(share, int) or not 0 <= share <= 1000:
+                    raise RosterError(f"{where}: share is a whole number 0-1000 (its share of the random bots; 0: none)")
+                out["archetypes"][name] = {"activities": acts, "pvp": pvp, "gray_quests": gray, "share": share}
             except (RosterError, KeyError, ValueError, TypeError, AttributeError) as e:
                 errors.append(str(e) if isinstance(e, RosterError) else f"{where}: {e!r}")
 
@@ -552,6 +557,8 @@ def archetype_conf(a):
         parts.append(f"pvp={v}" if lvl == 1 else f"pvp@{lvl}={v}")
     if a.get("gray_quests") in ("keep", "at_cap"):
         parts.append(f"gray_quests={a['gray_quests']}")
+    if a.get("share", 1) != 1:
+        parts.append(f"share={a['share']}")
     return "; ".join(parts)
 
 
