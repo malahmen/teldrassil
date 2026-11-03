@@ -1,0 +1,35 @@
+diff --git a/playerbot/strategy/actions/MoveToTravelTargetAction.cpp b/playerbot/strategy/actions/MoveToTravelTargetAction.cpp
+index 90030d2..2730710 100644
+--- a/playerbot/strategy/actions/MoveToTravelTargetAction.cpp
++++ b/playerbot/strategy/actions/MoveToTravelTargetAction.cpp
+@@ -230,6 +230,12 @@ bool MoveToTravelTargetAction::isUseful()
+             if (!travelTarget->IsForced())
+                 return false;
+ 
++    // kalimdor: a target without a position - emptied by a reset while a
++    // cached "travelling" still let this run - is nothing to move to; read,
++    // it crashed the world server (dev server, 2026-11-02; Kamino 231).
++    if (!travelTarget->GetPosition())
++        return false;
++
+     WorldPosition travelPos(*travelTarget->GetPosition());
+ 
+     if (travelPos.isDungeon() && bot->GetGroup() && bot->GetGroup()->IsLeader(bot->GetObjectGuid()) && sTravelMgr.MapTransDistance(bot, travelPos, true) < sPlayerbotAIConfig.sightDistance && !AI_VALUE2(bool, "group and", "near leader"))
+diff --git a/playerbot/strategy/actions/RethinkQuestTargetAction.cpp b/playerbot/strategy/actions/RethinkQuestTargetAction.cpp
+index 2575b54..8187b57 100644
+--- a/playerbot/strategy/actions/RethinkQuestTargetAction.cpp
++++ b/playerbot/strategy/actions/RethinkQuestTargetAction.cpp
+@@ -6,9 +6,11 @@ using namespace ai;
+ 
+ bool RethinkQuestTargetAction::Execute(Event& event)
+ {
+-    // As upstream releases a travel target (PlayerbotAI::ResetStrategies).
++    // Expired, its destination and position kept until the travel system
++    // replaces it: emptied at once (as PlayerbotAI::ResetStrategies does),
++    // a cached "travelling" let MoveToTravelTargetAction read the missing
++    // position, and the world server crashed (dev server, 2026-11-02).
+     TravelTarget* target = AI_VALUE(TravelTarget*, "travel target");
+-    sTravelMgr.SetNullTravelTarget(target);
+     target->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
+     target->SetExpireIn(1000);
+     return true;
