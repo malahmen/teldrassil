@@ -442,13 +442,17 @@ every build:
   level cap, upkeep (vendors, repairs, the auction house, mail, bank,
   trainers) never sends a bot into hostile territory, and the default home
   is known by its innkeeper's position (a bot was rebound once a minute).
+- **playerbots 0019:** a fix for a crash. The quest re-choice (0017) emptied
+  the travel target while a cached "travelling" still let the move action
+  read its missing position; the target is now only expired, and the move
+  action skips a target without a position (dev server, 2026-11-02).
 - **playerbots 0020:** how bots work their quest log. Quests in the log are
   travelled to wherever they are, other continents included; a finished
   quest is turned in first, as upkeep, unless a quest of the bot's zone is
   unfinished; while a bot has quests of its zone that still give XP, its
   activities stay in that zone; a quest that gives no XP is dropped (per
   archetype, `gray_quests`); and below level 20 a hearthstone bind must be
-  on the bot's home continent. (meksha, 2026-11-02.) Merge after 0019.
+  on the bot's home continent. (meksha, 2026-11-02.)
 - **playerbots 0021:** a due turn-in replaces what the bot is doing (held back,
   it was requested 9 times in 2367); grey quests are not taken by a bot that
   drops them, and `gray_quests: at_cap` keeps them at the level cap only;
