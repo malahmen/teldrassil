@@ -318,7 +318,7 @@ See `examples/roster.example.json`. The rules it enforces:
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries twenty-one changes to playerbots (`templates/patches/playerbots/`)
+teldrassil carries twenty-two changes to playerbots (`templates/patches/playerbots/`)
 and two to the core (`templates/patches/mangos-classic/`), applied before
 every build:
 
@@ -464,6 +464,11 @@ every build:
   level band - 10-19: 10, 20-29: 10, 30-39: 15, 40-59: 15 for `pvpi`
   archetypes only, the cap: 40 - `pvpi` archetypes first, the rest with 45
   minutes between battlegrounds. (2026-11-03.)
+- **playerbots 0022:** a fix for a crash. A way out (0005, 0018) is a
+  temporary destination, freed by the first travel target to move on - but a
+  group member copies its leader's target, so the member freed the leader's
+  way out under it (dev server core dump, 2026-11-03). Now the last target
+  holding one frees it.
 - **playerbots 0016:** quests have no time budget - questing is every bot's
   way forward, and 2 hours cut it off for an hour; and a way out of hostile
   territory never leads into a zone above the bot's level (a level-5 troll
