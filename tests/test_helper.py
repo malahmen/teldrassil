@@ -486,6 +486,20 @@ class Archetypes(unittest.TestCase):
         self.assertEqual(changes["AiPlayerbot.Archetype.creeper"], "activities=wpvp,grind; pvp=1; pvp@60=always")
         self.assertEqual(changes["AiPlayerbot.Archetype.pacifist"], "activities=quests; pvp=never")
 
+    def test_gray_quests_keep_is_written_and_drop_is_the_default(self):
+        arch = copy.deepcopy(ARCHETYPES)
+        arch["quester"]["gray_quests"] = "keep"
+        changes = t.conf_changes(t.load_roster(roster(archetypes=arch)), "", "/c")
+        self.assertEqual(changes["AiPlayerbot.Archetype.quester"], "activities=quests,grind,explore; pvp=1.2; gray_quests=keep")
+        self.assertNotIn("gray_quests", changes["AiPlayerbot.Archetype.creeper"])
+        arch["pacifist"]["gray_quests"] = "at_cap"
+        changes = t.conf_changes(t.load_roster(roster(archetypes=arch)), "", "/c")
+        self.assertEqual(changes["AiPlayerbot.Archetype.pacifist"], "activities=quests; pvp=never; gray_quests=at_cap")
+        arch["creeper"]["gray_quests"] = "sometimes"
+        with self.assertRaises(t.RosterError) as e:
+            t.load_roster(roster(archetypes=arch))
+        self.assertIn("gray_quests is drop, keep or at_cap", str(e.exception))
+
     def test_no_archetypes_section_leaves_the_conf_alone(self):
         changes = t.conf_changes(t.load_roster(roster()), "", "/c")
         self.assertFalse(any("Archetype" in k for k in changes))
