@@ -1,0 +1,326 @@
+diff --git a/playerbot/PlayerbotAIConfig.cpp b/playerbot/PlayerbotAIConfig.cpp
+index ee7bc34..ea8a451 100644
+--- a/playerbot/PlayerbotAIConfig.cpp
++++ b/playerbot/PlayerbotAIConfig.cpp
+@@ -698,6 +698,9 @@ bool PlayerbotAIConfig::Initialize()
+     // Below this, a bot with an archetype earns its money questing, not
+     // grinding for it (owner, 2026-10-31; strategy/values/Goals.h).
+     moneyGrindMinLevel = config.GetIntDefault("AiPlayerbot.MoneyGrindMinLevel", 20);
++    // A quest this many levels below the bot is grey; 0: the game's grey
++    // level (owner, 2026-11-04: to probe which gap makes them grey).
++    grayQuestGap = config.GetIntDefault("AiPlayerbot.GrayQuestGap", 0);
+ 
+     llmPrompt = config.GetStringDefault("AiPlayerbot.LLMPrompt", "<receiver name>:<initial message>");
+     llmPostPrompt = config.GetStringDefault("AiPlayerbot.LLMPostPrompt", "<sender name>:");
+diff --git a/playerbot/PlayerbotAIConfig.h b/playerbot/PlayerbotAIConfig.h
+index 68ced53..5ae5b81 100644
+--- a/playerbot/PlayerbotAIConfig.h
++++ b/playerbot/PlayerbotAIConfig.h
+@@ -407,6 +407,9 @@ public:
+     // (Kamino 211).
+     std::map<std::string, std::string> archetypes;
+     uint32 worldPvpShare, worldPvpMinutes, moneyGrindMinLevel;
++    // kalimdor: a quest is grey this many levels below the bot; 0: the game's
++    // grey level (strategy/values/QuestFlow.h).
++    uint32 grayQuestGap;
+     uint32 llmEnabled, llmContextLength, llmBotToBotChatChance, llmGenerationTimeout, llmMaxSimultaniousGenerations, llmRpgAIChatChance;
+     bool llmGlobalContext;
+     ParsedUrl llmEndPointUrl;
+diff --git a/playerbot/strategy/actions/DropGrayQuestsAction.cpp b/playerbot/strategy/actions/DropGrayQuestsAction.cpp
+index 4652266..986d0f6 100644
+--- a/playerbot/strategy/actions/DropGrayQuestsAction.cpp
++++ b/playerbot/strategy/actions/DropGrayQuestsAction.cpp
+@@ -11,7 +11,7 @@ bool DropGrayQuestsAction::Execute(Event& event)
+     {
+         uint32 const questId = bot->GetQuestSlotQuestId(slot);
+         Quest const* quest = sObjectMgr.GetQuestTemplate(questId);
+-        if (!quest || QuestFlow::GivesXp(bot, quest))
++        if (!quest || QuestFlow::GivesXp(bot, quest) || QuestFlow::IsAttunement(questId))
+             continue;
+ 
+         // As DropQuestAction does.
+@@ -21,7 +21,7 @@ bool DropGrayQuestsAction::Execute(Event& event)
+         bot->getQuestStatusMap()[questId].m_rewarded = false;
+         dropped = true;
+ 
+-        sLog.outString("Bot #%d %s:%d <%s>: drops quest %s (level %d) - no XP any more", bot->GetGUIDLow(),
++        sLog.outString("Bot #%d %s:%d <%s>: drops quest %s (level %d) - grey now", bot->GetGUIDLow(),
+             bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), quest->GetTitle().c_str(), quest->GetQuestLevel());
+     }
+ 
+diff --git a/playerbot/strategy/actions/QuestAction.cpp b/playerbot/strategy/actions/QuestAction.cpp
+index 306d4e6..438828c 100644
+--- a/playerbot/strategy/actions/QuestAction.cpp
++++ b/playerbot/strategy/actions/QuestAction.cpp
+@@ -204,9 +204,14 @@ bool QuestAction::AcceptQuest(Player* requester, Quest const* quest, uint64 ques
+     // kalimdor: a bot whose archetype drops quests that give no XP does not
+     // take them either - it took one up again after each drop (dev server,
+     // 2026-11-02; values/QuestFlow.h).
+-    if (!ai->IsRealPlayer() && !QuestFlow::GivesXp(bot, quest) && !QuestFlow::HoldsGray(bot))
++    if (!ai->IsRealPlayer() && !QuestFlow::GivesXp(bot, quest) && !QuestFlow::HoldsGray(bot) && !QuestFlow::IsAttunement(questId))
+         return false;
+ 
++    // kalimdor: a full log makes room for a quest giving more XP than the
++    // weakest in it (Kamino 250; values/QuestFlow.h).
++    if (bot->CanTakeQuest(quest, false) && QuestFlow::WorthSwapping(bot, quest))
++        QuestFlow::DropWeakest(bot, quest);
++
+     std::string outputMessage;
+     std::map<std::string, std::string> args;
+     args["%quest"] = chat->formatQuest(quest);
+diff --git a/playerbot/strategy/triggers/GrayQuestTrigger.cpp b/playerbot/strategy/triggers/GrayQuestTrigger.cpp
+index b28740a..c6cb2a9 100644
+--- a/playerbot/strategy/triggers/GrayQuestTrigger.cpp
++++ b/playerbot/strategy/triggers/GrayQuestTrigger.cpp
+@@ -13,7 +13,7 @@ bool GrayQuestTrigger::IsActive()
+     for (uint8 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+     {
+         if (Quest const* quest = sObjectMgr.GetQuestTemplate(bot->GetQuestSlotQuestId(slot)))
+-            if (!QuestFlow::GivesXp(bot, quest))
++            if (!QuestFlow::GivesXp(bot, quest) && !QuestFlow::IsAttunement(quest->GetQuestId()))
+                 return true;
+     }
+ 
+diff --git a/playerbot/strategy/triggers/RpgTriggers.cpp b/playerbot/strategy/triggers/RpgTriggers.cpp
+index 99eb8a6..224ab80 100644
+--- a/playerbot/strategy/triggers/RpgTriggers.cpp
++++ b/playerbot/strategy/triggers/RpgTriggers.cpp
+@@ -7,6 +7,7 @@
+ #include "playerbot/ServerFacade.h"
+ #include "playerbot/strategy/values/ItemUsageValue.h"
+ #include "playerbot/TravelMgr.h"
++#include "playerbot/strategy/values/QuestFlow.h"
+ #include "AI/ScriptDevAI/ScriptDevAIMgr.h"
+ #include "playerbot/strategy/values/HomeBinds.h"
+ 
+@@ -77,10 +78,13 @@ bool RpgStartQuestTrigger::IsActive()
+ {
+     GuidPosition guidP(getGuidP());
+ 
+-    if (AI_VALUE(uint8, "free quest log slots") == 0)
++    if (!guidP.IsCreature() && !guidP.IsGameObject())
+         return false;
+ 
+-    if (!guidP.IsCreature() && !guidP.IsGameObject())
++    // kalimdor: a full log still goes to a giver offering a quest worth
++    // dropping the weakest for (Kamino 250; values/QuestFlow.h).
++    if (AI_VALUE(uint8, "free quest log slots") == 0 &&
++        !QuestFlow::OffersSwap(bot, guidP.IsCreature() ? int32(guidP.GetEntry()) : -int32(guidP.GetEntry())))
+         return false;
+ 
+     if (guidP.IsHostileTo(bot))
+diff --git a/playerbot/strategy/values/QuestFlow.cpp b/playerbot/strategy/values/QuestFlow.cpp
+index 7fff086..bc2fab2 100644
+--- a/playerbot/strategy/values/QuestFlow.cpp
++++ b/playerbot/strategy/values/QuestFlow.cpp
+@@ -2,6 +2,11 @@
+ #include "QuestFlow.h"
+ #include "Archetypes.h"
+ #include "World/World.h"
++#include "playerbot/PlayerbotAIConfig.h"
++#include "Tools/Formulas.h"
++
++#include <mutex>
++#include <set>
+ 
+ using namespace ai;
+ 
+@@ -22,9 +27,24 @@ namespace
+     }
+ }
+ 
++bool QuestFlow::IsGrey(Player* bot, Quest const* quest)
++{
++    // A quest level of 0 or less follows the player's: never grey. Nor are
++    // class and profession quests - they give spells, totems, skills: a
++    // shaman dropped its totem quests, a priest its own (dev server,
++    // 2026-11-04); upstream always does class quests (NeedQuestRewardValue).
++    if (!quest || quest->GetQuestLevel() <= 0 || quest->GetRequiredClasses() || quest->GetRequiredSkill())
++        return false;
++
++    uint32 const level = bot->GetLevel();
++    uint32 const gap = sPlayerbotAIConfig.grayQuestGap;
++    uint32 const grayLevel = gap ? (level > gap ? level - gap : 0) : MaNGOS::XP::GetGrayLevel(level);
++    return uint32(quest->GetQuestLevel()) <= grayLevel;
++}
++
+ bool QuestFlow::GivesXp(Player* bot, Quest const* quest)
+ {
+-    return quest && quest->XPValue(bot) > 0;
++    return quest && !IsGrey(bot, quest);
+ }
+ 
+ int32 QuestFlow::ZoneOf(Quest const* quest)
+@@ -55,6 +75,113 @@ bool QuestFlow::HasTurnIn(Player* bot)
+     return found;
+ }
+ 
++bool QuestFlow::IsAttunement(uint32_t questId)
++{
++    // The chains, read once: each attunement quest and every quest before it.
++    static std::set<uint32> chains;
++    static std::once_flag built;
++    std::call_once(built, []()
++    {
++        std::vector<uint32> todo(sPlayerbotAIConfig.randomBotQuestIds.begin(), sPlayerbotAIConfig.randomBotQuestIds.end());
++        while (!todo.empty())
++        {
++            uint32 const id = todo.back();
++            todo.pop_back();
++            Quest const* quest = sObjectMgr.GetQuestTemplate(id);
++            if (!quest || !chains.insert(id).second)
++                continue;
++            if (int32 const prev = quest->GetPrevQuestId())
++                todo.push_back(uint32(prev > 0 ? prev : -prev));
++        }
++    });
++
++    return chains.count(questId);
++}
++
++namespace
++{
++    // The log slot of the weakest quest - the least XP among unfinished ones
++    // that are not attunements - or -1.
++    int WeakestSlot(Player* bot, uint32& weakestXp)
++    {
++        int weakest = -1;
++        for (uint8 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
++        {
++            uint32 const questId = bot->GetQuestSlotQuestId(slot);
++            Quest const* quest = sObjectMgr.GetQuestTemplate(questId);
++            if (!quest || bot->GetQuestStatus(questId) != QUEST_STATUS_INCOMPLETE || QuestFlow::IsAttunement(questId))
++                continue;
++
++            uint32 const xp = quest->XPValue(bot);
++            if (weakest < 0 || xp < weakestXp)
++            {
++                weakest = slot;
++                weakestXp = xp;
++            }
++        }
++
++        return weakest;
++    }
++
++    bool MaySwap(Player* bot)
++    {
++        if (bot->GetPlayerbotAI()->IsRealPlayer() || bot->SatisfyQuestLog(false))
++            return false;
++
++        const Archetype* archetype = Archetypes::Of(bot);
++        return !(archetype && archetype->grayQuests == Archetype::GrayQuests::AtCap &&
++            bot->GetLevel() >= sWorld.getConfig(CONFIG_UINT32_MAX_PLAYER_LEVEL));
++    }
++}
++
++bool QuestFlow::WorthSwapping(Player* bot, Quest const* offered)
++{
++    if (!MaySwap(bot))
++        return false;
++
++    uint32 weakestXp = 0;
++    return WeakestSlot(bot, weakestXp) >= 0 && offered->XPValue(bot) > weakestXp;
++}
++
++bool QuestFlow::OffersSwap(Player* bot, int32_t giver)
++{
++    if (!MaySwap(bot))
++        return false;
++
++    QuestRelationsMapBounds const bounds = giver > 0 ? sObjectMgr.GetCreatureQuestRelationsMapBounds(giver) : sObjectMgr.GetGOQuestRelationsMapBounds(-giver);
++    for (auto it = bounds.first; it != bounds.second; ++it)
++    {
++        Quest const* quest = sObjectMgr.GetQuestTemplate(it->second);
++        if (quest && quest->IsActive() && bot->GetQuestStatus(it->second) == QUEST_STATUS_NONE && bot->CanSeeStartQuest(quest) &&
++            bot->SatisfyQuestLevel(quest, false) && WorthSwapping(bot, quest))
++            return true;
++    }
++
++    return false;
++}
++
++bool QuestFlow::DropWeakest(Player* bot, Quest const* offered)
++{
++    uint32 weakestXp = 0;
++    int const slot = WeakestSlot(bot, weakestXp);
++    if (slot < 0)
++        return false;
++
++    uint32 const questId = bot->GetQuestSlotQuestId(slot);
++    Quest const* weakest = sObjectMgr.GetQuestTemplate(questId);
++
++    // As DropQuestAction does.
++    bot->SetQuestSlot(slot, 0);
++    bot->TakeQuestSourceItem(questId, false);
++    bot->SetQuestStatus(questId, QUEST_STATUS_NONE);
++    bot->getQuestStatusMap()[questId].m_rewarded = false;
++
++    sLog.outString("Bot #%d %s:%d <%s>: drops quest %s (%u XP) for %s (%u XP) - the log is full", bot->GetGUIDLow(),
++        bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), weakest ? weakest->GetTitle().c_str() : "?", weakestXp,
++        offered->GetTitle().c_str(), offered->XPValue(bot));
++    return true;
++}
++
+ bool QuestFlow::HoldsGray(Player* bot)
+ {
+     const Archetype* archetype = Archetypes::Of(bot);
+diff --git a/playerbot/strategy/values/QuestFlow.h b/playerbot/strategy/values/QuestFlow.h
+index d634410..cd3f853 100644
+--- a/playerbot/strategy/values/QuestFlow.h
++++ b/playerbot/strategy/values/QuestFlow.h
+@@ -8,10 +8,24 @@
+ //  - While the bot has quests of its zone that still give XP, it does not
+ //    leave: its activities stay in the zone and its quest choice sticks to
+ //    them. One that no longer gives XP does not hold it.
+-//  - A quest that gives no XP is dropped, and not taken - for a bot whose
+-//    archetype says so (the default; "gray_quests=keep" keeps them,
+-//    "gray_quests=at_cap" keeps and takes them at the level cap only).
++//  - A grey quest is dropped, and not taken - for a bot whose archetype says
++//    so (the default; "gray_quests=keep" keeps them, "gray_quests=at_cap"
++//    keeps and takes them at the level cap only). Grey is the game's grey
++//    level (MaNGOS::XP::GetGrayLevel - at 21, quest level 14 and below), or
++//    AiPlayerbot.GrayQuestGap levels below the bot when set: the game never
++//    pays a quest nothing (10% at worst), so "no XP" never happened (owner,
++//    2026-11-04).
++//    Class and profession quests are never grey.
+ // "Of its zone" is the quest's own zone (its ZoneOrSort).
++//  - A full log (owner, 2026-11-04; Kamino 250): to take a quest giving more
++//    XP than the weakest one in the log, that one is dropped - the weakest
++//    being the least XP among unfinished quests that are not attunements. A
++//    bot that takes grey quests only at the cap (gray_quests=at_cap, the
++//    quester) takes quests there only with room. Attunement quests - the
++//    chains of AiPlayerbot.RandomBotQuestIds, prerequisites included - are
++//    never dropped, and taken even when grey.
++
++#include <cstdint>
+ 
+ class Player;
+ class Quest;
+@@ -21,6 +35,9 @@ namespace ai
+     class QuestFlow
+     {
+     public:
++        // Grey for the bot (see above).
++        static bool IsGrey(Player* bot, Quest const* quest);
++        // Worth its XP: not grey.
+         static bool GivesXp(Player* bot, Quest const* quest);
+         // Quests in the log - unfinished or finished, not yet turned in - of
+         // the zone the bot is in, that still give XP.
+@@ -35,5 +52,16 @@ namespace ai
+         // archetype, as upstream (yes); else by its gray_quests - keep, or at
+         // the level cap only (at_cap), or not at all (drop).
+         static bool HoldsGray(Player* bot);
++
++        // An attunement quest, or one leading to it.
++        static bool IsAttunement(uint32_t questId);
++        // The log is full and the offered quest is worth dropping the weakest
++        // for (see above).
++        static bool WorthSwapping(Player* bot, Quest const* offered);
++        // A giver (creature entry, or minus a game object's) offering such a
++        // quest.
++        static bool OffersSwap(Player* bot, int32_t giver);
++        // Drops the weakest quest to make room for the offered one; logged.
++        static bool DropWeakest(Player* bot, Quest const* offered);
+     };
+ }
