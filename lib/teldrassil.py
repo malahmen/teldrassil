@@ -297,7 +297,16 @@ def load_roster(data):
                     if isinstance(w, bool) or not isinstance(w, (int, float)) or w < 0:
                         raise RosterError(f"{where}: weights: '{key}' is a number, 0 or more (0: the last resort)")
                     weights[f"{act}@{int(lvl)}" if lvl else act] = float(w)
-                out["archetypes"][name] = {"activities": acts, "pvp": pvp, "gray_quests": gray, "share": share, "weights": weights}
+                # How far off its way for a node, in 40-yard steps (0: any it
+                # sees), and only when short of training money (playerbots/0029).
+                detour = a.get("gather_detour")
+                if detour is not None and (isinstance(detour, bool) or not isinstance(detour, (int, float)) or detour < 0):
+                    raise RosterError(f"{where}: gather_detour is a number, 0 or more (in 40-yard steps; 0: any node it sees)")
+                needs_gold = a.get("gather_needs_gold", False)
+                if not isinstance(needs_gold, bool):
+                    raise RosterError(f"{where}: gather_needs_gold is true or false")
+                out["archetypes"][name] = {"activities": acts, "pvp": pvp, "gray_quests": gray, "share": share, "weights": weights,
+                                           "gather_detour": detour, "gather_needs_gold": needs_gold}
             except (RosterError, KeyError, ValueError, TypeError, AttributeError) as e:
                 errors.append(str(e) if isinstance(e, RosterError) else f"{where}: {e!r}")
 
@@ -572,6 +581,10 @@ def archetype_conf(a):
         parts.append(f"gray_quests={a['gray_quests']}")
     if a.get("share", 1) != 1:
         parts.append(f"share={a['share']}")
+    if a.get("gather_detour") is not None:
+        parts.append(f"gather_detour={a['gather_detour']:g}")
+    if a.get("gather_needs_gold"):
+        parts.append("gather_needs_gold=1")
     for key, w in sorted((a.get("weights") or {}).items()):
         parts.append(f"{key}={w:g}")
     return "; ".join(parts)

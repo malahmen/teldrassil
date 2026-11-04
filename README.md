@@ -296,7 +296,11 @@ See `examples/roster.example.json`. The rules it enforces:
   not never; a `pvpi` weight above 0 makes the archetype `pvpi` (patch 0027).
   Given weights also set how often each activity is tried - its weight over
   the archetype's average times upstream's chance - and an explore weight
-  above 0 lets the bot explore at all (patch 0028).
+  above 0 lets the bot explore at all (patch 0028). `gather_detour`: how far
+  off its way the bot goes for a node it passes, in 40-yard steps (0: any it
+  sees; unset: upstream's 15 yards); `gather_needs_gold: true` - only when it
+  cannot pay its class training, or at the cap while its profession is not
+  maxed (patch 0029).
   And `gray_quests`: `drop` (the default), `keep` or `at_cap` - whether a
   quest that gives no XP any more is dropped from the bot's log and refused,
   kept, or kept and taken only at the level cap (log space permitting). It also has `pvp`:
@@ -329,7 +333,7 @@ See `examples/roster.example.json`. The rules it enforces:
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries twenty-eight changes to playerbots (`templates/patches/playerbots/`)
+teldrassil carries twenty-nine changes to playerbots (`templates/patches/playerbots/`)
 and two to the core (`templates/patches/mangos-classic/`), applied before
 every build:
 
@@ -514,6 +518,11 @@ every build:
   94%...) is multiplied by its weight over the archetype's average, at most
   every time. And exploring is switched on for archetypes weighing it - no
   bot could explore before. (Kamino 249, 2026-11-04.)
+- **playerbots 0029:** gathering as a detour: a bot steps off its way for a
+  node as far as its archetype's `gather_detour` says (in 40-yard steps; 0:
+  any it sees; upstream 15 yards for everyone), some only when short of
+  training money (`gather_needs_gold`); gathering trips go only to zones at
+  or below the bot's level. (Kamino 252, 2026-11-04.)
 - **playerbots 0016:** quests have no time budget - questing is every bot's
   way forward, and 2 hours cut it off for an hour; and a way out of hostile
   territory never leads into a zone above the bot's level (a level-5 troll

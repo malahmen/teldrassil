@@ -527,6 +527,23 @@ class Archetypes(unittest.TestCase):
                 t.load_roster(roster(archetypes=arch))
             self.assertIn(msg, str(e.exception))
 
+    def test_gather_detour_and_needs_gold_are_written_and_checked(self):
+        arch = copy.deepcopy(ARCHETYPES)
+        arch["quester"]["gather_detour"] = 7
+        arch["creeper"]["gather_detour"] = 1.5
+        arch["creeper"]["gather_needs_gold"] = True
+        changes = t.conf_changes(t.load_roster(roster(archetypes=arch)), "", "/c")
+        self.assertEqual(changes["AiPlayerbot.Archetype.quester"], "activities=quests,grind,explore; pvp=1.2; gather_detour=7")
+        self.assertIn("gather_detour=1.5; gather_needs_gold=1", changes["AiPlayerbot.Archetype.creeper"])
+        self.assertNotIn("gather_", changes["AiPlayerbot.Archetype.pacifist"])
+        for key, bad, msg in (("gather_detour", -1, "gather_detour is a number"), ("gather_detour", "7", "gather_detour is a number"),
+                              ("gather_needs_gold", 1, "gather_needs_gold is true or false")):
+            broken = copy.deepcopy(arch)
+            broken["pacifist"][key] = bad
+            with self.assertRaises(t.RosterError) as e:
+                t.load_roster(roster(archetypes=broken))
+            self.assertIn(msg, str(e.exception))
+
     def test_no_archetypes_section_leaves_the_conf_alone(self):
         changes = t.conf_changes(t.load_roster(roster()), "", "/c")
         self.assertFalse(any("Archetype" in k for k in changes))

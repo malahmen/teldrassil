@@ -1,0 +1,200 @@
+diff --git a/playerbot/PlayerbotAIConfig.cpp b/playerbot/PlayerbotAIConfig.cpp
+index ea8a451..d7bdf08 100644
+--- a/playerbot/PlayerbotAIConfig.cpp
++++ b/playerbot/PlayerbotAIConfig.cpp
+@@ -701,6 +701,8 @@ bool PlayerbotAIConfig::Initialize()
+     // A quest this many levels below the bot is grey; 0: the game's grey
+     // level (owner, 2026-11-04: to probe which gap makes them grey).
+     grayQuestGap = config.GetIntDefault("AiPlayerbot.GrayQuestGap", 0);
++    // The yards an archetype's gather_detour counts in (Kamino 252).
++    gatherDetourBase = config.GetFloatDefault("AiPlayerbot.GatherDetourBase", 40.0f);
+ 
+     llmPrompt = config.GetStringDefault("AiPlayerbot.LLMPrompt", "<receiver name>:<initial message>");
+     llmPostPrompt = config.GetStringDefault("AiPlayerbot.LLMPostPrompt", "<sender name>:");
+diff --git a/playerbot/PlayerbotAIConfig.h b/playerbot/PlayerbotAIConfig.h
+index 5ae5b81..7f62e7d 100644
+--- a/playerbot/PlayerbotAIConfig.h
++++ b/playerbot/PlayerbotAIConfig.h
+@@ -410,6 +410,8 @@ public:
+     // kalimdor: a quest is grey this many levels below the bot; 0: the game's
+     // grey level (strategy/values/QuestFlow.h).
+     uint32 grayQuestGap;
++    // kalimdor: an archetype's gather_detour is in these yards (Kamino 252).
++    float gatherDetourBase;
+     uint32 llmEnabled, llmContextLength, llmBotToBotChatChance, llmGenerationTimeout, llmMaxSimultaniousGenerations, llmRpgAIChatChance;
+     bool llmGlobalContext;
+     ParsedUrl llmEndPointUrl;
+diff --git a/playerbot/TravelMgr.cpp b/playerbot/TravelMgr.cpp
+index dd86d3e..0e318f7 100644
+--- a/playerbot/TravelMgr.cpp
++++ b/playerbot/TravelMgr.cpp
+@@ -1,4 +1,5 @@
+ #include "playerbot/TravelMgr.h"
++#include "playerbot/strategy/values/ZoneLevels.h"
+ #include <sstream>
+ #include <ctime>
+ #include <cstdio>
+@@ -2741,11 +2742,20 @@ PartitionedTravelList TravelMgr::GetPartitions(const WorldPosition& center, cons
+         std::vector<WorldPosition*> points = pointRange.second;
+         std::shuffle(points.begin(), points.end(), std::default_random_engine(seed));
+ 
++        // kalimdor: a gathering trip only into zones whose range starts at or
++        // below the bot's level - a node where it dies is time lost (owner,
++        // 2026-11-04; Kamino 252; strategy/values/ZoneLevels.h).
++        bool const gathering = purposeFlag & (uint32(TravelDestinationPurpose::GatherSkinning) | uint32(TravelDestinationPurpose::GatherMining) |
++            uint32(TravelDestinationPurpose::GatherHerbalism) | uint32(TravelDestinationPurpose::GatherFishing));
++
+         for (auto& position : points)
+         {
+             if (!IsLocationLevelValid(*position, info))
+                 continue;
+ 
++            if (gathering && !ZoneLevels::AtOrBelow(info.GetLevel(), *position))
++                continue;
++
+             float distance = position->distance(center);
+ 
+             if (distance > maxDistance)
+diff --git a/playerbot/strategy/actions/AddLootAction.cpp b/playerbot/strategy/actions/AddLootAction.cpp
+index e795701..9d71a46 100644
+--- a/playerbot/strategy/actions/AddLootAction.cpp
++++ b/playerbot/strategy/actions/AddLootAction.cpp
+@@ -1,6 +1,8 @@
+ 
+ #include "playerbot/playerbot.h"
+ #include "AddLootAction.h"
++#include "playerbot/strategy/values/Archetypes.h"
++#include "World/World.h"
+ 
+ #include "playerbot/LootObjectStack.h"
+ #include "playerbot/PlayerbotAIConfig.h"
+@@ -248,7 +250,28 @@ bool AddGatheringLootAction::AddLoot(Player* requester, ObjectGuid guid)
+         gatheringDistanceToUse = sPlayerbotAIConfig.gatheringDistance;
+     }
+ 
+-    if (sServerFacade.IsDistanceGreaterThan(sServerFacade.GetDistance2d(requester, wo), gatheringDistanceToUse))
++    // kalimdor: alone or leading, a bot steps as far off its way for a node
++    // as its archetype's gather detour says, and some only when short of
++    // training money (owner, 2026-11-04; Kamino 252; values/Archetypes.h).
++    if (!isInGroup || ai->IsGroupLeader())
++    {
++        if (const Archetype* archetype = Archetypes::Of(bot))
++        {
++            if (archetype->gatherNeedsGold && !Archetypes::NeedsGold(bot) &&
++                !(bot->GetLevel() >= sWorld.getConfig(CONFIG_UINT32_MAX_PLAYER_LEVEL) && bot->GetSkillValue(loot.skillId) < bot->GetSkillMax(loot.skillId)))
++                return false;
++            if (archetype->gatherDetour == 0.0f)
++                gatheringDistanceToUse = sPlayerbotAIConfig.sightDistance;
++            else if (archetype->gatherDetour > 0.0f)
++                gatheringDistanceToUse = archetype->gatherDetour * sPlayerbotAIConfig.gatherDetourBase;
++        }
++    }
++
++    // kalimdor: measured from the bot when no one asked - a random bot has
++    // no master, and from a null requester the limit never held: such bots
++    // took any node in sight (dev server, 2026-11-04; Kamino 252).
++    Player* const from = requester ? requester : bot;
++    if (sServerFacade.IsDistanceGreaterThan(sServerFacade.GetDistance2d(from, wo), gatheringDistanceToUse))
+     {
+         return false;
+     }
+diff --git a/playerbot/strategy/values/Archetypes.cpp b/playerbot/strategy/values/Archetypes.cpp
+index 703990d..fea1409 100644
+--- a/playerbot/strategy/values/Archetypes.cpp
++++ b/playerbot/strategy/values/Archetypes.cpp
+@@ -130,6 +130,10 @@ namespace
+                     else
+                         sLog.outError("Archetype %s: '%s' left out (pvp is a number, always or never; pvp@<level> from that level)", name.c_str(), field.c_str());
+                 }
++                else if (key == "gather_detour" && !value.empty() && value.find_first_not_of("0123456789.") == std::string::npos)
++                    archetype.gatherDetour = std::stof(value);
++                else if (key == "gather_needs_gold" && (value == "0" || value == "1"))
++                    archetype.gatherNeedsGold = value == "1";
+                 else if (key == "share" && !value.empty() && value.find_first_not_of("0123456789") == std::string::npos && value.size() <= 4)
+                     archetype.share = std::stoul(value);
+                 else if (key == "gray_quests" && (value == "keep" || value == "drop" || value == "at_cap"))
+@@ -341,6 +345,12 @@ bool Archetypes::Roll(Player* bot, const std::string& activity, uint32_t percent
+     return urand(1, 100) <= uint32(chance);
+ }
+ 
++bool Archetypes::NeedsGold(Player* bot)
++{
++    PlayerbotAI* ai = bot->GetPlayerbotAI();
++    return ai && ai->GetAiObjectContext()->GetValue<uint32>("train cost", TRAINER_TYPE_CLASS)->Get() > bot->GetMoney();
++}
++
+ bool Archetypes::Changes(const Archetype* archetype, uint32_t from, uint32_t to)
+ {
+     if (!archetype)
+diff --git a/playerbot/strategy/values/Archetypes.h b/playerbot/strategy/values/Archetypes.h
+index 8806d02..c255351 100644
+--- a/playerbot/strategy/values/Archetypes.h
++++ b/playerbot/strategy/values/Archetypes.h
+@@ -31,6 +31,11 @@
+ //   95%...) times the weight over the archetype's average, at most every
+ //   time; 0 or not named keeps upstream's (Kamino 249, step 2). A weight on
+ //   explore above 0 switches exploring on - no bot had it (PlayerbotAI).
++// gather_detour: how far the bot steps off its way for a node it passes, in
++//   AiPlayerbot.GatherDetourBase yards (40) - 0: any it sees; unset:
++//   upstream's AiPlayerbot.GatheringDistance (15 yd). gather_needs_gold=1:
++//   only when it cannot pay its class training, or at the level cap while
++//   the profession is not maxed (owner, 2026-11-04; Kamino 252).
+ // activities: the older form, a list most wanted first - the same as
+ //   weights n, n-1 ... 1 (a named weight wins), chances as upstream.
+ // pvp: how much stronger its side must be to start a fight with an enemy
+@@ -60,6 +65,10 @@ namespace ai
+         std::vector<std::string> named;
+         // Weights given, not only a list: they set chances too.
+         bool weighted = false;
++        // The detour for a node, in base distances (-1: upstream's), and
++        // whether it gathers only when short of training money.
++        float gatherDetour = -1.0f;
++        bool gatherNeedsGold = false;
+         std::map<uint32_t, float> pvp;  // from level -> margin
+         // Quests that give no XP any more: dropped and not taken (the
+         // default), kept, or kept only at the level cap (owner, 2026-11-02:
+@@ -99,6 +108,8 @@ namespace ai
+         static float ChanceFactor(Player* bot, const std::string& activity);
+         // Upstream's chance in percent, scaled by ChanceFactor, rolled.
+         static bool Roll(Player* bot, const std::string& activity, uint32_t percent);
++        // The bot cannot pay the class training it could take.
++        static bool NeedsGold(Player* bot);
+         // Whether the order or a weight differs between two levels.
+         static bool Changes(const Archetype* archetype, uint32_t from, uint32_t to);
+         // The margin for starting a fight with an enemy player, at the bot's
+diff --git a/playerbot/strategy/values/ZoneLevels.cpp b/playerbot/strategy/values/ZoneLevels.cpp
+index 99dfa81..1dada60 100644
+--- a/playerbot/strategy/values/ZoneLevels.cpp
++++ b/playerbot/strategy/values/ZoneLevels.cpp
+@@ -122,6 +122,17 @@ bool ZoneLevels::MayShortcutTo(Player* bot, const WorldPosition& to)
+     return false;
+ }
+ 
++bool ZoneLevels::AtOrBelow(uint32_t level, const WorldPosition& at)
++{
++    AreaTableEntry const* area = at.GetArea();
++    if (!area)
++        return true;
++
++    uint32_t min = 0, max = 0;
++    uint32_t const zone = area->zone ? area->zone : area->ID;
++    return !Range(zone, min, max) || min <= level;
++}
++
+ bool ZoneLevels::Stranded(Player* bot)
+ {
+     uint32_t min = 0, max = 0;
+diff --git a/playerbot/strategy/values/ZoneLevels.h b/playerbot/strategy/values/ZoneLevels.h
+index ccf187a..c9d6533 100644
+--- a/playerbot/strategy/values/ZoneLevels.h
++++ b/playerbot/strategy/values/ZoneLevels.h
+@@ -46,6 +46,9 @@ namespace ai
+         // route of the travel graph (boats, flights and portals do not make
+         // neighbours).
+         static bool SameOrNeighbour(uint32_t zoneA, uint32_t zoneB);
++        // A place whose zone's range starts at or below the level (an
++        // unlisted zone counts) - where gathering trips go (Kamino 252).
++        static bool AtOrBelow(uint32_t level, const class WorldPosition& at);
+         // Where playerbots' random teleport may put the bot (owner,
+         // 2026-11-02): below level 20 on its home continent, in a zone of the
+         // owner's list whose range holds its level, never in hostile
