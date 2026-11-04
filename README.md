@@ -301,6 +301,10 @@ See `examples/roster.example.json`. The rules it enforces:
   sees; unset: upstream's 15 yards); `gather_needs_gold: true` - only when it
   cannot pay its class training, or at the cap while its profession is not
   maxed (patch 0029).
+
+`keep_stacks` (top level of the roster) - stacks of an item a bot keeps
+before the rest is sold, by item id: `{"2770": 1, "2775": 10}` (copper ore
+one stack, silver ore ten; patch 0031).
   And `gray_quests`: `drop` (the default), `keep` or `at_cap` - whether a
   quest that gives no XP any more is dropped from the bot's log and refused,
   kept, or kept and taken only at the level cap (log space permitting). It also has `pvp`:
@@ -333,7 +337,7 @@ See `examples/roster.example.json`. The rules it enforces:
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries thirty changes to playerbots (`templates/patches/playerbots/`)
+teldrassil carries thirty-one changes to playerbots (`templates/patches/playerbots/`)
 and two to the core (`templates/patches/mangos-classic/`), applied before
 every build:
 
@@ -522,6 +526,12 @@ every build:
   quests - except for an archetype whose first activity is exploring (the
   explorer); and it is reached, skipped for good, once both continents are
   explored. (Kamino 255, 2026-11-04.)
+- **playerbots 0031:** class training first - the trip to the trainer cuts
+  in on what the bot is doing (and a bug fixed under it: no cut-in rule
+  ever matched, due turn-ins included); a bot short of money for training
+  sells at the auction house; no auction-house buying while training waits;
+  and `keep_stacks` - stacks of an item kept before the rest is sold.
+  (Kamino 254, 2026-11-04.)
 - **playerbots 0029:** gathering as a detour: a bot steps off its way for a
   node as far as its archetype's `gather_detour` says (in 40-yard steps; 0:
   any it sees; upstream 15 yards for everyone), some only when short of
