@@ -1,0 +1,185 @@
+diff --git a/playerbot/PlayerbotAI.cpp b/playerbot/PlayerbotAI.cpp
+index 07de9e8..3eca863 100644
+--- a/playerbot/PlayerbotAI.cpp
++++ b/playerbot/PlayerbotAI.cpp
+@@ -2863,6 +2863,12 @@ void PlayerbotAI::ResetStrategies(bool autoLoad)
+             ChangeStrategy("+accept all quests", BotState::BOT_STATE_NON_COMBAT);
+     }
+ 
++    // kalimdor: exploring is a strategy no bot had - the explore activity
++    // never ran, not even for the explorer; an archetype weighing it above 0
++    // switches it on (Kamino 249).
++    if (Archetypes::Weight(Archetypes::Of(bot), "explore", bot->GetLevel()) > 0.0f)
++        ChangeStrategy("+explore", BotState::BOT_STATE_NON_COMBAT);
++
+ #ifdef GenerateBotTests
+     for (auto& [state, strats] : testStrategies)
+     {
+diff --git a/playerbot/strategy/actions/ChooseTravelTargetAction.cpp b/playerbot/strategy/actions/ChooseTravelTargetAction.cpp
+index 7400aa5..e0ad4b1 100644
+--- a/playerbot/strategy/actions/ChooseTravelTargetAction.cpp
++++ b/playerbot/strategy/actions/ChooseTravelTargetAction.cpp
+@@ -3,6 +3,7 @@
+ #include "playerbot/strategy/values/GatheringStalls.h"
+ #include "playerbot/strategy/values/EnemyGuards.h"
+ #include "playerbot/strategy/values/QuestFlow.h"
++#include "playerbot/strategy/values/Archetypes.h"
+ #include "playerbot/LootObjectStack.h"
+ #include "ChooseTravelTargetAction.h"
+ #include "playerbot/PlayerbotAIConfig.h"
+@@ -806,12 +807,15 @@ bool RequestTravelTargetAction::isAllowed() const
+ {
+     TravelDestinationPurpose actionPurpose = TravelDestinationPurpose(stoi(getQualifier()));
+ 
++    // kalimdor: an archetype's weights scale the chance of its activities
++    // (Kamino 249; values/Archetypes.h) - upkeep keeps upstream's.
+     switch (actionPurpose)
+     {
+     case TravelDestinationPurpose::Repair:
+     case TravelDestinationPurpose::Vendor:
+-    case TravelDestinationPurpose::AH:
+         return urand(1, 100) < 90;
++    case TravelDestinationPurpose::AH:
++        return Archetypes::Roll(bot, "ah", 89);
+     case TravelDestinationPurpose::Mail:
+         if (!AI_VALUE(bool, "should get money"))
+             return urand(1, 100) < 30;
+@@ -822,15 +826,15 @@ bool RequestTravelTargetAction::isAllowed() const
+     case TravelDestinationPurpose::GatherHerbalism:
+     case TravelDestinationPurpose::GatherFishing:
+         if (bot->GetGroup())
+-            return urand(1, 100) < 50;
++            return Archetypes::Roll(bot, "gather", 49);
+         else
+-            return urand(1, 100) < 90;
++            return Archetypes::Roll(bot, "gather", 89);
+     case TravelDestinationPurpose::Boss:
+-        return urand(1, 100) < 50;
++        return Archetypes::Roll(bot, "bosses", 49);
+     case TravelDestinationPurpose::Explore:
+-        return urand(1, 100) < 10;
++        return Archetypes::Roll(bot, "explore", 9);
+     case TravelDestinationPurpose::GenericRpg:
+-        return urand(1, 100) < 50;
++        return Archetypes::Roll(bot, "rpg", 49);
+     case TravelDestinationPurpose::Grind:
+         return true;
+     default:
+@@ -1365,9 +1369,8 @@ bool RequestNamedTravelTargetAction::isAllowed() const
+     }
+     else if (name == "pvp")
+     {
+-        if (urand(0, 4))
+-            return false;
+-        return true;
++        // kalimdor: 1 in 5, scaled by an archetype's wpvp weight (Kamino 249).
++        return Archetypes::Roll(bot, "wpvp", 20);
+     }
+     else if (name == "guild meeting")
+         return true;
+@@ -1537,10 +1540,11 @@ bool RequestQuestTravelTargetAction::isAllowed() const
+     if (AI_VALUE(bool, "has focus travel target"))
+         return true;
+ 
++    // kalimdor: scaled by an archetype's quests weight (Kamino 249).
+     if (AI_VALUE(bool, "should get money"))
+-        return urand(1, 100) < 90;
++        return Archetypes::Roll(bot, "quests", 89);
+     else
+-        return urand(1, 100) < 95;
++        return Archetypes::Roll(bot, "quests", 94);
+ 
+     return false;
+ }
+diff --git a/playerbot/strategy/values/Archetypes.cpp b/playerbot/strategy/values/Archetypes.cpp
+index df6be48..703990d 100644
+--- a/playerbot/strategy/values/Archetypes.cpp
++++ b/playerbot/strategy/values/Archetypes.cpp
+@@ -109,6 +109,7 @@ namespace
+                     else
+                     {
+                         archetype.weights[activity][fromLevel] = weight;
++                        archetype.weighted = true;
+                         if (std::find(archetype.named.begin(), archetype.named.end(), activity) == archetype.named.end())
+                             archetype.named.push_back(activity);
+                     }
+@@ -308,6 +309,38 @@ int Archetypes::Rank(const Archetype* archetype, const std::string& activity, ui
+     return it == ordered.end() ? -1 : int(it - ordered.begin());
+ }
+ 
++float Archetypes::ChanceFactor(Player* bot, const std::string& activity)
++{
++    const Archetype* archetype = Of(bot);
++    if (!archetype || !archetype->weighted)
++        return 1.0f;
++
++    uint32_t const level = bot->GetLevel();
++    float const weight = Weight(archetype, activity, level);
++    if (weight <= 0.0f)
++        return 1.0f;
++
++    float sum = 0.0f;
++    int count = 0;
++    for (const std::string& named : Ordered(archetype, level))
++    {
++        float const w = Weight(archetype, named, level);
++        if (w > 0.0f)
++        {
++            sum += w;
++            ++count;
++        }
++    }
++
++    return count ? weight / (sum / count) : 1.0f;
++}
++
++bool Archetypes::Roll(Player* bot, const std::string& activity, uint32_t percent)
++{
++    float const chance = std::min(100.0f, percent * ChanceFactor(bot, activity));
++    return urand(1, 100) <= uint32(chance);
++}
++
+ bool Archetypes::Changes(const Archetype* archetype, uint32_t from, uint32_t to)
+ {
+     if (!archetype)
+diff --git a/playerbot/strategy/values/Archetypes.h b/playerbot/strategy/values/Archetypes.h
+index 6f40219..8806d02 100644
+--- a/playerbot/strategy/values/Archetypes.h
++++ b/playerbot/strategy/values/Archetypes.h
+@@ -26,8 +26,13 @@
+ //   hour gates; below the level cap world PvP is hunting in the bot's own
+ //   zone once it has outlevelled it (values/ZoneLevels.h). pvpi with a
+ //   weight above 0: battlegrounds first (values/BattlegroundSlots.h).
++//   With weights given (not only a list), they also set how often each
++//   activity is tried: upstream's chance (explore 10%, bosses 50%, quests
++//   95%...) times the weight over the archetype's average, at most every
++//   time; 0 or not named keeps upstream's (Kamino 249, step 2). A weight on
++//   explore above 0 switches exploring on - no bot had it (PlayerbotAI).
+ // activities: the older form, a list most wanted first - the same as
+-//   weights n, n-1 ... 1 (a named weight wins).
++//   weights n, n-1 ... 1 (a named weight wins), chances as upstream.
+ // pvp: how much stronger its side must be to start a fight with an enemy
+ //   player (values/EngageOdds.h; 1.2 without an archetype) - "always": every
+ //   enemy player on sight, guards or not; "never": none, and it keeps away
+@@ -53,6 +58,8 @@ namespace ai
+         std::map<std::string, std::map<uint32_t, float>> weights;
+         // The activities in the order named: ties keep it.
+         std::vector<std::string> named;
++        // Weights given, not only a list: they set chances too.
++        bool weighted = false;
+         std::map<uint32_t, float> pvp;  // from level -> margin
+         // Quests that give no XP any more: dropped and not taken (the
+         // default), kept, or kept only at the level cap (owner, 2026-11-02:
+@@ -86,6 +93,12 @@ namespace ai
+         static std::vector<std::string> Ordered(const Archetype* archetype, uint32_t level);
+         // Where the activity is in that order, first 0, or -1.
+         static int Rank(const Archetype* archetype, const std::string& activity, uint32_t level);
++        // How much more (or less) often than upstream the bot tries an
++        // activity: its weight over the archetype's average - 1 with no
++        // archetype, no weights given, or a weight of 0 or none.
++        static float ChanceFactor(Player* bot, const std::string& activity);
++        // Upstream's chance in percent, scaled by ChanceFactor, rolled.
++        static bool Roll(Player* bot, const std::string& activity, uint32_t percent);
+         // Whether the order or a weight differs between two levels.
+         static bool Changes(const Archetype* archetype, uint32_t from, uint32_t to);
+         // The margin for starting a fight with an enemy player, at the bot's
