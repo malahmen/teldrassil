@@ -1,0 +1,109 @@
+diff --git a/playerbot/strategy/values/Goals.cpp b/playerbot/strategy/values/Goals.cpp
+index 4f4f6de..217b38d 100644
+--- a/playerbot/strategy/values/Goals.cpp
++++ b/playerbot/strategy/values/Goals.cpp
+@@ -3,9 +3,42 @@
+ #include "Archetypes.h"
+ #include "playerbot/PlayerbotAIConfig.h"
+ #include "World/World.h"
++#include "playerbot/TravelMgr.h"
++
++#include <mutex>
++#include <vector>
+ 
+ using namespace ai;
+ 
++namespace
++{
++    // The explore flags of every area upstream can send a bot to explore on
++    // the two continents, read once.
++    const std::vector<uint16>& ContinentAreas()
++    {
++        static std::vector<uint16> flags;
++        static std::once_flag built;
++        std::call_once(built, []()
++        {
++            for (auto const& [entry, destinations] : sTravelMgr.GetExploreLocs())
++                for (TravelDestination* destination : destinations)
++                    if (dynamic_cast<ExploreTravelDestination*>(destination))
++                        if (AreaTableEntry const* area = GetAreaEntryByAreaID(destination->GetEntry()))
++                            if ((area->mapid == 0 || area->mapid == 1) && area->exploreFlag != 0xffff)
++                                flags.push_back(area->exploreFlag);
++        });
++        return flags;
++    }
++}
++
++bool Goals::ExploredAll(Player* bot)
++{
++    for (uint16 const flag : ContinentAreas())
++        if (!(bot->GetUInt32Value(PLAYER_EXPLORED_ZONES_1 + flag / 32) & (1u << (flag % 32))))
++            return false;
++    return !ContinentAreas().empty();
++}
++
+ bool Goals::CanGather(Player* bot)
+ {
+     return bot->GetSkillValue(SKILL_HERBALISM) ||
+@@ -20,6 +53,11 @@ bool Goals::Reached(PlayerbotAI* ai, const std::string& activity)
+     if (activity == "grind")
+         return ai->GetBot()->GetLevel() >= sWorld.getConfig(CONFIG_UINT32_MAX_PLAYER_LEVEL);
+ 
++    // Exploring is reached with both continents explored (owner, 2026-11-04;
++    // Kamino 255).
++    if (activity == "explore")
++        return ExploredAll(ai->GetBot());
++
+     return false;
+ }
+ 
+@@ -107,6 +145,26 @@ bool GoalOpenValue::Calculate()
+     if (activity == "gather" && !Goals::CanGather(bot))
+         return false;
+ 
++    // Exploring waits for class training, and for the bot's quests - unless
++    // exploring is its archetype's first activity, the explorer's (owner,
++    // 2026-11-04; Kamino 255). Waiting is not "not reachable": no cool-down.
++    if (activity == "explore")
++    {
++        if (AI_VALUE2(uint32, "train cost", TRAINER_TYPE_CLASS) > 0)
++            return false;
++
++        std::vector<std::string> const ordered = Archetypes::Ordered(Archetypes::Of(bot), bot->GetLevel());
++        if (ordered.empty() || ordered.front() != "explore")
++        {
++            for (uint8 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
++            {
++                uint32 const questId = bot->GetQuestSlotQuestId(slot);
++                if (questId && bot->GetQuestStatus(questId) == QUEST_STATUS_INCOMPLETE)
++                    return false;
++            }
++        }
++    }
++
+     time_t const now = time(nullptr);
+     if (AI_VALUE2(time_t, "manual time", "goal cooldown " + activity) > now)
+         return false;
+diff --git a/playerbot/strategy/values/Goals.h b/playerbot/strategy/values/Goals.h
+index d7de254..0ebbf2a 100644
+--- a/playerbot/strategy/values/Goals.h
++++ b/playerbot/strategy/values/Goals.h
+@@ -7,7 +7,8 @@
+ // kalimdor: an archetype's activities as a goal list that falls through
+ // (Kamino 215; owner's rules, 2026-10-27 and 2026-10-31). A goal - one of the
+ // archetype's activities - is
+-//   reached:            done for good, skipped (grind - "lvl60" - at the cap);
++//   reached:            done for good, skipped (grind - "lvl60" - at the cap;
++//                       explore - both continents explored);
+ //   not reachable now:  its requests found nothing MissesBeforeSkip times in a
+ //                       row over at least MissWindow - skipped, retried
+ //                       after Cooldown (one miss is often a moment: right
+@@ -37,6 +38,8 @@ namespace ai
+         static constexpr time_t MissWindow = 5 * 60;
+ 
+         static bool Reached(PlayerbotAI* ai, const std::string& activity);
++        // Every area upstream explores on both continents explored.
++        static bool ExploredAll(Player* bot);
+         // A gathering profession it can use: herbalism, mining with a Mining
+         // Pick, skinning with a Skinning Knife.
+         static bool CanGather(Player* bot);

@@ -518,6 +518,10 @@ every build:
   94%...) is multiplied by its weight over the archetype's average, at most
   every time. And exploring is switched on for archetypes weighing it - no
   bot could explore before. (Kamino 249, 2026-11-04.)
+- **playerbots 0030:** exploring waits for class training and for the bot's
+  quests - except for an archetype whose first activity is exploring (the
+  explorer); and it is reached, skipped for good, once both continents are
+  explored. (Kamino 255, 2026-11-04.)
 - **playerbots 0029:** gathering as a detour: a bot steps off its way for a
   node as far as its archetype's `gather_detour` says (in 40-yard steps; 0:
   any it sees; upstream 15 yards for everyone), some only when short of
