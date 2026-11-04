@@ -514,6 +514,19 @@ class Archetypes(unittest.TestCase):
                 t.load_roster(roster(archetypes=arch))
             self.assertIn("share is a whole number 0-1000", str(e.exception))
 
+    def test_weights_are_written_and_checked(self):
+        arch = copy.deepcopy(ARCHETYPES)
+        arch["quester"]["weights"] = {"gather": 4, "gather@60": 6.5, "quests": 0}
+        changes = t.conf_changes(t.load_roster(roster(archetypes=arch)), "", "/c")
+        self.assertEqual(changes["AiPlayerbot.Archetype.quester"],
+                         "activities=quests,grind,explore; pvp=1.2; gather=4; gather@60=6.5; quests=0")
+        for bad, msg in (({"fly": 1}, "unknown activity 'fly'"), ({"gather@61": 1}, "a level after @ is 1 to 60"),
+                         ({"gather": -1}, "is a number, 0 or more"), ({"gather": "3"}, "is a number, 0 or more")):
+            arch["creeper"]["weights"] = bad
+            with self.assertRaises(t.RosterError) as e:
+                t.load_roster(roster(archetypes=arch))
+            self.assertIn(msg, str(e.exception))
+
     def test_no_archetypes_section_leaves_the_conf_alone(self):
         changes = t.conf_changes(t.load_roster(roster()), "", "/c")
         self.assertFalse(any("Archetype" in k for k in changes))
