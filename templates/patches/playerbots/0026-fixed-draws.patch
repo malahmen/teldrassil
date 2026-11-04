@@ -1,0 +1,30 @@
+diff --git a/playerbot/strategy/values/Archetypes.cpp b/playerbot/strategy/values/Archetypes.cpp
+index de57c2e..24786b4 100644
+--- a/playerbot/strategy/values/Archetypes.cpp
++++ b/playerbot/strategy/values/Archetypes.cpp
+@@ -195,7 +195,9 @@ const Archetype* Archetypes::Drawn(Player* bot)
+         return nullptr;
+ 
+     // By name, so the same config gives every bot the same archetype.
+-    uint32 number = ai->GetFixedBotNumber(BotTypeNumber::ARCHETYPE_NUMBER, total - 1);
++    // No cycle: the default (1 a minute) drew another archetype every minute
++    // (dev server, 2026-11-04 - one bot travelled as all eight).
++    uint32 number = ai->GetFixedBotNumber(BotTypeNumber::ARCHETYPE_NUMBER, total - 1, 0);
+     for (const auto& [name, archetype] : archetypes)
+     {
+         if (number < archetype.share)
+diff --git a/playerbot/strategy/values/Moods.cpp b/playerbot/strategy/values/Moods.cpp
+index 319b6ee..febdf0b 100644
+--- a/playerbot/strategy/values/Moods.cpp
++++ b/playerbot/strategy/values/Moods.cpp
+@@ -82,7 +82,9 @@ std::string Moods::Of(Player* player)
+             return list;
+         }();
+ 
+-        auto const& pair = pairs[ai->GetFixedBotNumber(BotTypeNumber::MOOD_NUMBER, uint32(pairs.size()) - 1)];
++        // kalimdor: no cycle - the default (1 a minute) changed the pair
++        // every minute (2026-11-04).
++        auto const& pair = pairs[ai->GetFixedBotNumber(BotTypeNumber::MOOD_NUMBER, uint32(pairs.size()) - 1, 0)];
+         first = moods.begin() + pair.first;
+         second = moods.begin() + pair.second;
+     }
