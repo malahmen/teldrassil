@@ -1,0 +1,27 @@
+diff --git a/playerbot/PlayerbotMgr.cpp b/playerbot/PlayerbotMgr.cpp
+index 775d985..e998623 100644
+--- a/playerbot/PlayerbotMgr.cpp
++++ b/playerbot/PlayerbotMgr.cpp
+@@ -560,6 +560,22 @@ std::string PlayerbotHolder::ProcessBotCommand(std::string cmd, ObjectGuid guid,
+     auto it = m_botCommandHandlers.find(cmd);
+     if (it != m_botCommandHandlers.end())
+     {
++        // kalimdor: only add/login, always and delete work from a guid; every
++        // other handler uses the bot itself, and an offline one is null -
++        // ".bot gear <offline character>" crashed the world server (Kamino 248).
++        bool const byGuid = it->second == &PlayerbotHolder::HandleBotAddLogin || it->second == &PlayerbotHolder::HandleBotAlways || it->second == &PlayerbotHolder::HandleBotDelete;
++        if (!bot && !byGuid)
++            return "not online";
++
++        // kalimdor: the commands that generate or re-roll a bot - gear,
++        // spells, consumables, level, pet - are a GM's on random bots: any
++        // player could re-gear or re-roll any of them (Kamino 248).
++        static const std::set<std::string> generators = { "gear", "equip", "train", "learn", "food", "drink", "potions", "pots",
++            "consumes", "consumables", "consums", "regs", "reg", "reagents", "prepare", "prep", "init", "enchants", "ammo", "pet",
++            "levelup", "level", "random" };
++        if (isRandomAccount && !admin && generators.count(cmd))
++            return "only a game master can do that to this bot";
++
+         std::string realParam;
+         
+         if (!subType.empty())
