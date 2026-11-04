@@ -321,7 +321,7 @@ See `examples/roster.example.json`. The rules it enforces:
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries twenty-five changes to playerbots (`templates/patches/playerbots/`)
+teldrassil carries twenty-six changes to playerbots (`templates/patches/playerbots/`)
 and two to the core (`templates/patches/mangos-classic/`), applied before
 every build:
 
@@ -491,6 +491,10 @@ every build:
   game's grey level (or `AiPlayerbot.GrayQuestGap` levels below the bot) -
   "gives no XP" never happened, so no grey quest was ever dropped; class and
   profession quests are never grey. (Kamino 250, 2026-11-04.)
+- **playerbots 0026:** a random bot's archetype and every bot's moods stay
+  fixed - both changed every minute (playerbots' fixed number cycles by
+  default), so random bots travelled as all eight archetypes in turn.
+  (2026-11-04.)
 - **playerbots 0016:** quests have no time budget - questing is every bot's
   way forward, and 2 hours cut it off for an hour; and a way out of hostile
   territory never leads into a zone above the bot's level (a level-5 troll
