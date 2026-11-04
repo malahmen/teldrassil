@@ -321,7 +321,7 @@ See `examples/roster.example.json`. The rules it enforces:
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries twenty-four changes to playerbots (`templates/patches/playerbots/`)
+teldrassil carries twenty-five changes to playerbots (`templates/patches/playerbots/`)
 and two to the core (`templates/patches/mangos-classic/`), applied before
 every build:
 
@@ -483,6 +483,14 @@ every build:
   crashed the server; and on random bots the commands that generate gear,
   spells, consumables, levels or pets are a game master's (the console is
   one) - any player could re-roll any random bot. (Kamino 248, 2026-11-04.)
+- **playerbots 0025:** a full quest log. A bot meeting a quest giver with a
+  quest worth more XP than the weakest unfinished one in its log drops that
+  one and takes the new; a quester at the level cap only takes quests with
+  room. Attunement quests (`RandomBotQuestIds` and their chains) are never
+  dropped, grey or not, and are taken even when grey. And grey is now the
+  game's grey level (or `AiPlayerbot.GrayQuestGap` levels below the bot) -
+  "gives no XP" never happened, so no grey quest was ever dropped; class and
+  profession quests are never grey. (Kamino 250, 2026-11-04.)
 - **playerbots 0016:** quests have no time budget - questing is every bot's
   way forward, and 2 hours cut it off for an hour; and a way out of hostile
   territory never leads into a zone above the bot's level (a level-5 troll
