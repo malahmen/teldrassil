@@ -294,6 +294,9 @@ See `examples/roster.example.json`. The rules it enforces:
   the highest goes first, ties in the order named, and a weight wins over
   the list's place (the list counts as n, n-1 ... 1). 0 is the last resort,
   not never; a `pvpi` weight above 0 makes the archetype `pvpi` (patch 0027).
+  Given weights also set how often each activity is tried - its weight over
+  the archetype's average times upstream's chance - and an explore weight
+  above 0 lets the bot explore at all (patch 0028).
   And `gray_quests`: `drop` (the default), `keep` or `at_cap` - whether a
   quest that gives no XP any more is dropped from the bot's log and refused,
   kept, or kept and taken only at the level cap (log space permitting). It also has `pvp`:
@@ -326,7 +329,7 @@ See `examples/roster.example.json`. The rules it enforces:
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries twenty-seven changes to playerbots (`templates/patches/playerbots/`)
+teldrassil carries twenty-eight changes to playerbots (`templates/patches/playerbots/`)
 and two to the core (`templates/patches/mangos-classic/`), applied before
 every build:
 
@@ -506,6 +509,11 @@ every build:
   never. The `activities` list means weights n ... 1, so nothing changes
   until weights are set; crossing a level where they change rebuilds the
   bot's strategies. (Kamino 249, 2026-11-04.)
+- **playerbots 0028:** weights also set how often: with `weights` given, an
+  activity's chance per try (upstream's: explore 9%, bosses 49%, quests
+  94%...) is multiplied by its weight over the archetype's average, at most
+  every time. And exploring is switched on for archetypes weighing it - no
+  bot could explore before. (Kamino 249, 2026-11-04.)
 - **playerbots 0016:** quests have no time budget - questing is every bot's
   way forward, and 2 hours cut it off for an hour; and a way out of hostile
   territory never leads into a zone above the bot's level (a level-5 troll
