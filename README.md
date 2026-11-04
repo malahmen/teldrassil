@@ -321,7 +321,7 @@ See `examples/roster.example.json`. The rules it enforces:
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries twenty-three changes to playerbots (`templates/patches/playerbots/`)
+teldrassil carries twenty-four changes to playerbots (`templates/patches/playerbots/`)
 and two to the core (`templates/patches/mangos-classic/`), applied before
 every build:
 
@@ -478,6 +478,11 @@ every build:
   nothing stored, logged once ("draws the archetype"), with the strategies a
   roster bot's archetype gets (quests first: take every quest). Before, only roster
   bots had one. (Owner, 2026-11-03.)
+- **playerbots 0024:** bot commands. Any command but add, always and delete
+  on an offline bot answers "not online" - `rndbot gear <offline bot>`
+  crashed the server; and on random bots the commands that generate gear,
+  spells, consumables, levels or pets are a game master's (the console is
+  one) - any player could re-roll any random bot. (Kamino 248, 2026-11-04.)
 - **playerbots 0016:** quests have no time budget - questing is every bot's
   way forward, and 2 hours cut it off for an hour; and a way out of hostile
   territory never leads into a zone above the bot's level (a level-5 troll
