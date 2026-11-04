@@ -1,0 +1,352 @@
+diff --git a/playerbot/PlayerbotAI.cpp b/playerbot/PlayerbotAI.cpp
+index a492638..07de9e8 100644
+--- a/playerbot/PlayerbotAI.cpp
++++ b/playerbot/PlayerbotAI.cpp
+@@ -2506,6 +2506,16 @@ void PlayerbotAI::DoNextAction(bool min)
+         }
+     }
+ 
++    // kalimdor: an archetype's weights can change with level (gather@60);
++    // crossing such a level rebuilds the strategies they shape (Kamino 249).
++    if (bot->GetLevel() != archetypeLevel)
++    {
++        uint32 const was = archetypeLevel;
++        archetypeLevel = bot->GetLevel();
++        if (was && Archetypes::Changes(Archetypes::Of(bot), was, archetypeLevel))
++            ResetStrategies();
++    }
++
+     // fix bots in BG not having proper strategies
+ #ifdef MANGOSBOT_ZERO
+     if (bot->InBattleGround() && !HasStrategy("battleground", BotState::BOT_STATE_NON_COMBAT))
+@@ -2847,8 +2857,11 @@ void PlayerbotAI::ResetStrategies(bool autoLoad)
+     // writes for a roster bot's (owner, 2026-11-03): quests first - take every
+     // quest. world PvP's "pvp" every random bot has already.
+     if (const Archetype* drawn = Archetypes::Drawn(bot))
+-        if (!drawn->activities.empty() && drawn->activities.front() == "quests")
++    {
++        std::vector<std::string> const ordered = Archetypes::Ordered(drawn, bot->GetLevel());
++        if (!ordered.empty() && ordered.front() == "quests")
+             ChangeStrategy("+accept all quests", BotState::BOT_STATE_NON_COMBAT);
++    }
+ 
+ #ifdef GenerateBotTests
+     for (auto& [state, strats] : testStrategies)
+diff --git a/playerbot/PlayerbotAI.h b/playerbot/PlayerbotAI.h
+index f665884..e84b0d0 100644
+--- a/playerbot/PlayerbotAI.h
++++ b/playerbot/PlayerbotAI.h
+@@ -791,6 +791,8 @@ protected:
+     bool inCombat = false;
+     bool isMoving = false;
+     bool isWaiting = false;
++    // kalimdor: the level the archetype's weights were last read at (Kamino 249).
++    uint32 archetypeLevel = 0;
+     BotCheatMask cheatMask = BotCheatMask::none;
+     WorldPosition jumpDestination;
+     uint32 jumpTime;
+diff --git a/playerbot/strategy/generic/TravelStrategy.cpp b/playerbot/strategy/generic/TravelStrategy.cpp
+index 8e20d57..6aba54a 100644
+--- a/playerbot/strategy/generic/TravelStrategy.cpp
++++ b/playerbot/strategy/generic/TravelStrategy.cpp
+@@ -85,28 +85,36 @@ void TravelStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
+     // and world PvP are above it upstream). Without an archetype, upstream's
+     // table.
+     const Archetype* archetype = Archetypes::Of(ai->GetBot());
+-    // Said once per bot and archetype: strategies are rebuilt often.
++    // kalimdor: weighed at the bot's level (Kamino 249): crossing a level
++    // where its weights change rebuilds this (PlayerbotAI::UpdateAI).
++    uint32 const level = ai->GetBot()->GetLevel();
++    std::vector<std::string> const ordered = Archetypes::Ordered(archetype, level);
++    // Said once per bot, archetype and order: strategies are rebuilt often.
+     static std::mutex saidLock;
+     static std::set<std::string> said;
+     bool sayIt = false;
+     if (archetype)
+     {
+         std::lock_guard<std::mutex> guard(saidLock);
+-        sayIt = said.insert(std::to_string(ai->GetBot()->GetGUIDLow()) + ":" + archetype->name).second;
++        std::string key = std::to_string(ai->GetBot()->GetGUIDLow()) + ":" + archetype->name;
++        for (const std::string& activity : ordered)
++            key += ":" + activity;
++        sayIt = said.insert(key).second;
+     }
+     if (sayIt)
+     {
+         std::string activities;
+-        for (const std::string& activity : archetype->activities)
++        for (const std::string& activity : ordered)
+             activities += (activities.empty() ? "" : ", ") + activity;
+         sLog.outString("Bot #%d <%s> travels as %s: %s first", ai->GetBot()->GetGUIDLow(), ai->GetBot()->GetName(),
+             archetype->name.c_str(), activities.empty() ? "upkeep" : activities.c_str());
+     }
+-    auto relevanceOf = [archetype](const std::string& activity, float upstream)
++    auto relevanceOf = [archetype, &ordered](const std::string& activity, float upstream)
+     {
+         if (!archetype)
+             return upstream;
+-        int const rank = Archetypes::Rank(archetype, activity);
++        auto it = std::find(ordered.begin(), ordered.end(), activity);
++        int const rank = it == ordered.end() ? -1 : int(it - ordered.begin());
+         return rank < 0 ? std::min(upstream, 6.5f) : 6.59f - 0.01f * rank;
+     };
+     auto activityOf = [](TravelDestinationPurpose purpose) -> std::string
+diff --git a/playerbot/strategy/values/Archetypes.cpp b/playerbot/strategy/values/Archetypes.cpp
+index de57c2e..f65b23e 100644
+--- a/playerbot/strategy/values/Archetypes.cpp
++++ b/playerbot/strategy/values/Archetypes.cpp
+@@ -29,6 +29,14 @@ namespace
+         return text.substr(first, text.find_last_not_of(" \t") - first + 1);
+     }
+ 
++    // An activity's weight key: "gather", or "gather@60".
++    bool IsActivityKey(const std::string& key)
++    {
++        std::string const activity = key.substr(0, key.find('@'));
++        const std::vector<std::string>& known = Archetypes::ActivityNames();
++        return std::find(known.begin(), known.end(), activity) != known.end();
++    }
++
+     // "1.2", "always" or "never" - false if it is none of them.
+     bool ParseMargin(const std::string& text, float& margin)
+     {
+@@ -54,6 +62,8 @@ namespace
+         {
+             Archetype archetype;
+             archetype.name = name;
++            // The older form, a list: weights n ... 1, unless named.
++            std::vector<std::string> listed;
+ 
+             for (const std::string& part : split(definition, ';'))
+             {
+@@ -73,8 +83,34 @@ namespace
+                         const std::vector<std::string>& known = Archetypes::ActivityNames();
+                         if (std::find(known.begin(), known.end(), activity) == known.end())
+                             sLog.outError("Archetype %s: unknown activity '%s' left out", name.c_str(), activity.c_str());
+-                        else if (std::find(archetype.activities.begin(), archetype.activities.end(), activity) == archetype.activities.end())
+-                            archetype.activities.push_back(activity);
++                        else if (std::find(listed.begin(), listed.end(), activity) == listed.end())
++                            listed.push_back(activity);
++                    }
++                }
++                else if (IsActivityKey(key))
++                {
++                    size_t const at = key.find('@');
++                    std::string const activity = key.substr(0, at);
++                    uint32_t fromLevel = 1;
++                    float weight = -1.0f;
++                    try
++                    {
++                        size_t used = 0;
++                        weight = std::stof(value, &used);
++                        if (used != value.size())
++                            weight = -1.0f;
++                        if (at != std::string::npos)
++                            fromLevel = std::stoul(key.substr(at + 1));
++                    }
++                    catch (...) { weight = -1.0f; }
++
++                    if (weight < 0.0f || !fromLevel)
++                        sLog.outError("Archetype %s: '%s' left out (a weight is a number, 0 or more; <activity>@<level> from that level)", name.c_str(), field.c_str());
++                    else
++                    {
++                        archetype.weights[activity][fromLevel] = weight;
++                        if (std::find(archetype.named.begin(), archetype.named.end(), activity) == archetype.named.end())
++                            archetype.named.push_back(activity);
+                     }
+                 }
+                 else if (key == "pvp" || key.rfind("pvp@", 0) == 0)
+@@ -102,21 +138,34 @@ namespace
+                     sLog.outError("Archetype %s: unknown part '%s' left out", name.c_str(), field.c_str());
+             }
+ 
++            // The list comes first in the order named, named weights winning.
++            std::vector<std::string> named = listed;
++            for (const std::string& activity : archetype.named)
++                if (std::find(named.begin(), named.end(), activity) == named.end())
++                    named.push_back(activity);
++            for (size_t i = 0; i < listed.size(); ++i)
++                if (!archetype.weights[listed[i]].count(1))
++                    archetype.weights[listed[i]][1] = float(listed.size() - i);
++            archetype.named = named;
++
+             // Quests and world PvP are every archetype's fallback when the
+             // rest fails, and in the end every bot aims for the level cap
+             // (owner, 2026-10-31 - a trader is not to stay level 10, trading):
+-            // one it does not list comes after its list - wpvp before quests
+-            // if it lists wpvp alone, else quests first - then grind, which is
+-            // reached at the cap.
++            // one it does not name comes last, at weight 0 - wpvp before
++            // quests if it names wpvp alone, else quests first - then grind,
++            // which is reached at the cap.
+             auto has = [&archetype](const char* activity)
+             {
+-                return std::find(archetype.activities.begin(), archetype.activities.end(), activity) != archetype.activities.end();
++                return std::find(archetype.named.begin(), archetype.named.end(), activity) != archetype.named.end();
+             };
+             bool const favoursPvp = has("wpvp") && !has("quests");
+             for (const char* fallback : favoursPvp ? std::vector<const char*>{ "wpvp", "quests", "grind" } : std::vector<const char*>{ "quests", "wpvp", "grind" })
+             {
+                 if (!has(fallback))
+-                    archetype.activities.push_back(fallback);
++                {
++                    archetype.named.push_back(fallback);
++                    archetype.weights[fallback][1] = 0.0f;
++                }
+             }
+ 
+             archetypes[name] = archetype;
+@@ -214,13 +263,62 @@ const Archetype* Archetypes::Drawn(Player* bot)
+     return nullptr;
+ }
+ 
+-int Archetypes::Rank(const Archetype* archetype, const std::string& activity)
++float Archetypes::Weight(const Archetype* archetype, const std::string& activity, uint32_t level)
+ {
+     if (!archetype)
+-        return -1;
++        return -1.0f;
++
++    auto it = archetype->weights.find(activity);
++    if (it == archetype->weights.end())
++        return -1.0f;
++
++    float weight = -1.0f;
++    for (const auto& [fromLevel, value] : it->second)
++    {
++        if (level >= fromLevel)
++            weight = value;
++    }
++
++    return weight;
++}
++
++std::vector<std::string> Archetypes::Ordered(const Archetype* archetype, uint32_t level)
++{
++    std::vector<std::string> ordered;
++    if (!archetype)
++        return ordered;
++
++    for (const std::string& activity : archetype->named)
++        if (Weight(archetype, activity, level) >= 0.0f)
++            ordered.push_back(activity);
++
++    std::stable_sort(ordered.begin(), ordered.end(), [archetype, level](const std::string& a, const std::string& b)
++    {
++        return Weight(archetype, a, level) > Weight(archetype, b, level);
++    });
++    return ordered;
++}
++
++int Archetypes::Rank(const Archetype* archetype, const std::string& activity, uint32_t level)
++{
++    std::vector<std::string> const ordered = Ordered(archetype, level);
++    auto it = std::find(ordered.begin(), ordered.end(), activity);
++    return it == ordered.end() ? -1 : int(it - ordered.begin());
++}
++
++bool Archetypes::Changes(const Archetype* archetype, uint32_t from, uint32_t to)
++{
++    if (!archetype)
++        return false;
++
++    if (Ordered(archetype, from) != Ordered(archetype, to))
++        return true;
++
++    for (const std::string& activity : archetype->named)
++        if (Weight(archetype, activity, from) != Weight(archetype, activity, to))
++            return true;
+ 
+-    auto it = std::find(archetype->activities.begin(), archetype->activities.end(), activity);
+-    return it == archetype->activities.end() ? -1 : int(it - archetype->activities.begin());
++    return false;
+ }
+ 
+ float Archetypes::PvpMargin(Player* bot)
+diff --git a/playerbot/strategy/values/Archetypes.h b/playerbot/strategy/values/Archetypes.h
+index 112529a..6f40219 100644
+--- a/playerbot/strategy/values/Archetypes.h
++++ b/playerbot/strategy/values/Archetypes.h
+@@ -14,15 +14,20 @@
+ //   AiPlayerbot.Archetype.wpvper  = activities=wpvp,quests,grind; pvp=1.0
+ //   AiPlayerbot.Archetype.creeper = activities=wpvp,grind; pvp@60=always
+ //
+-// activities: what the bot travels to do, most wanted first - between its
+-//   upkeep (vendor, repair, trainers, mail, bank), which stays first. One not
+-//   listed keeps upstream's place, below the listed ones - except quests,
++// Weights (owner, 2026-11-04; Kamino 249): each activity's weight, from a
++//   level on as pvp - "quests=3; gather=4; gather@60=6". What the bot travels
++//   to do goes highest weight first, ties in the order named, between its
++//   upkeep (vendor, repair, trainers, mail, bank), which stays first. One
++//   not named keeps upstream's place, below the named ones - except quests,
+ //   wpvp and grind, every archetype's fallback (and its way to the level
+-//   cap), added after its list when missing: wpvp before quests only if it
+-//   lists wpvp and not quests, grind last. A
+-//   bot whose archetype lists wpvp is not held by the world-PvP share and
++//   cap), added at weight 0 - the last resort, not never - when missing:
++//   wpvp before quests only if it names wpvp and not quests, grind last. A
++//   bot whose archetype names wpvp is not held by the world-PvP share and
+ //   hour gates; below the level cap world PvP is hunting in the bot's own
+-//   zone once it has outlevelled it (values/ZoneLevels.h).
++//   zone once it has outlevelled it (values/ZoneLevels.h). pvpi with a
++//   weight above 0: battlegrounds first (values/BattlegroundSlots.h).
++// activities: the older form, a list most wanted first - the same as
++//   weights n, n-1 ... 1 (a named weight wins).
+ // pvp: how much stronger its side must be to start a fight with an enemy
+ //   player (values/EngageOdds.h; 1.2 without an archetype) - "always": every
+ //   enemy player on sight, guards or not; "never": none, and it keeps away
+@@ -44,7 +49,10 @@ namespace ai
+     struct Archetype
+     {
+         std::string name;
+-        std::vector<std::string> activities;
++        // Each activity's weight from a level on (as pvp).
++        std::map<std::string, std::map<uint32_t, float>> weights;
++        // The activities in the order named: ties keep it.
++        std::vector<std::string> named;
+         std::map<uint32_t, float> pvp;  // from level -> margin
+         // Quests that give no XP any more: dropped and not taken (the
+         // default), kept, or kept only at the level cap (owner, 2026-11-02:
+@@ -72,8 +80,14 @@ namespace ai
+         // The archetype a random bot draws, or none (not a random bot, or no
+         // shares).
+         static const Archetype* Drawn(Player* bot);
+-        // Where the activity is in the archetype's list, first 0, or -1.
+-        static int Rank(const Archetype* archetype, const std::string& activity);
++        // An activity's weight at a level, or -1 if not named there.
++        static float Weight(const Archetype* archetype, const std::string& activity, uint32_t level);
++        // The activities named at a level, highest weight first.
++        static std::vector<std::string> Ordered(const Archetype* archetype, uint32_t level);
++        // Where the activity is in that order, first 0, or -1.
++        static int Rank(const Archetype* archetype, const std::string& activity, uint32_t level);
++        // Whether the order or a weight differs between two levels.
++        static bool Changes(const Archetype* archetype, uint32_t from, uint32_t to);
+         // The margin for starting a fight with an enemy player, at the bot's
+         // level: its archetype's, or EngageOdds::PvpMargin.
+         static float PvpMargin(Player* bot);
+diff --git a/playerbot/strategy/values/BattlegroundSlots.cpp b/playerbot/strategy/values/BattlegroundSlots.cpp
+index 8178412..3a7edef 100644
+--- a/playerbot/strategy/values/BattlegroundSlots.cpp
++++ b/playerbot/strategy/values/BattlegroundSlots.cpp
+@@ -69,7 +69,7 @@ void BattlegroundSlots::Count()
+ bool BattlegroundSlots::IsPvpi(Player* bot)
+ {
+     const Archetype* archetype = Archetypes::Of(bot);
+-    return archetype && std::find(archetype->activities.begin(), archetype->activities.end(), "pvpi") != archetype->activities.end();
++    return Archetypes::Weight(archetype, "pvpi", bot->GetLevel()) > 0.0f;
+ }
+ 
+ void BattlegroundSlots::SeenInside(Player* bot)
+diff --git a/playerbot/strategy/values/TravelValues.cpp b/playerbot/strategy/values/TravelValues.cpp
+index 99ddca1..430b4e4 100644
+--- a/playerbot/strategy/values/TravelValues.cpp
++++ b/playerbot/strategy/values/TravelValues.cpp
+@@ -360,7 +360,7 @@ bool ShouldTravelNamedValue::Calculate()
+         if (bot->GetLevel() < sWorld.getConfig(CONFIG_UINT32_MAX_PLAYER_LEVEL) && !ZoneLevels::MayHuntHere(bot))
+             return false;
+ 
+-        if (Archetypes::Rank(Archetypes::Of(bot), "wpvp") < 0)
++        if (Archetypes::Rank(Archetypes::Of(bot), "wpvp", bot->GetLevel()) < 0)
+         {
+             int32 rpgStyle = AI_VALUE2(int32, "manual saved int", "rpg style override");
+ 

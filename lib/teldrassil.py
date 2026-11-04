@@ -284,7 +284,20 @@ def load_roster(data):
                 share = a.get("share", 1)
                 if isinstance(share, bool) or not isinstance(share, int) or not 0 <= share <= 1000:
                     raise RosterError(f"{where}: share is a whole number 0-1000 (its share of the random bots; 0: none)")
-                out["archetypes"][name] = {"activities": acts, "pvp": pvp, "gray_quests": gray, "share": share}
+                # Weights per activity, from a level on (playerbots/0026):
+                # {"gather": 4, "gather@60": 6} - higher goes first; the
+                # activities list is the same as weights n ... 1.
+                weights = {}
+                for key, w in (a.get("weights") or {}).items():
+                    act, _, lvl = str(key).lower().partition("@")
+                    if act not in ARCHETYPE_ACTIVITIES:
+                        raise RosterError(f"{where}: weights: unknown activity '{act}' (one of: {', '.join(ARCHETYPE_ACTIVITIES)})")
+                    if lvl and (not lvl.isdigit() or not 1 <= int(lvl) <= 60):
+                        raise RosterError(f"{where}: weights: '{key}' - a level after @ is 1 to 60")
+                    if isinstance(w, bool) or not isinstance(w, (int, float)) or w < 0:
+                        raise RosterError(f"{where}: weights: '{key}' is a number, 0 or more (0: the last resort)")
+                    weights[f"{act}@{int(lvl)}" if lvl else act] = float(w)
+                out["archetypes"][name] = {"activities": acts, "pvp": pvp, "gray_quests": gray, "share": share, "weights": weights}
             except (RosterError, KeyError, ValueError, TypeError, AttributeError) as e:
                 errors.append(str(e) if isinstance(e, RosterError) else f"{where}: {e!r}")
 
@@ -559,6 +572,8 @@ def archetype_conf(a):
         parts.append(f"gray_quests={a['gray_quests']}")
     if a.get("share", 1) != 1:
         parts.append(f"share={a['share']}")
+    for key, w in sorted((a.get("weights") or {}).items()):
+        parts.append(f"{key}={w:g}")
     return "; ".join(parts)
 
 
