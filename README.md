@@ -264,8 +264,9 @@ See `examples/roster.example.json`. The rules it enforces:
   strategies at once and ranks none of them, so every shaped bot gets the
   same base (gathering, vendors and the auction house, questing), and a
   priority adds only what changes behaviour: `wpvp` adds world PvP, and
-  `quests` first takes every quest. An archetype listing `wpvp` adds world
-  PvP the same way, and one with `quests` first takes every quest.
+  `quests` first takes every quest. An archetype ranking `hunt-players`
+  above 0 adds world PvP the same way, and one with `quests` first - in the
+  order the server ranks its weights - takes every quest.
   Gathering first is a guild **farm order** (`"farm": "Copper Ore 40"`, the
   officer note playerbots reads).
 - **Guild members the roster does not name keep their place,** except the top
@@ -275,17 +276,17 @@ See `examples/roster.example.json`. The rules it enforces:
   plan says so instead, and the guild needs a new leader in game first.
 - **Archetypes** (`"archetypes": {"quester": {...}}`, and `"archetype":
   "quester"` on a bot) are named once and define how a bot behaves. Each one
-  has `activities`, most wanted first, from `quests`, `grind`, `gather`, `ah`,
-  `wpvp`, `bosses`, `explore`, `rpg`: what the bot travels to do between its
-  upkeep (vendors, repairs, trainers, mail, bank), which stays first. An
-  activity not listed is still done, after the listed ones. Quests, wpvp and
-  grind are every archetype's fallback - its way to the level cap - added after
-  its list when it lacks them (wpvp before quests only if it lists wpvp and
-  not quests). Below the level cap, world PvP is hunting where the bot is: once
+  has `activities`, most wanted first, from the thirteen below: what the bot
+  travels to do between its upkeep (vendors, repairs, trainers, mail, bank),
+  which stays first. An activity not listed is still done, after the listed
+  ones. Quests, hunt-players and grind are every archetype's fallback - its
+  way to the level cap - added after its list when it lacks them
+  (hunt-players before quests only if it lists hunt-players and not quests). Below the level cap, world PvP is hunting where the bot is: once
   it has reached the top of its zone's level range, outside a neutral town,
   while an enemy player is in the zone (patch 0014).
-  An archetype listing `pvpi` goes to battlegrounds more often (first for a
-  free slot, no cool-down) - not a travel goal: it still levels and quests.
+  An archetype weighing `enlist-battlegrounds` above 0 goes to battlegrounds
+  more often (first for a free slot, no cool-down) - not a travel goal: it
+  still levels and quests.
   Random bots - those the roster does not list - each draw one of the
   archetypes, by `share` (default 1 each: equal shares; 0: none), the same
   at every start (patch 0023).
@@ -293,7 +294,7 @@ See `examples/roster.example.json`. The rules it enforces:
   optionally from a level on - `{"quests": 3, "gather": 4, "gather@60": 6}`:
   the highest goes first, ties in the order named, and a weight wins over
   the list's place (the list counts as n, n-1 ... 1). 0 is the last resort,
-  not never; a `pvpi` weight above 0 makes the archetype `pvpi` (patch 0027).
+  not never (patch 0027).
   Given weights also set how often each activity is tried - its weight over
   the archetype's average times upstream's chance - and an explore weight
   above 0 lets the bot explore at all (patch 0028). `gather_detour`: how far
@@ -307,6 +308,60 @@ the bot's objective, the odds (`pvp`), below the cap only once it has topped
 its zone - and only a victim worth at least `rhk` times a same-level kill's
 honour (`1`: any honorable kill; `1.2`: higher or ranked victims; `0`:
 honour not asked). Fighting back is never held (patch 0032).
+
+**The activities** (owner, 2026-11-05; Kamino 263; playerbots patch 0034) -
+one name each, the same in the roster and in `aiplayerbot.conf`:
+
+| # | activity | |
+| --- | --- | --- |
+| 01 | `quests` | |
+| 02 | `gather` | |
+| 03 | `professions` | reserved (Kamino 212) |
+| 04 | `auction-house-trading` | |
+| 05 | `explore` | the whole map, both continents |
+| 06 | `hunt-players` | world PvP |
+| 07 | `enlist-battlegrounds` | a flag: battlegrounds first, not a travel goal |
+| 08 | `dungeons` | reserved (Kamino 151) |
+| 09 | `raids` | reserved (Kamino 151, 156) |
+| 10 | `bis-gear` | reserved (Kamino 216) |
+| 11 | `hunt-bosses` | open-world elites, rares and world bosses, for a group of 4+ |
+| 12 | `grind` | |
+| 13 | `role-play` | |
+
+Reserved activities are taken and kept by the roster but not written to
+`aiplayerbot.conf` (`roster check` and `plan` say which an archetype
+carries); each takes effect with its Kamino item. Older names - the
+server's `ah`, `wpvp`, `pvpi`, `bosses`, `rpg` and a first draft's
+`gather-resources`, `explore-map`, `world-pvp`, `battlegrounds`,
+`world-bosses`, `bis` - are refused with the one to use; a server with
+patch 0034 does not read them either (it logs the new name once). So **the
+server image and the roster move together**: merge kalimdor, build or roll
+out its image, then move the roster to these names and `roster apply`.
+`roster check` prints the order the server ranks each archetype's
+activities in; `roster apply` clears a stored archetype the roster no
+longer has from a bot it does not list, so that bot draws a current one.
+
+**The owner's nine archetypes** (`examples/roster.example.json`), heavier
+first, rendered as weights 13 ... 1 (`grind` 2 and `role-play` 1 for all;
+`enlist-battlegrounds` only for ganker, skirmisher and elitist-jerk), with
+the share of random bots each draws:
+
+| archetype | order | share |
+| --- | --- | ---: |
+| ganker | 06 09 08 07 11 10 04 03 02 01 05 12 13 | 1 |
+| skirmisher | 07 09 08 06 11 10 04 03 02 01 05 12 13 | 10 |
+| trader | 04 11 09 08 03 02 01 05 10 07 06 12 13 | 2 |
+| explorer | 05 11 09 08 01 03 02 04 10 06 07 12 13 | 10 |
+| quester | 01 11 09 08 03 02 04 05 10 06 07 12 13 | 25 |
+| farmer | 02 11 09 08 01 03 04 05 10 06 07 12 13 | 15 |
+| forager | 11 08 09 10 01 03 02 05 04 06 07 12 13 | 15 |
+| raider | 09 11 08 10 01 03 02 04 05 06 07 12 13 | 20 |
+| elitist-jerk | 10 09 11 08 06 07 01 03 02 04 05 12 13 | 2 |
+
+Their other settings carry over: ganker, skirmisher and elitist-jerk the old
+wpvper's, trader the farmer's, forager and raider the quester's. Until
+dungeons and raids exist (151), archetypes that rank them high fall through
+to what the server has.
 
 `keep_stacks` (top level of the roster) - stacks of an item a bot keeps
 before the rest is sold, by item id: `{"2770": 1, "2775": 10}` (copper ore
@@ -343,7 +398,7 @@ one stack, silver ore ten; patch 0031).
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries thirty-three changes to playerbots (`templates/patches/playerbots/`)
+teldrassil carries thirty-four changes to playerbots (`templates/patches/playerbots/`)
 and two to the core (`templates/patches/mangos-classic/`), applied before
 every build:
 
@@ -546,6 +601,12 @@ every build:
   no unfinished quests and no gathering to do, and only mobs that give XP;
   at the cap too (it was "reached" there); grinding trips only into zones at
   or below the bot's level. (Kamino 256, 2026-11-05.)
+- **playerbots 0034:** the archetypes' activities in the owner's names, one
+  vocabulary with the roster: `auction-house-trading`, `hunt-players`,
+  `enlist-battlegrounds`, `hunt-bosses`, `role-play` (were `ah`, `wpvp`,
+  `pvpi`, `bosses`, `rpg`); `professions`, `dungeons`, `raids`, `bis-gear`
+  reserved. Older names are not read - the server logs the new one. Deploy
+  the image and the roster together. (Kamino 263, 2026-11-05.)
 - **playerbots 0029:** gathering as a detour: a bot steps off its way for a
   node as far as its archetype's `gather_detour` says (in 40-yard steps; 0:
   any it sees; upstream 15 yards for everyone), some only when short of

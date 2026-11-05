@@ -1,42 +1,315 @@
 {
-  "about": "An example roster: two guilds and four shaped bots in a population of 100. Copy it, change it, then 'roster plan' and 'roster apply --yes'.",
-  "population": {"bots": 100, "balance": "50/50"},
-  "llm": {
-    "enabled": 2,
-    "endpoint": "http://127.0.0.1:1234/v1/chat/completions",
-    "model": "qwen/qwen3.6-35b-a3b",
-    "max_tokens": 80,
-    "reasoning_effort": "none",
-    "bot_to_bot_chance": 0,
-    "pre_prompt": "You are a roleplaying character in World of Warcraft: <expansion name>. Your name is <bot name>. The <other type> <other name> is speaking to you <channel name> and is an <other gender> <other race> <other class> of level <other level>. You are level <bot level> and play as a <bot gender> <bot race> <bot class> that is currently in <bot subzone> <bot zone>. Answer as a roleplaying character, in one or two short sentences."
-  },
-  "archetypes": {
-    "quester": {"activities": ["quests", "grind", "explore"], "pvp": 1.2},
-    "farmer": {"activities": ["gather", "ah", "quests"], "pvp": 1.5},
-    "explorer": {"activities": ["explore", "rpg", "quests"], "pvp": 1.2},
-    "wpvper": {"activities": ["wpvp", "quests", "grind"], "pvp": 1, "pvp_from_level": {"60": "always"}}
-  },
-  "guilds": [
-    {"name": "Order of the Ember", "faction": "horde", "leader": "Ashveil",
-     "ranks": ["Warchief", "Blood Guard", "Centurion", "Grunt", "Peon"], "officer_ranks": 2,
-     "tabard": {"symbol": 168, "symbol_color": 16, "border": 0, "border_color": 4, "background": 44},
-     "motd": "Farm orders are in the officer notes."},
-    {"name": "Silver Ledger", "faction": "alliance", "leader": "Brannoc",
-     "ranks": ["Treasurer", "Auditor", "Clerk", "Member", "Apprentice"],
-     "tabard": {"symbol": 90, "symbol_color": 14, "border": 1, "border_color": 14, "background": 32}}
-  ],
-  "bots": [
-    {"name": "Ashveil", "note": "the founder", "race": "undead", "class": "priest", "gender": "female",
-     "spec": "pve heal holy", "professions": ["tailoring", "enchanting"],
-     "archetype": "quester", "priorities": ["quests", "gather", "dungeons", "raids"], "guild": "Order of the Ember",
-     "card": "You are Ashveil, a dry-witted Forsaken priest who keeps the guild's ledgers and trusts no one's arithmetic but her own."},
-    {"name": "Gorrak", "race": "orc", "class": "shaman", "professions": ["herbalism", "alchemy"],
-     "archetype": "farmer", "priorities": ["gather", "ah", "quests", "others"], "guild": "Order of the Ember", "rank": "Grunt",
-     "farm": "Peacebloom 40"},
-    {"name": "Brannoc", "race": "dwarf", "class": "paladin", "professions": ["mining", "engineering"],
-     "archetype": "farmer", "priorities": ["gather", "quests", "ah", "others"], "guild": "Silver Ledger", "farm": "Copper Ore 40",
-     "card": "You are Brannoc, a cheerful dwarf paladin who measures everything in ale and copper ore."},
-    {"name": "Lysara", "race": "human", "class": "warlock", "gender": "female", "professions": ["herbalism", "alchemy"],
-     "archetype": "wpvper", "priorities": ["ah", "wpvp", "quests", "gather", "others"], "guild": "Silver Ledger", "rank": "Clerk"}
-  ]
+    "about": "An example roster: the owner's nine archetypes (2026-11-05: heavier first - rendered as 13 for the first activity down to 1 for the last), two guilds and four shaped bots in a population of 100. Copy it, change it, then 'roster plan' and 'roster apply --yes'.",
+    "population": {
+        "bots": 100,
+        "balance": "50/50"
+    },
+    "llm": {
+        "enabled": 2,
+        "endpoint": "http://127.0.0.1:1234/v1/chat/completions",
+        "model": "qwen/qwen3.6-35b-a3b",
+        "max_tokens": 80,
+        "reasoning_effort": "none",
+        "bot_to_bot_chance": 0,
+        "pre_prompt": "You are a roleplaying character in World of Warcraft: <expansion name>. Your name is <bot name>. The <other type> <other name> is speaking to you <channel name> and is an <other gender> <other race> <other class> of level <other level>. You are level <bot level> and play as a <bot gender> <bot race> <bot class> that is currently in <bot subzone> <bot zone>. Answer as a roleplaying character, in one or two short sentences."
+    },
+    "archetypes": {
+        "ganker": {
+            "weights": {
+                "hunt-players": 13,
+                "raids": 12,
+                "dungeons": 11,
+                "enlist-battlegrounds": 10,
+                "hunt-bosses": 9,
+                "bis-gear": 8,
+                "auction-house-trading": 7,
+                "professions": 6,
+                "gather": 5,
+                "quests": 4,
+                "explore": 3,
+                "grind": 2,
+                "role-play": 1
+            },
+            "pvp": 1,
+            "pvp_from_level": {
+                "60": "always"
+            },
+            "share": 1
+        },
+        "skirmisher": {
+            "weights": {
+                "enlist-battlegrounds": 13,
+                "raids": 12,
+                "dungeons": 11,
+                "hunt-players": 10,
+                "hunt-bosses": 9,
+                "bis-gear": 8,
+                "auction-house-trading": 7,
+                "professions": 6,
+                "gather": 5,
+                "quests": 4,
+                "explore": 3,
+                "grind": 2,
+                "role-play": 1
+            },
+            "pvp": 1,
+            "pvp_from_level": {
+                "60": "always"
+            },
+            "share": 10
+        },
+        "trader": {
+            "weights": {
+                "auction-house-trading": 13,
+                "hunt-bosses": 12,
+                "raids": 11,
+                "dungeons": 10,
+                "professions": 9,
+                "gather": 8,
+                "quests": 7,
+                "explore": 6,
+                "bis-gear": 5,
+                "hunt-players": 3,
+                "grind": 2,
+                "role-play": 1
+            },
+            "pvp": 1.5,
+            "share": 2
+        },
+        "explorer": {
+            "weights": {
+                "explore": 13,
+                "hunt-bosses": 12,
+                "raids": 11,
+                "dungeons": 10,
+                "quests": 9,
+                "professions": 8,
+                "gather": 7,
+                "auction-house-trading": 6,
+                "bis-gear": 5,
+                "hunt-players": 4,
+                "grind": 2,
+                "role-play": 1
+            },
+            "pvp": 1.2,
+            "share": 10
+        },
+        "quester": {
+            "weights": {
+                "quests": 13,
+                "hunt-bosses": 12,
+                "raids": 11,
+                "dungeons": 10,
+                "professions": 9,
+                "gather": 8,
+                "auction-house-trading": 7,
+                "explore": 6,
+                "bis-gear": 5,
+                "hunt-players": 4,
+                "grind": 2,
+                "role-play": 1
+            },
+            "pvp": 1.2,
+            "share": 25
+        },
+        "farmer": {
+            "weights": {
+                "gather": 13,
+                "hunt-bosses": 12,
+                "raids": 11,
+                "dungeons": 10,
+                "quests": 9,
+                "professions": 8,
+                "auction-house-trading": 7,
+                "explore": 6,
+                "bis-gear": 5,
+                "hunt-players": 4,
+                "grind": 2,
+                "role-play": 1
+            },
+            "pvp": 1.5,
+            "share": 15
+        },
+        "forager": {
+            "weights": {
+                "hunt-bosses": 13,
+                "dungeons": 12,
+                "raids": 11,
+                "bis-gear": 10,
+                "quests": 9,
+                "professions": 8,
+                "gather": 7,
+                "explore": 6,
+                "auction-house-trading": 5,
+                "hunt-players": 4,
+                "grind": 2,
+                "role-play": 1
+            },
+            "pvp": 1.2,
+            "share": 15
+        },
+        "raider": {
+            "weights": {
+                "raids": 13,
+                "hunt-bosses": 12,
+                "dungeons": 11,
+                "bis-gear": 10,
+                "quests": 9,
+                "professions": 8,
+                "gather": 7,
+                "auction-house-trading": 6,
+                "explore": 5,
+                "hunt-players": 4,
+                "grind": 2,
+                "role-play": 1
+            },
+            "pvp": 1.2,
+            "share": 20
+        },
+        "elitist-jerk": {
+            "weights": {
+                "bis-gear": 13,
+                "raids": 12,
+                "hunt-bosses": 11,
+                "dungeons": 10,
+                "hunt-players": 9,
+                "enlist-battlegrounds": 8,
+                "quests": 7,
+                "professions": 6,
+                "gather": 5,
+                "auction-house-trading": 4,
+                "explore": 3,
+                "grind": 2,
+                "role-play": 1
+            },
+            "pvp": 1,
+            "pvp_from_level": {
+                "60": "always"
+            },
+            "share": 2
+        }
+    },
+    "guilds": [
+        {
+            "name": "Order of the Ember",
+            "faction": "horde",
+            "leader": "Ashveil",
+            "ranks": [
+                "Warchief",
+                "Blood Guard",
+                "Centurion",
+                "Grunt",
+                "Peon"
+            ],
+            "officer_ranks": 2,
+            "tabard": {
+                "symbol": 168,
+                "symbol_color": 16,
+                "border": 0,
+                "border_color": 4,
+                "background": 44
+            },
+            "motd": "Farm orders are in the officer notes."
+        },
+        {
+            "name": "Silver Ledger",
+            "faction": "alliance",
+            "leader": "Brannoc",
+            "ranks": [
+                "Treasurer",
+                "Auditor",
+                "Clerk",
+                "Member",
+                "Apprentice"
+            ],
+            "tabard": {
+                "symbol": 90,
+                "symbol_color": 14,
+                "border": 1,
+                "border_color": 14,
+                "background": 32
+            }
+        }
+    ],
+    "bots": [
+        {
+            "name": "Ashveil",
+            "note": "the founder",
+            "race": "undead",
+            "class": "priest",
+            "gender": "female",
+            "spec": "pve heal holy",
+            "professions": [
+                "tailoring",
+                "enchanting"
+            ],
+            "archetype": "quester",
+            "priorities": [
+                "quests",
+                "gather",
+                "dungeons",
+                "raids"
+            ],
+            "guild": "Order of the Ember",
+            "card": "You are Ashveil, a dry-witted Forsaken priest who keeps the guild's ledgers and trusts no one's arithmetic but her own."
+        },
+        {
+            "name": "Gorrak",
+            "race": "orc",
+            "class": "shaman",
+            "professions": [
+                "herbalism",
+                "alchemy"
+            ],
+            "archetype": "farmer",
+            "priorities": [
+                "gather",
+                "ah",
+                "quests",
+                "others"
+            ],
+            "guild": "Order of the Ember",
+            "rank": "Grunt",
+            "farm": "Peacebloom 40"
+        },
+        {
+            "name": "Brannoc",
+            "race": "dwarf",
+            "class": "paladin",
+            "professions": [
+                "mining",
+                "engineering"
+            ],
+            "archetype": "farmer",
+            "priorities": [
+                "gather",
+                "quests",
+                "ah",
+                "others"
+            ],
+            "guild": "Silver Ledger",
+            "farm": "Copper Ore 40",
+            "card": "You are Brannoc, a cheerful dwarf paladin who measures everything in ale and copper ore."
+        },
+        {
+            "name": "Lysara",
+            "race": "human",
+            "class": "warlock",
+            "gender": "female",
+            "professions": [
+                "herbalism",
+                "alchemy"
+            ],
+            "archetype": "ganker",
+            "priorities": [
+                "ah",
+                "wpvp",
+                "quests",
+                "gather",
+                "others"
+            ],
+            "guild": "Silver Ledger",
+            "rank": "Clerk"
+        }
+    ]
 }
