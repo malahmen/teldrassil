@@ -1,0 +1,125 @@
+diff --git a/playerbot/strategy/values/Archetypes.cpp b/playerbot/strategy/values/Archetypes.cpp
+index fea1409..0771758 100644
+--- a/playerbot/strategy/values/Archetypes.cpp
++++ b/playerbot/strategy/values/Archetypes.cpp
+@@ -132,6 +132,8 @@ namespace
+                 }
+                 else if (key == "gather_detour" && !value.empty() && value.find_first_not_of("0123456789.") == std::string::npos)
+                     archetype.gatherDetour = std::stof(value);
++                else if (key == "rhk" && !value.empty() && value.find_first_not_of("0123456789.") == std::string::npos)
++                    archetype.rhk = std::stof(value);
+                 else if (key == "gather_needs_gold" && (value == "0" || value == "1"))
+                     archetype.gatherNeedsGold = value == "1";
+                 else if (key == "share" && !value.empty() && value.find_first_not_of("0123456789") == std::string::npos && value.size() <= 4)
+diff --git a/playerbot/strategy/values/Archetypes.h b/playerbot/strategy/values/Archetypes.h
+index c255351..d35b4bf 100644
+--- a/playerbot/strategy/values/Archetypes.h
++++ b/playerbot/strategy/values/Archetypes.h
+@@ -36,6 +36,12 @@
+ //   upstream's AiPlayerbot.GatheringDistance (15 yd). gather_needs_gold=1:
+ //   only when it cannot pay its class training, or at the level cap while
+ //   the profession is not maxed (owner, 2026-11-04; Kamino 252).
++// rhk: hunting players by the owner's order (Kamino 253) - set, a fight
++//   with an enemy player is started only if (1) with a travel target, the
++//   enemy is nearer than it; (2) the odds favour it (pvp); (3) below the
++//   cap, the bot has topped its zone's level range; (4) the victim's honour
++//   is at least rhk times a same-level, unranked victim's (0: honour not
++//   asked; a grey victim gives none). Fighting back is never held.
+ // activities: the older form, a list most wanted first - the same as
+ //   weights n, n-1 ... 1 (a named weight wins), chances as upstream.
+ // pvp: how much stronger its side must be to start a fight with an enemy
+@@ -68,6 +74,9 @@ namespace ai
+         // The detour for a node, in base distances (-1: upstream's), and
+         // whether it gathers only when short of training money.
+         float gatherDetour = -1.0f;
++        // The honour a victim must be worth, against a same-level one; -1:
++        // the owner's hunting order is not applied.
++        float rhk = -1.0f;
+         bool gatherNeedsGold = false;
+         std::map<uint32_t, float> pvp;  // from level -> margin
+         // Quests that give no XP any more: dropped and not taken (the
+diff --git a/playerbot/strategy/values/EngageOdds.cpp b/playerbot/strategy/values/EngageOdds.cpp
+index 6f392db..3b482ce 100644
+--- a/playerbot/strategy/values/EngageOdds.cpp
++++ b/playerbot/strategy/values/EngageOdds.cpp
+@@ -3,6 +3,10 @@
+ #include "EnemyGuards.h"
+ #include "Archetypes.h"
+ #include "playerbot/ServerFacade.h"
++#include "playerbot/TravelMgr.h"
++#include "ZoneLevels.h"
++#include "Tools/Formulas.h"
++#include "World/World.h"
+ #include "Grids/GridNotifiers.h"
+ #include "Grids/GridNotifiersImpl.h"
+ #include "Grids/CellImpl.h"
+@@ -114,16 +118,52 @@ float EngageOdds::PvpEnemySide(Player* bot, Player* enemy)
+     return enemySide;
+ }
+ 
++float EngageOdds::HonourRatio(Player* bot, Player* enemy)
++{
++    if (MaNGOS::XP::IsTrivialLevelDifference(bot->GetLevel(), enemy->GetLevel()))
++        return 0.0f;
++
++    // The same-level, unranked victim, with the same kills-today factor.
++    int const killsToday = bot->CalculateTotalKills(enemy, sWorld.GetDateToday(), sWorld.GetDateToday());
++    int const f = std::max(0, 10 - killsToday);
++    float const base = f * 0.25f * (bot->GetLevel() + 1) * 1.05f;
++    if (base <= 0.0f)
++        return 0.0f;
++
++    return MaNGOS::Honor::HonorableKillPoints(bot, enemy, 1) / base;
++}
++
+ bool EngageOdds::FavoursPvp(Player* bot, Player* enemy)
+ {
+     // The bot's archetype can set the margin (Kamino 211): "always" attacks
+     // every enemy player on sight, guards or not; "never" none.
+     float const margin = Archetypes::PvpMargin(bot);
+-    if (margin <= Archetypes::Always)
+-        return true;
+     if (margin >= Archetypes::Never)
+         return false;
+ 
++    // kalimdor: an archetype hunting by the owner's order (rhk set; Kamino
++    // 253): (1) not past its objective, (2) the odds below, (3) below the
++    // cap only where it has topped the zone, (4) a victim worth the honour.
++    const Archetype* archetype = Archetypes::Of(bot);
++    bool const ordered = archetype && archetype->rhk >= 0.0f;
++    if (ordered)
++    {
++        TravelTarget* target = bot->GetPlayerbotAI()->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get();
++        WorldPosition const* objective = target && target->IsActive() ? target->GetPosition() : nullptr;
++        if (objective && objective->getMapId() == bot->GetMapId() &&
++            bot->GetDistance(enemy) > objective->distance(WorldPosition(bot)))
++            return false;
++
++        if (bot->GetLevel() < sWorld.getConfig(CONFIG_UINT32_MAX_PLAYER_LEVEL) && !ZoneLevels::Outlevelled(bot))
++            return false;
++
++        if (archetype->rhk > 0.0f && HonourRatio(bot, enemy) < archetype->rhk)
++            return false;
++    }
++
++    if (margin <= Archetypes::Always)
++        return true;
++
+     float const enemySide = PvpEnemySide(bot, enemy);
+     return enemySide >= 0.0f && OwnSide(bot) >= enemySide * margin;
+ }
+diff --git a/playerbot/strategy/values/EngageOdds.h b/playerbot/strategy/values/EngageOdds.h
+index 53d6aa5..47a35f7 100644
+--- a/playerbot/strategy/values/EngageOdds.h
++++ b/playerbot/strategy/values/EngageOdds.h
+@@ -52,6 +52,10 @@ namespace ai
+         static float PvpEnemySide(Player* bot, Player* enemy);
+         // Worth starting a fight with this enemy player.
+         static bool FavoursPvp(Player* bot, Player* enemy);
++        // kalimdor: a victim's honour against a same-level, unranked one's,
++        // as the game counts it (MaNGOS::Honor::HonorableKillPoints) - 0 for
++        // a grey victim or one killed too often today (Kamino 253).
++        static float HonourRatio(Player* bot, Player* enemy);
+         // Worth pulling this mob, pack and all.
+         static bool WorthPulling(Player* bot, Unit* mob);
+         // Health and mana enough to start a fight.
