@@ -305,8 +305,13 @@ def load_roster(data):
                 needs_gold = a.get("gather_needs_gold", False)
                 if not isinstance(needs_gold, bool):
                     raise RosterError(f"{where}: gather_needs_gold is true or false")
+                # Hunting players by the owner's order, with the honour a
+                # victim must be worth against a same-level one (playerbots/0032).
+                rhk = a.get("rhk")
+                if rhk is not None and (isinstance(rhk, bool) or not isinstance(rhk, (int, float)) or rhk < 0):
+                    raise RosterError(f"{where}: rhk is a number, 0 or more (1: an honorable kill; 1.2: 1.2x a same-level one; 0: honour not asked)")
                 out["archetypes"][name] = {"activities": acts, "pvp": pvp, "gray_quests": gray, "share": share, "weights": weights,
-                                           "gather_detour": detour, "gather_needs_gold": needs_gold}
+                                           "gather_detour": detour, "gather_needs_gold": needs_gold, "rhk": rhk}
             except (RosterError, KeyError, ValueError, TypeError, AttributeError) as e:
                 errors.append(str(e) if isinstance(e, RosterError) else f"{where}: {e!r}")
 
@@ -598,6 +603,8 @@ def archetype_conf(a):
         parts.append(f"gather_detour={a['gather_detour']:g}")
     if a.get("gather_needs_gold"):
         parts.append("gather_needs_gold=1")
+    if a.get("rhk") is not None:
+        parts.append(f"rhk={a['rhk']:g}")
     for key, w in sorted((a.get("weights") or {}).items()):
         parts.append(f"{key}={w:g}")
     return "; ".join(parts)

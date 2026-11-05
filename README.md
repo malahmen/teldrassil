@@ -302,6 +302,12 @@ See `examples/roster.example.json`. The rules it enforces:
   cannot pay its class training, or at the cap while its profession is not
   maxed (patch 0029).
 
+`rhk` (per archetype): hunt enemy players by the owner's order - not past
+the bot's objective, the odds (`pvp`), below the cap only once it has topped
+its zone - and only a victim worth at least `rhk` times a same-level kill's
+honour (`1`: any honorable kill; `1.2`: higher or ranked victims; `0`:
+honour not asked). Fighting back is never held (patch 0032).
+
 `keep_stacks` (top level of the roster) - stacks of an item a bot keeps
 before the rest is sold, by item id: `{"2770": 1, "2775": 10}` (copper ore
 one stack, silver ore ten; patch 0031).
@@ -337,7 +343,7 @@ one stack, silver ore ten; patch 0031).
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries thirty-one changes to playerbots (`templates/patches/playerbots/`)
+teldrassil carries thirty-two changes to playerbots (`templates/patches/playerbots/`)
 and two to the core (`templates/patches/mangos-classic/`), applied before
 every build:
 
@@ -532,6 +538,10 @@ every build:
   sells at the auction house; no auction-house buying while training waits;
   and `keep_stacks` - stacks of an item kept before the rest is sold.
   (Kamino 254, 2026-11-04.)
+- **playerbots 0032:** hunting players by the owner's order, for archetypes
+  with `rhk`: not past the bot's objective, the odds, below the cap only once
+  it has topped its zone, and a victim worth at least `rhk` times a
+  same-level kill's honour. (Kamino 253, 2026-11-05.)
 - **playerbots 0029:** gathering as a detour: a bot steps off its way for a
   node as far as its archetype's `gather_detour` says (in 40-yard steps; 0:
   any it sees; upstream 15 yards for everyone), some only when short of

@@ -553,6 +553,20 @@ class Archetypes(unittest.TestCase):
                 t.load_roster(roster(keep_stacks=bad))
             self.assertIn("keep_stacks", str(e.exception))
 
+    def test_rhk_is_written_and_checked(self):
+        arch = copy.deepcopy(ARCHETYPES)
+        arch["creeper"]["rhk"] = 1.2
+        arch["quester"]["rhk"] = 0
+        changes = t.conf_changes(t.load_roster(roster(archetypes=arch)), "", "/c")
+        self.assertIn("rhk=1.2", changes["AiPlayerbot.Archetype.creeper"])
+        self.assertIn("rhk=0", changes["AiPlayerbot.Archetype.quester"])
+        self.assertNotIn("rhk", changes["AiPlayerbot.Archetype.pacifist"])
+        for bad in (-1, "1", True):
+            arch["pacifist"]["rhk"] = bad
+            with self.assertRaises(t.RosterError) as e:
+                t.load_roster(roster(archetypes=arch))
+            self.assertIn("rhk is a number", str(e.exception))
+
     def test_no_archetypes_section_leaves_the_conf_alone(self):
         changes = t.conf_changes(t.load_roster(roster()), "", "/c")
         self.assertFalse(any("Archetype" in k for k in changes))
