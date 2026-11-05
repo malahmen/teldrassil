@@ -544,6 +544,15 @@ class Archetypes(unittest.TestCase):
                 t.load_roster(roster(archetypes=broken))
             self.assertIn(msg, str(e.exception))
 
+    def test_keep_stacks_are_written_and_checked(self):
+        r = t.load_roster(roster(keep_stacks={"2775": 10, "2770": 1}))
+        self.assertEqual(t.conf_changes(r, "", "/c")["AiPlayerbot.KeepStacks"], "2770:1,2775:10")
+        self.assertNotIn("AiPlayerbot.KeepStacks", t.conf_changes(t.load_roster(roster()), "", "/c"))
+        for bad in ({"copper": 1}, {"2770": -1}, {"2770": 1.5}, {"2770": True}):
+            with self.assertRaises(t.RosterError) as e:
+                t.load_roster(roster(keep_stacks=bad))
+            self.assertIn("keep_stacks", str(e.exception))
+
     def test_no_archetypes_section_leaves_the_conf_alone(self):
         changes = t.conf_changes(t.load_roster(roster()), "", "/c")
         self.assertFalse(any("Archetype" in k for k in changes))

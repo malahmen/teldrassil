@@ -1,0 +1,182 @@
+diff --git a/playerbot/PlayerbotAIConfig.cpp b/playerbot/PlayerbotAIConfig.cpp
+index d7bdf08..8c5761f 100644
+--- a/playerbot/PlayerbotAIConfig.cpp
++++ b/playerbot/PlayerbotAIConfig.cpp
+@@ -703,6 +703,18 @@ bool PlayerbotAIConfig::Initialize()
+     grayQuestGap = config.GetIntDefault("AiPlayerbot.GrayQuestGap", 0);
+     // The yards an archetype's gather_detour counts in (Kamino 252).
+     gatherDetourBase = config.GetFloatDefault("AiPlayerbot.GatherDetourBase", 40.0f);
++    // Stacks of an item kept before the rest is sold: "itemId:stacks,..."
++    // (owner, 2026-11-04; Kamino 254).
++    keepStacks.clear();
++    for (const std::string& pair : split(config.GetStringDefault("AiPlayerbot.KeepStacks", ""), ','))
++    {
++        std::vector<std::string> const parts = split(pair, ':');
++        if (parts.size() == 2 && !parts[0].empty() && !parts[1].empty() &&
++            parts[0].find_first_not_of(" 0123456789") == std::string::npos && parts[1].find_first_not_of(" 0123456789") == std::string::npos)
++            keepStacks[std::stoul(parts[0])] = std::stoul(parts[1]);
++        else if (!pair.empty())
++            sLog.outError("AiPlayerbot.KeepStacks: '%s' left out (itemId:stacks)", pair.c_str());
++    }
+ 
+     llmPrompt = config.GetStringDefault("AiPlayerbot.LLMPrompt", "<receiver name>:<initial message>");
+     llmPostPrompt = config.GetStringDefault("AiPlayerbot.LLMPostPrompt", "<sender name>:");
+diff --git a/playerbot/PlayerbotAIConfig.h b/playerbot/PlayerbotAIConfig.h
+index 7f62e7d..e2a4db7 100644
+--- a/playerbot/PlayerbotAIConfig.h
++++ b/playerbot/PlayerbotAIConfig.h
+@@ -412,6 +412,9 @@ public:
+     uint32 grayQuestGap;
+     // kalimdor: an archetype's gather_detour is in these yards (Kamino 252).
+     float gatherDetourBase;
++    // kalimdor: stacks of an item kept before the rest is sold, by item id
++    // (AiPlayerbot.KeepStacks = 2770:1,2775:10; Kamino 254).
++    std::map<uint32, uint32> keepStacks;
+     uint32 llmEnabled, llmContextLength, llmBotToBotChatChance, llmGenerationTimeout, llmMaxSimultaniousGenerations, llmRpgAIChatChance;
+     bool llmGlobalContext;
+     ParsedUrl llmEndPointUrl;
+diff --git a/playerbot/strategy/actions/ChooseTravelTargetAction.cpp b/playerbot/strategy/actions/ChooseTravelTargetAction.cpp
+index e0ad4b1..964aff8 100644
+--- a/playerbot/strategy/actions/ChooseTravelTargetAction.cpp
++++ b/playerbot/strategy/actions/ChooseTravelTargetAction.cpp
+@@ -1513,6 +1513,34 @@ bool RequestQuestTravelTargetAction::Execute(Event& event)
+     return true;
+ }
+ 
++bool RequestNamedTravelTargetAction::isUseful()
++{
++    if (getQualifier() != "trainer class")
++        return RequestTravelTargetAction::isUseful();
++
++    // kalimdor: class training goes first (owner, 2026-11-04; Kamino 254):
++    // as RequestTravelTargetAction::isUseful, but an active travel target does
++    // not hold it back - on the dev server a bot with training waiting wanted
++    // to go 152 times in 10 minutes, every time behind its target.
++    if (bot->InBattleGround() || !ai->AllowActivity(TRAVEL_ACTIVITY))
++        return false;
++    if (AI_VALUE(TravelTarget*, "travel target")->GetStatus() == TravelStatus::TRAVEL_STATUS_PREPARE)
++        return false;
++    if (AI_VALUE2(bool, "no active travel destinations", getQualifier()))
++        return false;
++    // Already on its way to a class trainer: no new request, or each would
++    // restart the trip (dev server: 200-290 requests in 15 minutes, none
++    // arrived).
++    TravelTarget* target = AI_VALUE(TravelTarget*, "travel target");
++    if (target->IsActive() && target->GetDestination())
++    {
++        std::vector<int32> const trainers = AI_VALUE2(std::vector<int32>, "available trainers", TRAINER_TYPE_CLASS);
++        if (std::find(trainers.begin(), trainers.end(), target->GetDestination()->GetEntry()) != trainers.end())
++            return false;
++    }
++    return AI_VALUE(bool, "can move around");
++}
++
+ bool RequestQuestTravelTargetAction::isUseful()
+ {
+     if (getQualifier() != "turnin")
+diff --git a/playerbot/strategy/actions/ChooseTravelTargetAction.h b/playerbot/strategy/actions/ChooseTravelTargetAction.h
+index 61dd261..cb2f85f 100644
+--- a/playerbot/strategy/actions/ChooseTravelTargetAction.h
++++ b/playerbot/strategy/actions/ChooseTravelTargetAction.h
+@@ -76,6 +76,8 @@ namespace ai
+     class RequestNamedTravelTargetAction : public RequestTravelTargetAction {
+     public:
+         RequestNamedTravelTargetAction(PlayerbotAI* ai, std::string name = "request named travel target") : RequestTravelTargetAction(ai, name) {}
++        // kalimdor: class training is not held back by an active target.
++        virtual bool isUseful() override;
+     private:
+         virtual bool Execute(Event& event) override;
+         virtual bool isAllowed() const override;
+diff --git a/playerbot/strategy/generic/TravelStrategy.cpp b/playerbot/strategy/generic/TravelStrategy.cpp
+index 6aba54a..37abeb3 100644
+--- a/playerbot/strategy/generic/TravelStrategy.cpp
++++ b/playerbot/strategy/generic/TravelStrategy.cpp
+@@ -13,7 +13,14 @@ float TravelActionMultiplier::GetValue(Action* action)
+     if (action == NULL) return 1.0f;
+ 
+     bool hasTarget = AI_VALUE(bool, "travel target active");
++    // kalimdor: the name with its qualifier - getName() has none, so no
++    // exception below ever matched: due turn-ins (0021) and class training
++    // never cut in, nor did upstream's guild meetings, reagent vendors and
++    // guild orders (dev server trace, 2026-11-04; Kamino 254).
+     std::string name = action->getName();
++    if (Qualified* qualified = dynamic_cast<Qualified*>(action))
++        if (!qualified->getQualifier().empty())
++            name += "::" + qualified->getQualifier();
+ 
+     if (hasTarget && name.find("request") == 0)
+     {
+@@ -30,6 +37,11 @@ float TravelActionMultiplier::GetValue(Action* action)
+         // 2026-11-02; triggers/QuestTurnInDueTrigger.h).
+         if (name == "request quest travel target::turnin")
+             return 1.0f;
++        // kalimdor: so does class training - first, before the auction house
++        // and professions (owner, 2026-11-04; Kamino 254). Upstream goes only
++        // with something to train and the money for it.
++        if (name == "request named travel target::trainer class")
++            return 1.0f;
+ 
+         return 0.0f;
+     }
+diff --git a/playerbot/strategy/triggers/RpgTriggers.cpp b/playerbot/strategy/triggers/RpgTriggers.cpp
+index 224ab80..acd27ef 100644
+--- a/playerbot/strategy/triggers/RpgTriggers.cpp
++++ b/playerbot/strategy/triggers/RpgTriggers.cpp
+@@ -226,6 +226,11 @@ bool RpgAHBuyTrigger::IsActive()
+     if (!AI_VALUE(bool, "can ah buy"))
+         return false;
+ 
++    // kalimdor: no buying while class training waits - training first
++    // (owner, 2026-11-04; Kamino 254).
++    if (AI_VALUE2(uint32, "train cost", TRAINER_TYPE_CLASS) > 0)
++        return false;
++
+     return true;
+ }
+ 
+diff --git a/playerbot/strategy/values/ItemUsageValue.cpp b/playerbot/strategy/values/ItemUsageValue.cpp
+index b1cbea6..c0b18e0 100644
+--- a/playerbot/strategy/values/ItemUsageValue.cpp
++++ b/playerbot/strategy/values/ItemUsageValue.cpp
+@@ -147,6 +147,13 @@ ItemUsage ItemUsageValue::Calculate()
+     if (bot->getClass() == CLASS_WARLOCK && proto->ItemId == 6265 && CurrentStacks(ai, proto) <= 10)
+         return ItemUsage::ITEM_USAGE_KEEP;
+ 
++    // kalimdor: up to its configured stacks an item is kept; above them the
++    // rest goes the usual way - sold if no profession needs it (owner,
++    // 2026-11-04; Kamino 254).
++    auto keep = sPlayerbotAIConfig.keepStacks.find(proto->ItemId);
++    if (keep != sPlayerbotAIConfig.keepStacks.end() && CurrentStacks(ai, proto) <= keep->second)
++        return ItemUsage::ITEM_USAGE_KEEP;
++
+     //SKILL
+     if (ai->HasActivePlayerMaster())
+     {
+diff --git a/playerbot/strategy/values/MaintenanceValues.cpp b/playerbot/strategy/values/MaintenanceValues.cpp
+index 2348252..7bfcd95 100644
+--- a/playerbot/strategy/values/MaintenanceValues.cpp
++++ b/playerbot/strategy/values/MaintenanceValues.cpp
+@@ -1,5 +1,6 @@
+ 
+ #include "MaintenanceValues.h"
++#include "Archetypes.h"
+ #include "Mails/Mail.h"
+ #include "playerbot/strategy/values/GuildValues.h"
+ 
+@@ -12,6 +13,16 @@ bool ShouldAHSellValue::Calculate()
+ 
+     std::list<Item*> items = AI_VALUE2(std::list<Item*>, "inventory items", "inventory");
+ 
++    // kalimdor: short of money for its class training, a bot sells what is
++    // worth auctioning (owner, 2026-11-04; Kamino 254).
++    if (Archetypes::NeedsGold(bot))
++        for (auto& item : items)
++        {
++            ItemUsage const usage = AI_VALUE2(ItemUsage, "item usage", ItemQualifier(item).GetQualifier());
++            if (usage == ItemUsage::ITEM_USAGE_AH)
++                return true;
++        }
++
+     for (auto& item : items)
+     {
+         if (!item->GetUInt32Value(ITEM_FIELD_DURABILITY)) //Does the item need to be repaired?

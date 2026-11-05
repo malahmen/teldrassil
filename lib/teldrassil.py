@@ -244,7 +244,7 @@ def load_roster(data):
     """Validate a roster (parsed JSON) and return it normalised: IDs instead
     of words, defaults filled in. Raises RosterError listing every problem."""
     errors = []
-    out = {"guilds": [], "bots": [], "population": None, "llm": None, "archetypes": None}
+    out = {"guilds": [], "bots": [], "population": None, "llm": None, "archetypes": None, "keep_stacks": None}
 
     # Archetypes (Kamino 211): named once, here; a bot names one. Each lists
     # its activities in order and how much stronger its side must be to
@@ -442,6 +442,17 @@ def load_roster(data):
             out["population"] = {"bots": bots, "levels": levels}
         except (RosterError, KeyError, ValueError, TypeError) as e:
             errors.append(str(e) if isinstance(e, RosterError) else f"population: {e!r}")
+    # Stacks of an item kept before the rest is sold, by item id
+    # (playerbots/0031): {"2770": 1, "2775": 10}.
+    if "keep_stacks" in data:
+        ks = {}
+        for item, n in (data.get("keep_stacks") or {}).items():
+            if not str(item).isdigit() or isinstance(n, bool) or not isinstance(n, int) or not 0 <= n <= 100:
+                errors.append(f"keep_stacks: '{item}': {n!r} - an item id and a whole number of stacks, 0-100")
+            else:
+                ks[int(item)] = n
+        out["keep_stacks"] = ks
+
     if "llm" in data:
         try:
             llm = dict(data["llm"])
@@ -562,6 +573,8 @@ def conf_changes(roster, conf_text, cards_in_server):
         want["AiPlayerbot.LLMBotToBotChatChance"] = str(llm.get("bot_to_bot_chance", 0))
     if any(b["card"] for b in roster["bots"]):
         want["AiPlayerbot.LLMDefaultPromptsFile"] = cards_in_server
+    if roster.get("keep_stacks") is not None:
+        want["AiPlayerbot.KeepStacks"] = ",".join(f"{i}:{n}" for i, n in sorted(roster["keep_stacks"].items()))
     if roster["archetypes"] is not None:
         want["AiPlayerbot.Archetypes"] = ",".join(sorted(roster["archetypes"]))
         for name, a in sorted(roster["archetypes"].items()):
