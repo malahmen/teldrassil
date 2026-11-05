@@ -399,7 +399,7 @@ one stack, silver ore ten; patch 0031).
   to apply to bots that exist already.
 
 teldrassil carries thirty-five changes to playerbots (`templates/patches/playerbots/`)
-and two to the core (`templates/patches/mangos-classic/`), applied before
+and three to the core (`templates/patches/mangos-classic/`), applied before
 every build:
 
 - **0001:** stored strategies are written as `nc+`/`co+` rows that *add to*
@@ -611,6 +611,14 @@ every build:
   selling and repairing had fallen below every activity (capped with the
   activities it does not rank), so bags filled and gear broke while it kept
   busy; they keep upstream's place now. (Kamino 265, 2026-11-06.)
+- **mangos-classic 0003:** the remote console answers only a client still
+  connected. A command's answer comes later, from the world thread; when the
+  client had hung up, it was written into the freed connection - every time,
+  on the dev server - which can crash the server or corrupt its memory. It is
+  dropped now, and written from the connection's own thread. `console` (and
+  every command teldrassil sends) also waits for the server's prompt before
+  hanging up, up to two minutes, so a slow `saveall` before `stop` is never
+  cut short. (Kamino 260, 2026-11-06.)
 - **playerbots 0029:** gathering as a detour: a bot steps off its way for a
   node as far as its archetype's `gather_detour` says (in 40-yard steps; 0:
   any it sees; upstream 15 yards for everyone), some only when short of

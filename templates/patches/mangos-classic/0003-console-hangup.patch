@@ -1,0 +1,35 @@
+diff --git a/src/mangosd/RASocket.cpp b/src/mangosd/RASocket.cpp
+index 66b6a63..efa40aa 100644
+--- a/src/mangosd/RASocket.cpp
++++ b/src/mangosd/RASocket.cpp
+@@ -193,9 +193,15 @@ bool RASocket::HandleInput()
+                 if (m_input == "quit")
+                     return false;
+ 
++                // kalimdor: the answer comes later, from the world thread - by
++                // then the client may have hung up and this socket be freed:
++                // every answer went to a freed socket on the dev server when
++                // the client closed first (2026-11-06; Kamino 260). Answer
++                // only while it lives.
++                std::weak_ptr<RASocket> weak = shared_from_this();
+                 sWorld.QueueCliCommand(new CliCommandHolder(m_accountId, m_accountLevel, m_input.c_str(),
+-                [this](const char* buffer) { this->Send(buffer); },
+-                [this](bool) { this->Send("mangos>"); }));
++                [weak](const char* buffer) { if (auto self = weak.lock()) self->Send(buffer); },
++                [weak](bool) { if (auto self = weak.lock()) self->Send("mangos>"); }));
+             }
+             else
+                 Send("mangos>");
+@@ -217,5 +223,11 @@ void RASocket::Send(const std::string& message)
+ {
+     std::shared_ptr<std::string> textMessage = std::make_shared<std::string>(message);
+     auto self(shared_from_this());
+-    Write(textMessage->c_str(), textMessage->length(), [self, textMessage](const boost::system::error_code& /*error*/, std::size_t /*written*/) {});
++    // kalimdor: written on the socket's own thread - answers come from the
++    // world thread, and asio's socket is not safe to write from two (Kamino
++    // 260).
++    boost::asio::post(GetAsioSocket().get_executor(), [self, textMessage]()
++    {
++        self->Write(textMessage->c_str(), textMessage->length(), [self, textMessage](const boost::system::error_code& /*error*/, std::size_t /*written*/) {});
++    });
+ }

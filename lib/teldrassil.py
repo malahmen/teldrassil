@@ -217,7 +217,11 @@ def _ra_connect(host, port, ssh=None):
     return mine
 
 
-def ra_send(host, port, user, password, commands, wait=1.5, ssh=None):
+# How long a command may take to answer before ra_send gives up on it.
+RA_PROMPT_CEILING = 120
+
+
+def ra_send(host, port, user, password, commands, wait=1.5, ssh=None, ceiling=RA_PROMPT_CEILING):
     s = _ra_connect(host, port, ssh)
 
     def read(pause=0.8):
@@ -242,10 +246,31 @@ def ra_send(host, port, user, password, commands, wait=1.5, ssh=None):
     if "Logged in" not in login and "+" not in login:
         s.close()
         raise SystemExit("remote console login failed: " + login.strip()[-200:])
+    def answer():
+        """A command's answer: until mangosd's prompt ends it, or the
+        ceiling. Hanging up before the answer made mangosd answer into a
+        freed socket (Kamino 260) - 'saveall' before 'stop' could take
+        longer than the old fixed pause."""
+        end = time.monotonic() + max(wait, ceiling)
+        s.settimeout(0.5)
+        out = b""
+        while time.monotonic() < end:
+            try:
+                d = s.recv(65536)
+            except socket.timeout:
+                continue
+            if not d:
+                break
+            out += d
+            if out.rstrip().endswith(b"mangos>"):
+                return out.decode("utf-8", "replace")
+        sys.stderr.write(f"warning: no prompt from the console within {max(wait, ceiling):g} s\n")
+        return out.decode("utf-8", "replace")
+
     results = []
     for cmd in commands:
         s.sendall(cmd.encode() + b"\r\n")
-        out = read(wait)
+        out = answer()
         out = "\n".join(l for l in out.splitlines()
                         if l.strip() and l.strip() not in ("mangos>", ">"))
         out = re.sub(r"^mangos>\s*", "", out, flags=re.M)

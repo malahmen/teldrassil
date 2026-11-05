@@ -6,8 +6,10 @@ import io
 import json
 import os
 import re
+import socket
 import sys
 import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
@@ -897,6 +899,44 @@ class Misc(unittest.TestCase):
             self.assertEqual(t.read_user(f.name), "ME")
         finally:
             os.unlink(f.name)
+
+
+class ConsoleWaitsForTheAnswer(unittest.TestCase):
+    """Kamino 260: ra_send hangs up only once mangosd has answered - its
+    prompt ends the answer - however long that takes."""
+
+    def test_a_slow_answer_is_waited_for(self):
+        import threading
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        seen = {}
+
+        def console():
+            conn, _ = srv.accept()
+            with conn:
+                conn.sendall(b"Username: ")
+                conn.recv(100)
+                conn.sendall(b"Password: ")
+                conn.recv(100)
+                conn.sendall(b"+Logged in.\r\nmangos>")
+                conn.recv(100)
+                time.sleep(3)                       # a slow command, e.g. saveall
+                conn.setblocking(False)             # has the client hung up meanwhile?
+                try:
+                    seen["open"] = conn.recv(1, socket.MSG_PEEK) != b""
+                except BlockingIOError:
+                    seen["open"] = True             # nothing to read, still connected
+                conn.setblocking(True)
+                conn.sendall(b"All players saved.\r\n")
+                conn.sendall(b"mangos>")
+        th = threading.Thread(target=console)
+        th.start()
+        out = t.ra_send("127.0.0.1", srv.getsockname()[1], "u", "p", ["saveall"], wait=0.1, ceiling=10)
+        th.join()
+        srv.close()
+        self.assertEqual(out, [("saveall", "All players saved.")])
+        self.assertTrue(seen["open"], "still connected when the answer was written")
 
 
 class ConsoleStdin(unittest.TestCase):
