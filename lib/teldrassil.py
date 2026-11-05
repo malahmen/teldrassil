@@ -92,10 +92,36 @@ MOOD_PREFIX = "manual saved string::mood>"
 # drawn from the bot (never two opposites) unless the roster names two.
 MOODS = ["polite", "rude", "direct", "poetic", "logical", "emotional", "evil", "saint", "seductive", "repulsive"]
 
-# What an archetype can list, most wanted first (playerbots/0008,
-# strategy/values/Archetypes.h): the travel activities it ranks.
-# pvpi is not a travel goal: battlegrounds more often (playerbots/0021).
-ARCHETYPE_ACTIVITIES = ["quests", "grind", "gather", "ah", "wpvp", "bosses", "explore", "rpg", "pvpi"]
+# What an archetype names, most wanted first or by weight: the server's
+# activity names, as they are - one vocabulary in the roster and in
+# aiplayerbot.conf (owner, 2026-11-05; Kamino 263; playerbots/0033,
+# strategy/values/Archetypes.cpp). enlist-battlegrounds is not a travel goal:
+# battlegrounds more often (playerbots/0021).
+ARCHETYPE_ACTIVITIES = ["quests", "gather", "professions", "auction-house-trading", "explore", "hunt-players",
+                        "enlist-battlegrounds", "dungeons", "raids", "bis-gear", "hunt-bosses", "grind", "role-play"]
+# Activities the owner ranks that playerbots has no behaviour for yet (owner,
+# 2026-11-05): the roster takes them in an archetype's weights or activities
+# and keeps them, but does not write them to aiplayerbot.conf. Each takes
+# effect with the Kamino item that implements it. Dungeons and raids are not
+# hunt-bosses: bots never enter an instance (Kamino 151); hunt-bosses is the
+# open world's bosses (README).
+RESERVED_ACTIVITIES = {"professions": "212", "dungeons": "151", "raids": "151, 156", "bis-gear": "216"}
+# Names the roster took before (Kamino 263) - refused, with the one to use.
+RENAMED_ACTIVITIES = {"ah": "auction-house-trading", "wpvp": "hunt-players", "pvpi": "enlist-battlegrounds",
+                      "bosses": "hunt-bosses", "rpg": "role-play", "gather-resources": "gather", "explore-map": "explore",
+                      "world-pvp": "hunt-players", "battlegrounds": "enlist-battlegrounds", "world-bosses": "hunt-bosses",
+                      "bis": "bis-gear"}
+
+
+def archetype_activity(word, where, what=""):
+    """An activity an archetype names: one of ARCHETYPE_ACTIVITIES."""
+    word = str(word).lower()
+    if word in RENAMED_ACTIVITIES:
+        raise RosterError(f"{where}: {what}'{word}' was renamed: {RENAMED_ACTIVITIES[word]}")
+    if word not in ARCHETYPE_ACTIVITIES:
+        raise RosterError(f"{where}: {what}unknown activity '{word}' (one of: {', '.join(ARCHETYPE_ACTIVITIES)})")
+    return word
+
 
 # The commands a bot accepts from any player; every other one only from its
 # master (playerbots: PlayerbotAI::IsAllowedCommand).
@@ -257,10 +283,7 @@ def load_roster(data):
             try:
                 if not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", str(name)):
                     raise RosterError(f"{where}: a name is lower-case letters, digits, - or _, up to 32")
-                acts = [str(x).lower() for x in a.get("activities", [])]
-                for x in acts:
-                    if x not in ARCHETYPE_ACTIVITIES:
-                        raise RosterError(f"{where}: unknown activity '{x}' (one of: {', '.join(ARCHETYPE_ACTIVITIES)})")
+                acts = [archetype_activity(x, where) for x in a.get("activities", [])]
                 if len(set(acts)) != len(acts):
                     raise RosterError(f"{where}: an activity is listed twice")
                 pvp = {}
@@ -290,13 +313,14 @@ def load_roster(data):
                 weights = {}
                 for key, w in (a.get("weights") or {}).items():
                     act, _, lvl = str(key).lower().partition("@")
-                    if act not in ARCHETYPE_ACTIVITIES:
-                        raise RosterError(f"{where}: weights: unknown activity '{act}' (one of: {', '.join(ARCHETYPE_ACTIVITIES)})")
+                    act = archetype_activity(act, where, "weights: ")
                     if lvl and (not lvl.isdigit() or not 1 <= int(lvl) <= 60):
                         raise RosterError(f"{where}: weights: '{key}' - a level after @ is 1 to 60")
                     if isinstance(w, bool) or not isinstance(w, (int, float)) or w < 0:
                         raise RosterError(f"{where}: weights: '{key}' is a number, 0 or more (0: the last resort)")
                     weights[f"{act}@{int(lvl)}" if lvl else act] = float(w)
+                reserved = [x for x in RESERVED_ACTIVITIES
+                            if x in acts or any(k.partition("@")[0] == x for k in weights)]
                 # How far off its way for a node, in 40-yard steps (0: any it
                 # sees), and only when short of training money (playerbots/0029).
                 detour = a.get("gather_detour")
@@ -311,7 +335,8 @@ def load_roster(data):
                 if rhk is not None and (isinstance(rhk, bool) or not isinstance(rhk, (int, float)) or rhk < 0):
                     raise RosterError(f"{where}: rhk is a number, 0 or more (1: an honorable kill; 1.2: 1.2x a same-level one; 0: honour not asked)")
                 out["archetypes"][name] = {"activities": acts, "pvp": pvp, "gray_quests": gray, "share": share, "weights": weights,
-                                           "gather_detour": detour, "gather_needs_gold": needs_gold, "rhk": rhk}
+                                           "gather_detour": detour, "gather_needs_gold": needs_gold, "rhk": rhk,
+                                           "reserved": reserved}
             except (RosterError, KeyError, ValueError, TypeError, AttributeError) as e:
                 errors.append(str(e) if isinstance(e, RosterError) else f"{where}: {e!r}")
 
@@ -477,16 +502,19 @@ def load_roster(data):
     return out
 
 
-# An archetype's activities as the priorities that switch strategies on: wpvp
-# (attack enemy players), quests first (take every quest).
-ACTIVITY_PRIORITY = {"quests": "quests", "gather": "gather", "ah": "ah", "wpvp": "wpvp", "bosses": "dungeons"}
+# An archetype's activities as the priorities that switch strategies on:
+# hunt-players (attack enemy players), quests first (take every quest).
+ACTIVITY_PRIORITY = {"quests": "quests", "gather": "gather", "auction-house-trading": "ah",
+                     "hunt-players": "wpvp", "hunt-bosses": "dungeons"}
 
 
 def bot_strategies(roster, b):
     """(non-combat, combat) strategy names for a roster bot: from its
     archetype's activities when it has one, else from its priorities."""
     if b["archetype"]:
-        acts = roster["archetypes"][b["archetype"]]["activities"]
+        # In the order playerbots ranks them, from weights or the list; an
+        # activity at 0 (the last resort) switches nothing on.
+        acts = [x for x, w in archetype_order(roster["archetypes"][b["archetype"]]) if w > 0]
         return strategies_for([ACTIVITY_PRIORITY[a] for a in acts if a in ACTIVITY_PRIORITY])
     return strategies_for(b["priorities"])
 
@@ -589,8 +617,9 @@ def conf_changes(roster, conf_text, cards_in_server):
 
 def archetype_conf(a):
     """An archetype as playerbots reads it: 'activities=quests,grind; pvp=1.2;
-    pvp@60=always'."""
-    parts = [f"activities={','.join(a['activities'])}"] if a["activities"] else []
+    pvp@60=always' - its names as they are, reserved ones left out."""
+    acts = [x for x in a["activities"] if x not in RESERVED_ACTIVITIES]
+    parts = [f"activities={','.join(acts)}"] if acts else []
     for lvl in sorted(a["pvp"]):
         v = a["pvp"][lvl]
         v = v if isinstance(v, str) else f"{v:g}"
@@ -605,9 +634,57 @@ def archetype_conf(a):
         parts.append("gather_needs_gold=1")
     if a.get("rhk") is not None:
         parts.append(f"rhk={a['rhk']:g}")
-    for key, w in sorted((a.get("weights") or {}).items()):
+    for key, w in conf_weights(a):
         parts.append(f"{key}={w:g}")
     return "; ".join(parts)
+
+
+def conf_weights(a):
+    """An archetype's weights as the conf writes them ('hunt-players@60'):
+    sorted, reserved ones left out. [(key, weight)]."""
+    return sorted((k, w) for k, w in (a.get("weights") or {}).items() if k.partition("@")[0] not in RESERVED_ACTIVITIES)
+
+
+def archetype_order(a, level=1):
+    """The activities playerbots knows, in the order it ranks them at a level
+    (playerbots/0027, Archetypes::Ordered): the list as weights n ... 1, a
+    named weight winning, the highest first, ties in the order named (the
+    list's, then the weights as written - sorted); quests, hunt-players and
+    grind join at 0 when missing. Reserved activities are not the server's
+    yet: left out, as from the conf. [(activity, weight)]."""
+    listed = [x for x in a["activities"] if x not in RESERVED_ACTIVITIES]
+    weights = {}
+    for i, x in enumerate(listed):
+        weights.setdefault(x, {})[1] = float(len(listed) - i)
+    named = list(listed)
+    for key, w in conf_weights(a):
+        act, _, lvl = key.partition("@")
+        weights.setdefault(act, {})[int(lvl) if lvl else 1] = w
+        if act not in named:
+            named.append(act)
+    favours_pvp = "hunt-players" in named and "quests" not in named
+    for fallback in (["hunt-players", "quests", "grind"] if favours_pvp else ["quests", "hunt-players", "grind"]):
+        if fallback not in named:
+            named.append(fallback)
+            weights[fallback] = {1: 0.0}
+
+    def weight(act):
+        found = [w for frm, w in sorted(weights[act].items()) if level >= frm]
+        return found[-1] if found else -1.0
+    ordered = [(x, weight(x)) for x in named if weight(x) >= 0]
+    return sorted(ordered, key=lambda xw: -xw[1])
+
+
+def reserved_notes(roster):
+    """One line per archetype carrying reserved activities: kept in the
+    roster, not written, and which Kamino item brings each."""
+    notes = []
+    for name, a in sorted((roster["archetypes"] or {}).items()):
+        if a.get("reserved"):
+            items = ", ".join(f"{x} (Kamino {RESERVED_ACTIVITIES[x]})" for x in a["reserved"])
+            notes.append(f"note: archetype {name} carries {items} - kept in the roster, not written to "
+                         "aiplayerbot.conf; they take effect when the server knows them")
+    return notes
 
 
 def cards_text(roster):
@@ -875,6 +952,22 @@ def plan(roster, state, now=None, bindings=None, bound=None):
             lines.append(f"{n}: remove its old card")
             sql.append(f"DELETE FROM ai_playerbot_db_store WHERE guid={g} AND `key`='value' AND `value` LIKE {sql_str(CARD_PREFIX + '%')};")
 
+    # A bot the roster no longer names, holding an archetype the roster no
+    # longer has (renamed or dropped): playerbots would run it without one -
+    # a stored name, even a dead one, stops the random draw (playerbots/0023).
+    # Cleared, it draws one of the roster's archetypes like any random bot.
+    if roster["archetypes"] is not None:
+        rostered = {c["guid"] for c in bound_chars.values()}
+        for c in sorted(chars, key=lambda x: x["guid"]):
+            if not c["bot"] or c["guid"] in rostered:
+                continue
+            dead = [v[len(ARCHETYPE_PREFIX):] for k, v in store.get(c["guid"], [])
+                    if k == "value" and v.startswith(ARCHETYPE_PREFIX) and v[len(ARCHETYPE_PREFIX):] not in roster["archetypes"]]
+            if dead:
+                lines.append(f"{c['name']}: archetype {dead[0]} is no longer the roster's - cleared, it draws one of the roster's")
+                sql.append(f"DELETE FROM ai_playerbot_db_store WHERE guid={c['guid']} AND preset='' AND `key`='value' "
+                           f"AND `value` LIKE {sql_str(ARCHETYPE_PREFIX + '%')};")
+
     # 3. Guilds: create or update, ranks, members.
     next_id = max([gd["id"] for gd in state["guilds"]] + [0]) + 1
     for gd in roster["guilds"]:
@@ -997,6 +1090,11 @@ def cmd_check(a):
     if r["population"]:
         print(f"population: {r['population']['bots']} bots, 50/50, levels {r['population']['levels']}")
     print(f"cards: {sum(1 for b in r['bots'] if b['card'])}")
+    for name, arch in sorted((r["archetypes"] or {}).items()):
+        order = ", ".join(f"{x} {w:g}" for x, w in archetype_order(arch))
+        print(f"archetype {name}: {order}")
+    for note in reserved_notes(r):
+        print(note)
     with open(a.roster, encoding="utf-8") as f:
         rules = load_attunements(json.load(f))
     print("attunements: " + ", ".join(f"{x['name']} at {x['level']}" + (" + reputation" if x["faction"] else "") for x in rules))
@@ -1039,6 +1137,8 @@ def cmd_plan(a):
         print(line)
     if not lines:
         print("nothing to change")
+    for note in reserved_notes(r):
+        print(note)
     if a.out_sql:
         with open(a.out_sql, "w", encoding="utf-8") as f:
             if sql:

@@ -5,6 +5,7 @@ import copy
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -470,7 +471,7 @@ class ConfAndCards(unittest.TestCase):
 
 
 ARCHETYPES = {"quester": {"activities": ["quests", "grind", "explore"], "pvp": 1.2},
-              "creeper": {"activities": ["wpvp", "grind"], "pvp": 1, "pvp_from_level": {"60": "always"}},
+              "creeper": {"activities": ["hunt-players", "grind"], "pvp": 1, "pvp_from_level": {"60": "always"}},
               "pacifist": {"activities": ["quests"], "pvp": "never"}}
 
 
@@ -483,7 +484,7 @@ class Archetypes(unittest.TestCase):
         changes = t.conf_changes(r, "", "/c")
         self.assertEqual(changes["AiPlayerbot.Archetypes"], "creeper,pacifist,quester")
         self.assertEqual(changes["AiPlayerbot.Archetype.quester"], "activities=quests,grind,explore; pvp=1.2")
-        self.assertEqual(changes["AiPlayerbot.Archetype.creeper"], "activities=wpvp,grind; pvp=1; pvp@60=always")
+        self.assertEqual(changes["AiPlayerbot.Archetype.creeper"], "activities=hunt-players,grind; pvp=1; pvp@60=always")
         self.assertEqual(changes["AiPlayerbot.Archetype.pacifist"], "activities=quests; pvp=never")
 
     def test_gray_quests_keep_is_written_and_drop_is_the_default(self):
@@ -597,7 +598,7 @@ class Archetypes(unittest.TestCase):
 
     def test_an_archetype_sets_the_strategies_and_priorities_are_not_read(self):
         rost = roster(archetypes=ARCHETYPES)
-        rost["bots"][0]["archetype"] = "creeper"            # wpvp: attacks enemy players
+        rost["bots"][0]["archetype"] = "creeper"            # hunt-players: attacks enemy players
         rost["bots"][0]["priorities"] = ["grind", "bosses"]  # not priority words: not read
         rost["bots"][1]["archetype"] = "quester"            # quests first: takes every quest
         r = t.load_roster(rost)
@@ -626,6 +627,280 @@ class Archetypes(unittest.TestCase):
         _, sql, _ = t.plan(t.load_roster(rost), after, now=1)
         self.assertTrue(any(s.startswith("DELETE") and "archetype" in s for s in sql))
         self.assertFalse(any(s.startswith("INSERT") and "archetype" in s for s in sql))
+
+
+EXAMPLE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "examples", "roster.example.json")
+PATCH_0033 = os.path.join(os.path.dirname(EXAMPLE), "..", "templates", "patches", "playerbots", "0033-archetype-names.patch")
+# The owner's decision (2026-11-05, Kamino 263): thirteen activities, ranked
+# per archetype heavier first (ties allowed); rendered as weights 13 ... 1.
+# One vocabulary: these are the server's names, written as they are.
+OWNER_ACTIVITIES = {"01": "quests", "02": "gather", "03": "professions", "04": "auction-house-trading",
+                    "05": "explore", "06": "hunt-players", "07": "enlist-battlegrounds", "08": "dungeons", "09": "raids",
+                    "10": "bis-gear", "11": "hunt-bosses", "12": "grind", "13": "role-play"}
+RESERVED = {"professions", "dungeons", "raids", "bis-gear"}
+# Every name the roster took before, and the one it is now.
+RENAMED = {"ah": "auction-house-trading", "wpvp": "hunt-players", "pvpi": "enlist-battlegrounds", "bosses": "hunt-bosses",
+           "rpg": "role-play", "gather-resources": "gather", "explore-map": "explore", "world-pvp": "hunt-players",
+           "battlegrounds": "enlist-battlegrounds", "world-bosses": "hunt-bosses", "bis": "bis-gear"}
+OWNER_ORDERS = {"ganker": "06 09 08 07 11 10 04 03 02 01 05 12 13", "skirmisher": "07 09 08 06 11 10 04 03 02 01 05 12 13",
+                "trader": "04 11 09 08 03 02 01 05 10 07 06 12 13", "explorer": "05 11 09 08 01 03 02 04 10 06 07 12 13",
+                "quester": "01 11 09 08 03 02 04 05 10 06 07 12 13", "farmer": "02 11 09 08 01 03 04 05 10 06 07 12 13",
+                "forager": "11 08 09 10 01 03 02 05 04 06 07 12 13", "raider": "09 11 08 10 01 03 02 04 05 06 07 12 13",
+                "elitist-jerk": "10 09 11 08 06 07 01 03 02 04 05 12 13"}
+ENLISTING = {"ganker", "skirmisher", "elitist-jerk"}
+# What the example writes to aiplayerbot.conf - checked line for line.
+EXAMPLE_CONF = {
+    "AiPlayerbot.Archetypes": "elitist-jerk,explorer,farmer,forager,ganker,quester,raider,skirmisher,trader",
+    "AiPlayerbot.Archetype.elitist-jerk": "pvp=1; pvp@60=always; share=2; auction-house-trading=4; enlist-battlegrounds=8; explore=3; gather=5; grind=2; hunt-bosses=11; hunt-players=9; quests=7; role-play=1",
+    "AiPlayerbot.Archetype.explorer": "pvp=1.2; share=10; auction-house-trading=6; explore=13; gather=7; grind=2; hunt-bosses=12; hunt-players=4; quests=9; role-play=1",
+    "AiPlayerbot.Archetype.farmer": "pvp=1.5; share=15; auction-house-trading=7; explore=6; gather=13; grind=2; hunt-bosses=12; hunt-players=4; quests=9; role-play=1",
+    "AiPlayerbot.Archetype.forager": "pvp=1.2; share=15; auction-house-trading=5; explore=6; gather=7; grind=2; hunt-bosses=13; hunt-players=4; quests=9; role-play=1",
+    "AiPlayerbot.Archetype.ganker": "pvp=1; pvp@60=always; auction-house-trading=7; enlist-battlegrounds=10; explore=3; gather=5; grind=2; hunt-bosses=9; hunt-players=13; quests=4; role-play=1",
+    "AiPlayerbot.Archetype.quester": "pvp=1.2; share=25; auction-house-trading=7; explore=6; gather=8; grind=2; hunt-bosses=12; hunt-players=4; quests=13; role-play=1",
+    "AiPlayerbot.Archetype.raider": "pvp=1.2; share=20; auction-house-trading=6; explore=5; gather=7; grind=2; hunt-bosses=12; hunt-players=4; quests=9; role-play=1",
+    "AiPlayerbot.Archetype.skirmisher": "pvp=1; pvp@60=always; share=10; auction-house-trading=7; enlist-battlegrounds=13; explore=3; gather=5; grind=2; hunt-bosses=9; hunt-players=10; quests=4; role-play=1",
+    "AiPlayerbot.Archetype.trader": "pvp=1.5; share=2; auction-house-trading=13; explore=6; gather=8; grind=2; hunt-bosses=12; hunt-players=3; quests=7; role-play=1",
+}
+# The example before 263: the old form (activities lists), with the old names
+# moved to the new ones.
+OLD_ARCHETYPES = {"quester": {"activities": ["quests", "grind", "explore"], "pvp": 1.2},
+                  "farmer": {"activities": ["gather", "auction-house-trading", "quests"], "pvp": 1.5},
+                  "explorer": {"activities": ["explore", "role-play", "quests"], "pvp": 1.2},
+                  "wpvper": {"activities": ["hunt-players", "quests", "grind"], "pvp": 1, "pvp_from_level": {"60": "always"}}}
+
+
+def example():
+    with open(EXAMPLE, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def conf_parts(line):
+    return dict(p.split("=", 1) for p in line.split("; "))
+
+
+def patch_0033_names():
+    """The activity names Archetypes.cpp accepts in patch 0033: its table's
+    rows ({ "name", purposes, triggers, reserved Kamino item or 0 }) -
+    (with behaviour, reserved) - and its renames, old -> new."""
+    with open(PATCH_0033, encoding="utf-8") as f:
+        text = f.read()
+    rows = re.findall(r'^\+\s*\{ "([a-z-]+)", \{.*?(\d+) \},$', text, re.M | re.S)
+    renamed = dict(re.findall(r'\{ "([a-z]+)", "([a-z-]+)" \}', text))
+    return [n for n, k in rows if k == "0"], [n for n, k in rows if k != "0"], renamed
+
+
+class OwnerArchetypes(unittest.TestCase):
+    """Kamino 263: the owner's nine archetypes, weighted by his priorities, in
+    the one vocabulary the server reads; reserved activities kept, not
+    written; old names refused with the new one."""
+
+    def test_the_example_writes_these_lines(self):
+        changes = t.conf_changes(t.load_roster(example()), "", "/c")
+        self.assertEqual({k: v for k, v in changes.items() if "Archetype" in k}, EXAMPLE_CONF)
+
+    def test_the_activities_are_the_ones_patch_0033_accepts(self):
+        active, reserved, renamed = patch_0033_names()
+        self.assertEqual(len(active) + len(reserved), 13, "the table parsed")
+        self.assertEqual(set(t.ARCHETYPE_ACTIVITIES), set(active) | set(reserved))
+        self.assertEqual(len(t.ARCHETYPE_ACTIVITIES), len(set(t.ARCHETYPE_ACTIVITIES)))
+        self.assertEqual(set(t.RESERVED_ACTIVITIES), set(reserved))
+        self.assertEqual(set(OWNER_ACTIVITIES.values()), set(t.ARCHETYPE_ACTIVITIES))
+        # The server's renames are the roster's too, with the same new name.
+        self.assertEqual(renamed, {"ah": "auction-house-trading", "wpvp": "hunt-players", "pvpi": "enlist-battlegrounds",
+                                   "bosses": "hunt-bosses", "rpg": "role-play"})
+        for old, new in renamed.items():
+            self.assertEqual(t.RENAMED_ACTIVITIES[old], new, old)
+
+    def test_old_names_are_refused_with_the_new_one(self):
+        self.assertEqual(t.RENAMED_ACTIVITIES, RENAMED)
+        for old, new in RENAMED.items():
+            for arch, prefix in (({"activities": [old, "quests"]}, ""), ({"weights": {old: 3}}, "weights: "),
+                                 ({"weights": {f"{old}@60": 3}}, "weights: "), ({"weights": {old.upper(): 3}}, "weights: ")):
+                with self.assertRaises(t.RosterError, msg=(old, arch)) as e:
+                    t.load_roster(roster(archetypes={"x": arch}))
+                self.assertIn(f"archetype x: {prefix}'{old}' was renamed: {new}", str(e.exception))
+
+    def test_every_activity_is_written_as_it_is_reserved_ones_not(self):
+        self.assertEqual(t.ARCHETYPE_ACTIVITIES, list(OWNER_ACTIVITIES.values()), "the owner's thirteen, in his order")
+        for act in OWNER_ACTIVITIES.values():
+            r = t.load_roster(roster(archetypes={"x": {"activities": [act], "weights": {f"{act}@30": 2}}}))
+            line = t.conf_changes(r, "", "/c")["AiPlayerbot.Archetype.x"]
+            if act in RESERVED:
+                self.assertEqual(line, "", act)
+                self.assertEqual(r["archetypes"]["x"]["reserved"], [act])
+            else:
+                self.assertEqual(line, f"activities={act}; {act}@30=2", act)
+
+    def test_the_example_is_the_owners_order(self):
+        arch = example()["archetypes"]
+        self.assertEqual(set(arch), set(OWNER_ORDERS))
+        for name, order in OWNER_ORDERS.items():
+            want = {OWNER_ACTIVITIES[k]: 13 - i for i, k in enumerate(order.split())}
+            if name not in ENLISTING:
+                del want["enlist-battlegrounds"]
+            self.assertEqual(arch[name]["weights"], want, name)
+            self.assertNotIn("activities", arch[name], name)
+
+    def test_the_shares_are_the_owners_distribution(self):
+        # Owner, 2026-11-05: the random bots' archetypes, in percent.
+        want = {"ganker": 1, "skirmisher": 10, "trader": 2, "explorer": 10, "quester": 25, "farmer": 15,
+                "forager": 15, "raider": 20, "elitist-jerk": 2}
+        arch = example()["archetypes"]
+        self.assertEqual({n: a["share"] for n, a in arch.items()}, want)
+        self.assertEqual(sum(want.values()), 100)
+        r = t.load_roster(example())
+        self.assertEqual({n: a["share"] for n, a in r["archetypes"].items()}, want)
+
+    def test_the_other_settings_are_carried_over(self):
+        arch = example()["archetypes"]
+        old = {"ganker": "wpvper", "skirmisher": "wpvper", "elitist-jerk": "wpvper", "trader": "farmer",
+               "forager": "quester", "raider": "quester", "quester": "quester", "farmer": "farmer", "explorer": "explorer"}
+        for name, was in old.items():
+            mine = {k: v for k, v in arch[name].items() if k not in ("weights", "share")}
+            theirs = {k: v for k, v in OLD_ARCHETYPES[was].items() if k != "activities"}
+            self.assertEqual(mine, theirs, name)
+        bots = {b["name"]: b.get("archetype") for b in example()["bots"]}
+        self.assertEqual(bots, {"Ashveil": "quester", "Gorrak": "farmer", "Brannoc": "farmer", "Lysara": "ganker"})
+
+    def test_weights_are_written_as_given_reserved_left_out(self):
+        changes = t.conf_changes(t.load_roster(example()), "", "/c")
+        for name, a in example()["archetypes"].items():
+            written = {k: float(v) for k, v in conf_parts(changes[f"AiPlayerbot.Archetype.{name}"]).items()
+                       if k not in ("pvp", "pvp@60", "share")}
+            given = {k: float(v) for k, v in a["weights"].items() if k not in RESERVED}
+            self.assertEqual(written, given, name)
+
+    def test_enlisting_only_for_ganker_skirmisher_elitist_jerk_at_their_battlegrounds_rank(self):
+        changes = t.conf_changes(t.load_roster(example()), "", "/c")
+        have = {n: float(conf_parts(changes[f"AiPlayerbot.Archetype.{n}"]).get("enlist-battlegrounds", -1)) for n in OWNER_ORDERS}
+        self.assertEqual({n for n, w in have.items() if w > 0}, ENLISTING)
+        for n in ENLISTING:
+            self.assertEqual(have[n], 13 - OWNER_ORDERS[n].split().index("07"), n)
+
+    def test_grind_and_role_play_have_their_ranks_weight_and_hunt_bosses_its_rank(self):
+        changes = t.conf_changes(t.load_roster(example()), "", "/c")
+        for n, order in OWNER_ORDERS.items():
+            parts = conf_parts(changes[f"AiPlayerbot.Archetype.{n}"])
+            ranks = order.split()
+            self.assertEqual((parts["grind"], parts["role-play"]), ("2", "1"), n)
+            self.assertEqual(parts["hunt-bosses"], str(13 - ranks.index("11")), n)
+
+    def test_reserved_activities_are_taken_kept_and_not_written(self):
+        arch = {"runner": {"activities": ["dungeons", "quests", "raids"],
+                           "weights": {"bis-gear": 4, "professions@20": 2, "gather": 3}}}
+        r = t.load_roster(roster(archetypes=arch))
+        a = r["archetypes"]["runner"]
+        self.assertEqual(a["activities"], ["dungeons", "quests", "raids"])
+        self.assertEqual(a["weights"], {"bis-gear": 4.0, "professions@20": 2.0, "gather": 3.0})
+        self.assertEqual(a["reserved"], ["professions", "dungeons", "raids", "bis-gear"])
+        line = t.conf_changes(r, "", "/c")["AiPlayerbot.Archetype.runner"]
+        self.assertEqual(line, "activities=quests; gather=3")
+        for word in t.RESERVED_ACTIVITIES:
+            self.assertNotIn(word, line)
+        self.assertNotIn("bosses", line, "dungeons and raids are not hunt-bosses (Kamino 151)")
+        with self.assertRaises(t.RosterError) as e:
+            t.load_roster(roster(archetypes={"x": {"weights": {"fishing": 1}}}))
+        self.assertIn("unknown activity 'fishing'", str(e.exception))
+        self.assertIn("professions", str(e.exception), "the reserved names are offered")
+
+    def test_plan_and_check_name_the_reserved_activities_once_per_archetype(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = lambda n: os.path.join(d, n)   # noqa: E731
+            rost = roster(archetypes=dict(example()["archetypes"], plain={"activities": ["quests"]}))
+            for name, data in (("roster.json", rost), ("state.json", empty_state())):
+                with open(p(name), "w") as f:
+                    json.dump(data, f)
+            open(p("conf"), "w").close()
+            for argv in (["plan", p("roster.json"), "--state", p("state.json"), "--conf", p("conf"),
+                          "--cards", p("none"), "--cards-in-server", "/x", "--out-conf", p("out.conf")],
+                         ["check", p("roster.json")]):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    t.main(argv)
+                out = buf.getvalue()
+                for n in OWNER_ORDERS:
+                    self.assertEqual(out.count(f"note: archetype {n} carries "), 1, (argv[0], n))
+                self.assertIn("note: archetype raider carries professions (Kamino 212), dungeons (Kamino 151), "
+                              "raids (Kamino 151, 156), bis-gear (Kamino 216)", out)
+                self.assertIn("take effect when the server knows them", out)
+                self.assertNotIn("archetype plain carries", out)
+            with open(p("out.conf")) as f:
+                text = f.read()
+            for k, v in EXAMPLE_CONF.items():
+                if k != "AiPlayerbot.Archetypes":   # + plain
+                    self.assertEqual(t.conf_get(text, k), v, k)
+
+    def test_check_prints_the_order_the_server_ranks(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            t.main(["check", EXAMPLE])
+        out = buf.getvalue()
+        self.assertIn("archetype skirmisher: enlist-battlegrounds 13, hunt-players 10, hunt-bosses 9, auction-house-trading 7, "
+                      "gather 5, quests 4, explore 3, grind 2, role-play 1", out)
+        self.assertIn("archetype raider: hunt-bosses 12, quests 9, gather 7, auction-house-trading 6, "
+                      "explore 5, hunt-players 4, grind 2, role-play 1", out)
+
+    def test_strategies_follow_the_weights(self):
+        rost = example()
+        r = t.load_roster(rost)
+        by = {b["name"]: b for b in r["bots"]}
+        self.assertIn("pvp", t.bot_strategies(r, by["Lysara"])[1])               # ganker: hunt-players first
+        self.assertNotIn("accept all quests", t.bot_strategies(r, by["Lysara"])[0])
+        self.assertIn("accept all quests", t.bot_strategies(r, by["Ashveil"])[0])  # quester: quests first
+        self.assertNotIn("accept all quests", t.bot_strategies(r, by["Gorrak"])[0])  # farmer: gather first
+        rost["bots"][1]["archetype"] = "forager"   # hunt-bosses first: not quests
+        r = t.load_roster(rost)
+        self.assertNotIn("accept all quests", t.bot_strategies(r, r["bots"][1])[0])
+        rost["archetypes"]["runner"] = {"weights": {"dungeons": 5, "quests": 3, "gather": 2}}
+        rost["bots"][1]["archetype"] = "runner"    # dungeons are not the server's yet: quests are its first
+        r = t.load_roster(rost)
+        self.assertIn("accept all quests", t.bot_strategies(r, r["bots"][1])[0])
+        rost["archetypes"]["zero"] = {"weights": {"hunt-players": 0, "quests": 1}}
+        rost["bots"][1]["archetype"] = "zero"      # hunt-players at 0 is the last resort: no pvp strategy
+        r = t.load_roster(rost)
+        self.assertNotIn("pvp", t.bot_strategies(r, r["bots"][1])[1])
+
+    def test_old_form_rosters_load_and_write_their_names(self):
+        rost = roster(archetypes=OLD_ARCHETYPES)
+        rost["bots"][0]["archetype"] = "wpvper"
+        rost["bots"][1]["archetype"] = "quester"
+        r = t.load_roster(rost)
+        changes = t.conf_changes(r, "", "/c")
+        self.assertEqual(changes["AiPlayerbot.Archetypes"], "explorer,farmer,quester,wpvper")
+        self.assertEqual(changes["AiPlayerbot.Archetype.wpvper"], "activities=hunt-players,quests,grind; pvp=1; pvp@60=always")
+        self.assertEqual(changes["AiPlayerbot.Archetype.explorer"], "activities=explore,role-play,quests; pvp=1.2")
+        self.assertEqual(t.bot_strategies(r, r["bots"][0]), (["gather", "reveal", "rpg vendor", "rpg quest", "quest", "pvp"], ["pvp"]))
+        self.assertEqual(t.bot_strategies(r, r["bots"][1]),
+                         (["gather", "reveal", "rpg vendor", "rpg quest", "quest", "accept all quests"], []))
+        self.assertEqual(r["archetypes"]["wpvper"]["reserved"], [])
+
+    def test_errors_list_the_names(self):
+        for arch in ({"weights": {"fishing": 1}}, {"activities": ["fishing"]}):
+            with self.assertRaises(t.RosterError) as e:
+                t.load_roster(roster(archetypes={"x": arch}))
+            self.assertIn("unknown activity 'fishing' (one of: quests, gather, professions, auction-house-trading, "
+                          "explore, hunt-players, enlist-battlegrounds, dungeons, raids, bis-gear, hunt-bosses, grind, role-play)",
+                          str(e.exception))
+
+    def test_the_example_uses_no_old_name(self):
+        for name, a in example()["archetypes"].items():
+            self.assertFalse({k.partition("@")[0] for k in a["weights"]} & set(RENAMED), name)
+            self.assertTrue({k.partition("@")[0] for k in a["weights"]} <= set(t.ARCHETYPE_ACTIVITIES), name)
+
+    def test_a_dead_archetype_is_cleared_from_a_bot_off_the_roster(self):
+        st = empty_state()
+        st["characters"].append(char(13, "Randomd", 1, 1))
+        st["store"] = [{"guid": 12, "key": "value", "value": t.ARCHETYPE_PREFIX + "wpvper"},
+                       {"guid": 13, "key": "value", "value": t.ARCHETYPE_PREFIX + "ganker"}]
+        rost = roster(archetypes=example()["archetypes"])
+        lines, sql, _ = t.plan(t.load_roster(rost), st, now=1)
+        name12 = next(c["name"] for c in st["characters"] if c["guid"] == 12)
+        self.assertIn(f"{name12}: archetype wpvper is no longer the roster's - cleared, it draws one of the roster's", lines)
+        self.assertTrue(any(s.startswith("DELETE") and "guid=12 " in s and "archetype" in s for s in sql))
+        self.assertFalse(any("guid=13 " in s and "archetype" in s for s in sql), "a live name stays")
+        # No archetypes in the roster: the stored names are not the roster's to judge.
+        _, sql, _ = t.plan(t.load_roster(roster()), st, now=1)
+        self.assertFalse(any("archetype" in s for s in sql))
 
 
 class Moods(unittest.TestCase):

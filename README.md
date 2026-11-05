@@ -264,8 +264,10 @@ See `examples/roster.example.json`. The rules it enforces:
   strategies at once and ranks none of them, so every shaped bot gets the
   same base (gathering, vendors and the auction house, questing), and a
   priority adds only what changes behaviour: `wpvp` adds world PvP, and
-  `quests` first takes every quest. An archetype listing `wpvp` adds world
-  PvP the same way, and one with `quests` first takes every quest.
+  `quests` first takes every quest. An archetype naming `hunt-players`
+  (weighing it above 0) adds world PvP the same way, and one with `quests`
+  first - in the order the server ranks its weights - takes every quest.
+  Priorities are their own words, not activity names.
   Gathering first is a guild **farm order** (`"farm": "Copper Ore 40"`, the
   officer note playerbots reads).
 - **Guild members the roster does not name keep their place,** except the top
@@ -275,17 +277,18 @@ See `examples/roster.example.json`. The rules it enforces:
   plan says so instead, and the guild needs a new leader in game first.
 - **Archetypes** (`"archetypes": {"quester": {...}}`, and `"archetype":
   "quester"` on a bot) are named once and define how a bot behaves. Each one
-  has `activities`, most wanted first, from `quests`, `grind`, `gather`, `ah`,
-  `wpvp`, `bosses`, `explore`, `rpg`: what the bot travels to do between its
-  upkeep (vendors, repairs, trainers, mail, bank), which stays first. An
-  activity not listed is still done, after the listed ones. Quests, wpvp and
-  grind are every archetype's fallback - its way to the level cap - added after
-  its list when it lacks them (wpvp before quests only if it lists wpvp and
-  not quests). Below the level cap, world PvP is hunting where the bot is: once
+  has `activities`, most wanted first, from the activity names (below):
+  what the bot travels to do between its upkeep (vendors, repairs, trainers,
+  mail, bank), which stays first. An activity not listed is still done,
+  after the listed ones. Quests, hunt-players and grind are every
+  archetype's fallback - its way to the level cap - added after its list
+  when it lacks them (hunt-players before quests only if it lists
+  hunt-players and not quests). Below the level cap, world PvP is hunting where the bot is: once
   it has reached the top of its zone's level range, outside a neutral town,
   while an enemy player is in the zone (patch 0014).
-  An archetype listing `pvpi` goes to battlegrounds more often (first for a
-  free slot, no cool-down) - not a travel goal: it still levels and quests.
+  An archetype weighing `enlist-battlegrounds` above 0 goes to battlegrounds
+  more often (first for a free slot, no cool-down) - not a travel goal: it
+  still levels and quests.
   Random bots - those the roster does not list - each draw one of the
   archetypes, by `share` (default 1 each: equal shares; 0: none), the same
   at every start (patch 0023).
@@ -293,7 +296,7 @@ See `examples/roster.example.json`. The rules it enforces:
   optionally from a level on - `{"quests": 3, "gather": 4, "gather@60": 6}`:
   the highest goes first, ties in the order named, and a weight wins over
   the list's place (the list counts as n, n-1 ... 1). 0 is the last resort,
-  not never; a `pvpi` weight above 0 makes the archetype `pvpi` (patch 0027).
+  not never (patch 0027).
   Given weights also set how often each activity is tried - its weight over
   the archetype's average times upstream's chance - and an explore weight
   above 0 lets the bot explore at all (patch 0028). `gather_detour`: how far
@@ -301,6 +304,149 @@ See `examples/roster.example.json`. The rules it enforces:
   sees; unset: upstream's 15 yards); `gather_needs_gold: true` - only when it
   cannot pay its class training, or at the cap while its profession is not
   maxed (patch 0029).
+- **Activity names** - one vocabulary (owner, 2026-11-05, Kamino 263): the
+  roster names an activity exactly as the server reads it in
+  `aiplayerbot.conf`, and writes it as it is; there is no mapping.
+
+  | # | activity | name | on the server |
+  | --- | --- | --- | --- |
+  | 01 | quests | `quests` | quest travel targets |
+  | 02 | gather resources | `gather` | mining, herbalism, skinning, fishing nodes; farm orders |
+  | 03 | professions | `professions` | reserved (Kamino 212) |
+  | 04 | auction house trading | `auction-house-trading` | trips to the auction house |
+  | 05 | explore the whole map | `explore` | unexplored areas |
+  | 06 | world PvP | `hunt-players` | hunting enemy players |
+  | 07 | battlegrounds | `enlist-battlegrounds` | a flag: battlegrounds first |
+  | 08 | dungeons | `dungeons` | reserved (Kamino 151) |
+  | 09 | raids | `raids` | reserved (Kamino 151, 156) |
+  | 10 | BiS gear | `bis-gear` | reserved (Kamino 216) |
+  | 11 | world bosses | `hunt-bosses` | boss destinations (below) |
+  | 12 | grind | `grind` | grinding to level |
+  | 13 | role play | `role-play` | aimless town visits (below) |
+
+  Older names are refused, each with the one to use: `ah`, `wpvp`, `pvpi`,
+  `bosses`, `rpg` (the server's before patch 0033) and `gather-resources`,
+  `explore-map`, `world-pvp`, `battlegrounds`, `world-bosses`, `bis`
+  (`'wpvp' was renamed: hunt-players`). A level after `@` works with any
+  of them (`hunt-players@60`). The server reads these names from patch 0033
+  on; one without it logs each as a part it cannot read ("unknown
+  activity ... left out") and runs those bots without those weights - so
+  the server and the roster move together (deploy order below).
+- **The owner's nine archetypes** (2026-11-05, Kamino 263;
+  `examples/roster.example.json`), the thirteen activities ranked per
+  archetype, heavier first:
+
+  | archetype | order |
+  | --- | --- |
+  | ganker | 06 09 08 07 11 10 04 03 02 01 05 12 13 |
+  | skirmisher | 07 09 08 06 11 10 04 03 02 01 05 12 13 |
+  | trader | 04 11 09 08 03 02 01 05 10 07 06 12 13 |
+  | explorer | 05 11 09 08 01 03 02 04 10 06 07 12 13 |
+  | quester | 01 11 09 08 03 02 04 05 10 06 07 12 13 |
+  | farmer | 02 11 09 08 01 03 04 05 10 06 07 12 13 |
+  | forager | 11 08 09 10 01 03 02 05 04 06 07 12 13 |
+  | raider | 09 11 08 10 01 03 02 04 05 06 07 12 13 |
+  | elitist-jerk | 10 09 11 08 06 07 01 03 02 04 05 12 13 |
+
+  A list says only which weights are heavier; the agreed rendering is the
+  first 13 down to the last 1 (so grind is 2 and role-play 1 everywhere -
+  role-play stays last for now; it can be raised per archetype). Equal
+  weights are allowed: ties go in the order named.
+  `enlist-battlegrounds` stays a flag (a weight above 0: battlegrounds
+  first, patch 0021) and only ganker, skirmisher and elitist-jerk carry it;
+  its weight is still counted in the order and in the average that scales
+  chances (patch 0028), so it is the archetype's battlegrounds rank (ganker
+  10, skirmisher 13, elitist-jerk 8). Everything else per archetype is as
+  before: ganker, skirmisher and elitist-jerk have the old wpvper's (`pvp`
+  1, always from 60), trader the farmer's (1.5), forager and raider the
+  quester's (1.2).
+  **Distribution** of the random bots (owner, 2026-11-05) - each
+  archetype's `share`:
+
+  | ganker | skirmisher | trader | explorer | quester | farmer | forager | raider | elitist-jerk |
+  | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+  | 1% | 10% | 2% | 10% | 25% | 15% | 15% | 20% | 2% |
+
+  The draw is by odds, not exact counts: each random bot draws from its
+  fixed number against the shares (patch 0023), so with about 100 random
+  bots the counts land near the percentages - a 1% archetype may get 0 to 3
+  bots. Bots the roster names an archetype for do not draw and do not
+  count. Changing the shares re-draws the random bots at their next start
+  (nothing is stored; many land elsewhere).
+  **What `hunt-bosses` finds.** playerbots' boss destinations are every
+  creature ranked world boss, rare, rare elite, or an elite with a single
+  spawn - Azuregos, Kazzak and the green dragons, rare mobs and named quest
+  elites in the open world, and also the bosses inside dungeons and raids. A
+  bot goes for one only in a group of 4 or more whose members can fight it
+  and follow the party, when it is at most 3 levels above the bot, within
+  2000 yards on the same continent, and drops an upgrade for the bot. The
+  open-world ones need no instance; the ones inside are not reached (bots
+  never enter an instance, Kamino 151) - so a solo bot finds no target and
+  falls through to its next activity. Dungeon bosses are the `dungeons`
+  activity and raid bosses `raids` (both reserved, below); keeping
+  `hunt-bosses` to the open world needs a playerbots patch (a boss
+  destination whose map is a dungeon, raid or battleground is not possible
+  - `BossTravelDestination::IsPossible`), not written yet (Kamino 264).
+  **What `role-play` is.** Two things share playerbots' name `rpg`. The
+  `rpg` *strategy* is on for every random bot, whatever the weights: near an
+  NPC or a player a bot picks it as a target and does what fits - sells,
+  buys, repairs, trains, takes and turns in quests, reads mail, banks, uses
+  the auction house, takes a flight path, learns one, binds its hearthstone,
+  queues for a battleground, trades or enchants for a player, emotes, chats,
+  or just stands about. The `role-play` *activity* - the one the weight
+  ranks - is only a travel goal: walk to some town NPC (innkeeper, quest
+  giver, flight master, banker, auctioneer, trainer, vendor...) for no
+  errand, in the last 45 minutes of each hour, upstream 1 time in 2. Upkeep
+  does not go through it: selling, repairing, mail and the bank each have
+  their own travel goal (and class training cuts in, patch 0031), and the
+  work at the NPC is the strategy's - so a low `role-play` weight only makes
+  aimless town visits rarer.
+  One caveat (playerbots as patched, `TravelStrategy.cpp`; Kamino 265): for
+  a bot with an archetype, the trips to sell and to repair are capped at
+  relevance 6.5, below the band of its activities (6.59 down) - they come
+  after every activity it weighs has been tried (found nothing, or lost its
+  roll), not first, though 0008 means upkeep to stay first; mail, the bank,
+  grinding for money, quest turn-ins and joining a group target do stay
+  above the band.
+  **Reserved activities:** `professions` (Kamino 212), `dungeons` (151),
+  `raids` (151, 156) and `bis-gear` (216) have no behaviour on the server
+  yet. The roster takes them in `weights` and `activities` and keeps them,
+  but does not write them to `aiplayerbot.conf`; `roster check` and `roster
+  plan` say once per archetype which ones it carries. The server takes them
+  too, silently, so writing them later needs no other change. Dungeons and
+  raids are not `hunt-bosses` - bots never enter an instance (151).
+  **How the weights act** (patches 0008, 0011, 0027, 0028): the activities
+  an archetype weighs are put in one relevance band, in weight order (6.59,
+  6.58, ...), below joining a group target, turn-ins and the conditional
+  upkeep (mail, bank, money; see the caveat above); each tick the highest
+  one with a target wins, so an activity that cannot be done now (nothing to
+  find, not reachable, out of time) falls through to the next. Given weights
+  also scale how often an activity is tried: upstream's chance times its
+  weight over the average of the archetype's weights above 0 (as written to
+  the conf - reserved ones are not counted until the server knows them), at
+  most every time; 0 keeps upstream's chance. `roster check` prints each
+  archetype in the order the server will rank it.
+  **Deploy order** for these names (Kamino 263): (1) kalimdor's branch
+  `feat/archetype-names` merged; (2) teldrassil's merged (patch 0033 is the
+  same change); (3) `source --update` and `build` - or the kalimdor image
+  rebuilt; (4) the roster updated to the new names (`roster check` refuses
+  an old one and names the new); (5) `roster apply`, which stops the server,
+  writes the conf and starts it on the new build. A server without 0033
+  reading the new names logs them as parts it cannot read and runs those
+  bots without those weights; a new server reading old names does the same
+  ("'wpvp' was renamed: hunt-players") - so the image and the roster go
+  together.
+  **Moving a live roster to these archetypes:** rename the archetypes in the
+  roster and every bot that names one (wpvper -> ganker), then `roster
+  apply`. A roster bot gets its new name written; random bots store
+  nothing - each draws from the archetypes by share at every start (patches
+  0023, 0026), so they draw from the nine at the next start (many land on
+  another archetype than before: the draw is over the new shares). A bot
+  that has left the roster but still holds a name the roster no longer has
+  would run without an archetype and never draw (a stored name, even an
+  unknown one, stops the draw); `roster apply` clears that name, and it
+  draws like any random bot. The old `AiPlayerbot.Archetype.<name>` lines
+  stay in the conf, unread (only the names in `AiPlayerbot.Archetypes` are).
 
 `rhk` (per archetype): hunt enemy players by the owner's order - not past
 the bot's objective, the odds (`pvp`), below the cap only once it has topped
@@ -318,7 +464,7 @@ one stack, silver ore ten; patch 0031).
   player (`1.2`, the default; `1` an even fight), or `"always"` (every enemy
   player on sight, guards or not) or `"never"` (none, and it keeps away from
   all of them). `"pvp_from_level": {"60": "always"}` changes it from a level
-  on. An archetype listing `wpvp` is not held by the world-PvP gates (10% of
+  on. An archetype naming `hunt-players` is not held by the world-PvP gates (10% of
   bots, the first 15 minutes of each hour). They are written to
   `aiplayerbot.conf` (`AiPlayerbot.Archetypes`, `AiPlayerbot.Archetype.<name>`).
   A bot without one behaves as playerbots does upstream. The activities are a
@@ -405,7 +551,8 @@ every build:
   travel activities and sets its fight margin (see the roster's archetypes),
   and world PvP has no level gate (upstream: above 50 only); its share-of-bots
   and minutes-per-hour gates are settings (`AiPlayerbot.WorldPvpShare`,
-  `WorldPvpMinutes`), skipped for an archetype that lists `wpvp`. The log says
+  `WorldPvpMinutes`), skipped for an archetype that lists `wpvp` (`hunt-players`
+  since 0033). The log says
   once per bot which archetype it travels as, and names a part of a definition
   it could not read.
 - **playerbots 0009:** every bot carries two moods for life, which its chat
@@ -487,7 +634,8 @@ every build:
   first; out of combat a cast holds the bot in place (a move used to cancel
   it - the hearthstone never went off); and battleground slots per side and
   level band - 10-19: 10, 20-29: 10, 30-39: 15, 40-59: 15 for `pvpi`
-  archetypes only, the cap: 40 - `pvpi` archetypes first, the rest with 45
+  archetypes only (`enlist-battlegrounds` since 0033), the cap: 40 - `pvpi`
+  archetypes first, the rest with 45
   minutes between battlegrounds. (2026-11-03.)
 - **playerbots 0022:** a fix for a crash. A way out (0005, 0018) is a
   temporary destination, freed by the first travel target to move on - but a

@@ -89,6 +89,12 @@ cat > "$T/roster.json" <<'EOF'
 EOF
 run roster check --file "$T/roster.json"
 chk "a valid roster"                   '[[ $rc -eq 0 && "$out" == *"led by Leadra"* ]]'
+run roster check --file "${TEST_DIR}/../examples/roster.example.json"
+chk "the example roster: nine archetypes, the reserved activities named (Kamino 263)" \
+    '[[ $rc -eq 0 && $(grep -c "^archetype " <<<"$out") -eq 9 && $(grep -c "^note: archetype .* carries professions (Kamino 212)" <<<"$out") -eq 9 && "$out" == *"archetype ganker: hunt-players 13, enlist-battlegrounds 10,"* ]]'
+printf '{"archetypes": {"x": {"weights": {"wpvp": 2}}}, "bots": []}' > "$T/old-names.json"
+run roster check --file "$T/old-names.json"
+chk "an old activity name is refused with the new one" '[[ $rc -ne 0 && "$out" == *"wpvp"?" was renamed: hunt-players"* ]]'
 printf '{"bots": [{"name": "Leadra", "race": "undead", "class": "paladin"}]}' > "$T/bad.json"
 run roster check --file "$T/bad.json"
 chk "an invalid one names the problem" '[[ $rc -ne 0 && "$out" == *"cannot be a paladin"* ]]'
