@@ -1,0 +1,90 @@
+diff --git a/playerbot/TravelMgr.cpp b/playerbot/TravelMgr.cpp
+index 0e318f7..ba6f5fd 100644
+--- a/playerbot/TravelMgr.cpp
++++ b/playerbot/TravelMgr.cpp
+@@ -1,5 +1,6 @@
+ #include "playerbot/TravelMgr.h"
+ #include "playerbot/strategy/values/ZoneLevels.h"
++#include "Tools/Formulas.h"
+ #include <sstream>
+ #include <ctime>
+ #include <cstdio>
+@@ -609,6 +610,12 @@ bool GrindTravelDestination::IsPossible(const PlayerTravelInfo& info) const
+     if (cInfo->MinLootGold == 0)
+         return false;
+ 
++    // kalimdor: below the cap, a kill must give XP - no grey mobs (owner,
++    // 2026-11-04; Kamino 256). Upstream's range reaches 12 levels down.
++    if (info.GetLevel() < sWorld.getConfig(CONFIG_UINT32_MAX_PLAYER_LEVEL) &&
++        cInfo->MaxLevel <= MaNGOS::XP::GetGrayLevel(info.GetLevel()))
++        return false;
++
+     if (cInfo->Rank > CREATURE_ELITE_NORMAL && !info.GetBoolValue("can fight elite"))
+         return false;
+ 
+@@ -2745,8 +2752,9 @@ PartitionedTravelList TravelMgr::GetPartitions(const WorldPosition& center, cons
+         // kalimdor: a gathering trip only into zones whose range starts at or
+         // below the bot's level - a node where it dies is time lost (owner,
+         // 2026-11-04; Kamino 252; strategy/values/ZoneLevels.h).
++        // kalimdor: grinding trips too (owner, 2026-11-04; Kamino 256).
+         bool const gathering = purposeFlag & (uint32(TravelDestinationPurpose::GatherSkinning) | uint32(TravelDestinationPurpose::GatherMining) |
+-            uint32(TravelDestinationPurpose::GatherHerbalism) | uint32(TravelDestinationPurpose::GatherFishing));
++            uint32(TravelDestinationPurpose::GatherHerbalism) | uint32(TravelDestinationPurpose::GatherFishing) | uint32(TravelDestinationPurpose::Grind));
+ 
+         for (auto& position : points)
+         {
+diff --git a/playerbot/strategy/values/Goals.cpp b/playerbot/strategy/values/Goals.cpp
+index 217b38d..c3f452e 100644
+--- a/playerbot/strategy/values/Goals.cpp
++++ b/playerbot/strategy/values/Goals.cpp
+@@ -48,10 +48,8 @@ bool Goals::CanGather(Player* bot)
+ 
+ bool Goals::Reached(PlayerbotAI* ai, const std::string& activity)
+ {
+-    // lvl60 - grinding to level - is reached at the cap. Grinding for money
+-    // is upkeep, not this goal.
+-    if (activity == "grind")
+-        return ai->GetBot()->GetLevel() >= sWorld.getConfig(CONFIG_UINT32_MAX_PLAYER_LEVEL);
++    // Grinding is never reached: the owner (2026-11-04; Kamino 256) has it at
++    // the cap too, for money and drops - it was "lvl60", reached at the cap.
+ 
+     // Exploring is reached with both continents explored (owner, 2026-11-04;
+     // Kamino 255).
+@@ -145,6 +143,22 @@ bool GoalOpenValue::Calculate()
+     if (activity == "gather" && !Goals::CanGather(bot))
+         return false;
+ 
++    // Grinding below the cap waits for the bot's quests and for gathering it
++    // can do - the last thing to do, for XP (owner, 2026-11-04; Kamino 256).
++    // At the cap it does not wait. Waiting sets no cool-down.
++    if (activity == "grind" && bot->GetLevel() < sWorld.getConfig(CONFIG_UINT32_MAX_PLAYER_LEVEL))
++    {
++        for (uint8 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
++        {
++            uint32 const questId = bot->GetQuestSlotQuestId(slot);
++            if (questId && bot->GetQuestStatus(questId) == QUEST_STATUS_INCOMPLETE)
++                return false;
++        }
++
++        if (Goals::CanGather(bot) && AI_VALUE2(time_t, "manual time", "goal cooldown gather") <= time(nullptr))
++            return false;
++    }
++
+     // Exploring waits for class training, and for the bot's quests - unless
+     // exploring is its archetype's first activity, the explorer's (owner,
+     // 2026-11-04; Kamino 255). Waiting is not "not reachable": no cool-down.
+diff --git a/playerbot/strategy/values/Goals.h b/playerbot/strategy/values/Goals.h
+index 0ebbf2a..d369058 100644
+--- a/playerbot/strategy/values/Goals.h
++++ b/playerbot/strategy/values/Goals.h
+@@ -7,8 +7,8 @@
+ // kalimdor: an archetype's activities as a goal list that falls through
+ // (Kamino 215; owner's rules, 2026-10-27 and 2026-10-31). A goal - one of the
+ // archetype's activities - is
+-//   reached:            done for good, skipped (grind - "lvl60" - at the cap;
+-//                       explore - both continents explored);
++//   reached:            done for good, skipped (explore - both continents
++//                       explored; grind never - at the cap too, Kamino 256);
+ //   not reachable now:  its requests found nothing MissesBeforeSkip times in a
+ //                       row over at least MissWindow - skipped, retried
+ //                       after Cooldown (one miss is often a moment: right

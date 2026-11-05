@@ -343,7 +343,7 @@ one stack, silver ore ten; patch 0031).
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries thirty-two changes to playerbots (`templates/patches/playerbots/`)
+teldrassil carries thirty-three changes to playerbots (`templates/patches/playerbots/`)
 and two to the core (`templates/patches/mangos-classic/`), applied before
 every build:
 
@@ -542,6 +542,10 @@ every build:
   with `rhk`: not past the bot's objective, the odds, below the cap only once
   it has topped its zone, and a victim worth at least `rhk` times a
   same-level kill's honour. (Kamino 253, 2026-11-05.)
+- **playerbots 0033:** grinding by condition: below the level cap only with
+  no unfinished quests and no gathering to do, and only mobs that give XP;
+  at the cap too (it was "reached" there); grinding trips only into zones at
+  or below the bot's level. (Kamino 256, 2026-11-05.)
 - **playerbots 0029:** gathering as a detour: a bot steps off its way for a
   node as far as its archetype's `gather_detour` says (in 40-yard steps; 0:
   any it sees; upstream 15 yards for everyone), some only when short of
