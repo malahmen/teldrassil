@@ -343,7 +343,7 @@ one stack, silver ore ten; patch 0031).
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries thirty-two changes to playerbots (`templates/patches/playerbots/`)
+teldrassil carries thirty-three changes to playerbots (`templates/patches/playerbots/`)
 and two to the core (`templates/patches/mangos-classic/`), applied before
 every build:
 
@@ -542,6 +542,18 @@ every build:
   with `rhk`: not past the bot's objective, the odds, below the cap only once
   it has topped its zone, and a victim worth at least `rhk` times a
   same-level kill's honour. (Kamino 253, 2026-11-05.)
+- **playerbots 0033:** the archetypes' activities in the owner's names,
+  one vocabulary with the roster: `quests`, `gather`,
+  `auction-house-trading`, `explore`, `hunt-players`, `enlist-battlegrounds`,
+  `hunt-bosses`, `grind`, `role-play`; `professions`, `dungeons`, `raids` and
+  `bis-gear` are taken with no behaviour and nothing logged. The old names
+  (`ah`, `wpvp`, `pvpi`, `bosses`, `rpg`) are not read - no aliases: the log
+  says once per name what it became ("'wpvp' was renamed: hunt-players") and
+  that part is left out. Only the archetype layer is renamed; playerbots'
+  own names (the `rpg` strategies, the `ah` command, the travel purposes)
+  are not, and one table in `Archetypes.cpp` says which travel purpose each
+  activity is. The same as kalimdor's commit "the archetypes' activities in
+  the owner's names". (Kamino 263, 2026-11-05.)
 - **playerbots 0029:** gathering as a detour: a bot steps off its way for a
   node as far as its archetype's `gather_detour` says (in 40-yard steps; 0:
   any it sees; upstream 15 yards for everyone), some only when short of
