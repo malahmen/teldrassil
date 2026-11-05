@@ -1,0 +1,17 @@
+diff --git a/playerbot/strategy/generic/TravelStrategy.cpp b/playerbot/strategy/generic/TravelStrategy.cpp
+index e1a0f9b..9ae87f2 100644
+--- a/playerbot/strategy/generic/TravelStrategy.cpp
++++ b/playerbot/strategy/generic/TravelStrategy.cpp
+@@ -123,7 +123,11 @@ void TravelStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
+     }
+     auto relevanceOf = [archetype, &ordered](const std::string& activity, float upstream)
+     {
+-        if (!archetype)
++        // kalimdor: a trip that is no activity - selling, repairing, mail -
++        // is upkeep and keeps upstream's place, above the band. It was capped
++        // at 6.5 with the unranked activities, so an archetype bot sold and
++        // repaired only once every activity found nothing (Kamino 265).
++        if (!archetype || activity.empty())
+             return upstream;
+         auto it = std::find(ordered.begin(), ordered.end(), activity);
+         int const rank = it == ordered.end() ? -1 : int(it - ordered.begin());

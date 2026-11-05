@@ -398,7 +398,7 @@ one stack, silver ore ten; patch 0031).
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries thirty-four changes to playerbots (`templates/patches/playerbots/`)
+teldrassil carries thirty-five changes to playerbots (`templates/patches/playerbots/`)
 and two to the core (`templates/patches/mangos-classic/`), applied before
 every build:
 
@@ -607,6 +607,10 @@ every build:
   `pvpi`, `bosses`, `rpg`); `professions`, `dungeons`, `raids`, `bis-gear`
   reserved. Older names are not read - the server logs the new one. Deploy
   the image and the roster together. (Kamino 263, 2026-11-05.)
+- **playerbots 0035:** upkeep first again - for a bot with an archetype,
+  selling and repairing had fallen below every activity (capped with the
+  activities it does not rank), so bags filled and gear broke while it kept
+  busy; they keep upstream's place now. (Kamino 265, 2026-11-06.)
 - **playerbots 0029:** gathering as a detour: a bot steps off its way for a
   node as far as its archetype's `gather_detour` says (in 40-yard steps; 0:
   any it sees; upstream 15 yards for everyone), some only when short of
