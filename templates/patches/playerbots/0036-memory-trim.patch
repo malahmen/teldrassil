@@ -1,0 +1,79 @@
+diff --git a/playerbot/PlayerbotAIConfig.cpp b/playerbot/PlayerbotAIConfig.cpp
+index 8c5761f..4a8f5d9 100644
+--- a/playerbot/PlayerbotAIConfig.cpp
++++ b/playerbot/PlayerbotAIConfig.cpp
+@@ -705,6 +705,8 @@ bool PlayerbotAIConfig::Initialize()
+     gatherDetourBase = config.GetFloatDefault("AiPlayerbot.GatherDetourBase", 40.0f);
+     // Stacks of an item kept before the rest is sold: "itemId:stacks,..."
+     // (owner, 2026-11-04; Kamino 254).
++    // Seconds between giving freed memory back to the system (Kamino 230).
++    memoryTrimInterval = config.GetIntDefault("AiPlayerbot.MemoryTrimInterval", 600);
+     keepStacks.clear();
+     for (const std::string& pair : split(config.GetStringDefault("AiPlayerbot.KeepStacks", ""), ','))
+     {
+diff --git a/playerbot/PlayerbotAIConfig.h b/playerbot/PlayerbotAIConfig.h
+index e2a4db7..b31d9e6 100644
+--- a/playerbot/PlayerbotAIConfig.h
++++ b/playerbot/PlayerbotAIConfig.h
+@@ -415,6 +415,8 @@ public:
+     // kalimdor: stacks of an item kept before the rest is sold, by item id
+     // (AiPlayerbot.KeepStacks = 2770:1,2775:10; Kamino 254).
+     std::map<uint32, uint32> keepStacks;
++    // kalimdor: seconds between giving freed memory back (0: never; Kamino 230).
++    uint32 memoryTrimInterval;
+     uint32 llmEnabled, llmContextLength, llmBotToBotChatChance, llmGenerationTimeout, llmMaxSimultaniousGenerations, llmRpgAIChatChance;
+     bool llmGlobalContext;
+     ParsedUrl llmEndPointUrl;
+diff --git a/playerbot/RandomPlayerbotMgr.cpp b/playerbot/RandomPlayerbotMgr.cpp
+index 30af108..a1ed9c7 100644
+--- a/playerbot/RandomPlayerbotMgr.cpp
++++ b/playerbot/RandomPlayerbotMgr.cpp
+@@ -1,4 +1,9 @@
+ #include "Config/Config.h"
++#ifdef __GLIBC__
++#include <malloc.h>
++#endif
++#include <unistd.h>
++#include <chrono>
+ 
+ #include "playerbot/playerbot.h"
+ #include "playerbot/PlayerbotAIConfig.h"
+@@ -678,6 +683,38 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 elapsed, bool minimal)
+     sMemoryMonitor.SampleDiagnostics();
+ #endif
+ 
++    // kalimdor: give freed memory back (Kamino 230). The bots free most of
++    // what they allocate, but glibc keeps it in its per-thread pools: on the
++    // dev server malloc_trim released 1.58 GB of 4.62 - memory the cluster
++    // counted against the limit, and the "growth" that got meksha OOM-killed.
++#ifdef __GLIBC__
++    if (sPlayerbotAIConfig.memoryTrimInterval)
++    {
++        static time_t nextTrim = time(nullptr) + sPlayerbotAIConfig.memoryTrimInterval;
++        if (time(nullptr) >= nextTrim)
++        {
++            nextTrim = time(nullptr) + sPlayerbotAIConfig.memoryTrimInterval;
++            auto residentMb = []()
++            {
++                long pages = 0, resident = 0;
++                if (FILE* f = fopen("/proc/self/statm", "r"))
++                {
++                    if (fscanf(f, "%ld %ld", &pages, &resident) != 2)
++                        resident = 0;
++                    fclose(f);
++                }
++                return resident * (sysconf(_SC_PAGESIZE) / 1024) / 1024;
++            };
++            long const before = residentMb();
++            auto const start = std::chrono::steady_clock::now();
++            malloc_trim(0);
++            long const ms = long(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count());
++            long const after = residentMb();
++            sLog.outString("Memory trim: %ld MB -> %ld MB (released %ld MB) in %ld ms", before, after, before - after, ms);
++        }
++    }
++#endif
++
+     if (!sPlayerbotAIConfig.randomBotAutologin || !sPlayerbotAIConfig.enabled)
+         return;
+ 

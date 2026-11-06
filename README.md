@@ -398,7 +398,7 @@ one stack, silver ore ten; patch 0031).
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries thirty-five changes to playerbots (`templates/patches/playerbots/`)
+teldrassil carries thirty-six changes to playerbots (`templates/patches/playerbots/`)
 and three to the core (`templates/patches/mangos-classic/`), applied before
 every build:
 
@@ -611,6 +611,11 @@ every build:
   selling and repairing had fallen below every activity (capped with the
   activities it does not rank), so bags filled and gear broke while it kept
   busy; they keep upstream's place now. (Kamino 265, 2026-11-06.)
+- **playerbots 0036:** freed memory given back to the system every 10
+  minutes (`AiPlayerbot.MemoryTrimInterval`, seconds; 0: never) and logged.
+  The server's growth was mostly memory it had freed and the C library kept
+  - 1.58 GB of 4.62 on the dev server - counted against a cluster's memory
+  limit all the same. (Kamino 230, 2026-11-06.)
 - **mangos-classic 0003:** the remote console answers only a client still
   connected. A command's answer comes later, from the world thread; when the
   client had hung up, it was written into the freed connection - every time,
