@@ -1,0 +1,110 @@
+diff --git a/playerbot/PlayerbotMgr.cpp b/playerbot/PlayerbotMgr.cpp
+index e998623..f13687b 100644
+--- a/playerbot/PlayerbotMgr.cpp
++++ b/playerbot/PlayerbotMgr.cpp
+@@ -686,6 +686,12 @@ std::list<std::string> PlayerbotHolder::HandlePlayerbotCommand(const std::string
+         }
+         if (args == "always")
+         {
++            // kalimdor: from the console there is no master (Kamino 261).
++            if (!master)
++            {
++                messages.push_back("always: needs a player - it makes that player's own character a bot");
++                return messages;
++            }
+             bots.insert(master->GetName());
+         }
+         else
+diff --git a/playerbot/RandomPlayerbotMgr.cpp b/playerbot/RandomPlayerbotMgr.cpp
+index a1ed9c7..228c46e 100644
+--- a/playerbot/RandomPlayerbotMgr.cpp
++++ b/playerbot/RandomPlayerbotMgr.cpp
+@@ -3568,11 +3568,26 @@ bool RandomPlayerbotMgr::HandlePlayerbotConsoleCommand(ChatHandler* handler, cha
+ 
+         size_t prefixLen = prefix.size();
+         std::string param = cmd.size() > prefixLen + 1 ? cmd.substr(prefixLen + 1) : "";
++        // kalimdor: a prefix ending in a space ("pid ", "diff ") already ends
++        // at its argument - one more character cut the first digit (Kamino 261).
++        if (!prefix.empty() && prefix.back() == ' ')
++            param = cmd.substr(prefixLen);
+ 
+         if (prefix == "stats")
+             param = handler->GetSession() ? std::to_string(handler->GetSession()->GetPlayer()->GetObjectGuid()) : "";
+ 
+-        std::list<std::string> messages = (sRandomPlayerbotMgr.*consoleHandler)(param);
++        // kalimdor: a bad argument answers, it does not abort the server -
++        // "rndbot pid 1" threw out_of_range, "pid"/"diff" threw on any
++        // non-number, uncaught (Kamino 261).
++        std::list<std::string> messages;
++        try
++        {
++            messages = (sRandomPlayerbotMgr.*consoleHandler)(param);
++        }
++        catch (std::exception const& e)
++        {
++            messages = { "rndbot " + prefix + ": bad input (" + e.what() + ") - see 'rndbot help'" };
++        }
+         for (auto& msg : messages)
+         {
+             sLog.outString("%s", msg.c_str());
+@@ -3626,10 +3641,26 @@ bool RandomPlayerbotMgr::HandlePlayerbotConsoleCommand(ChatHandler* handler, cha
+ 
+         ConsolePlayerCommandHandler handler_copy = playerHandler;
+ 
++        // kalimdor: the exact name - a prefix only when asked, with '*'
++        // ("Al*"): "rndbot upgrade Al" re-rolled every Al... (teldrassil's
++        // roster uses exact names). And the guards the scheduler has: not a
++        // bot leaving, teleporting or in a battleground (Kamino 261).
++        bool const byPrefix = !name.empty() && name.back() == '*';
++        std::string const wanted = byPrefix ? name.substr(0, name.size() - 1) : name;
+         sRandomPlayerbotMgr.ForEachPlayerbot([&](Player* bot) {
+             std::string botName = bot->GetName();
+-            if (botName.find(name) == 0)
++            if (byPrefix ? botName.find(wanted) == 0 : botName == wanted)
+             {
++                if (!bot->IsInWorld() || bot->IsBeingTeleported() || bot->GetSession()->isLogingOut() ||
++                    bot->InBattleGround() || bot->InBattleGroundQueue())
++                {
++                    std::string const skipped = botName + ": skipped - not in the world, teleporting, logging out or in a battleground";
++                    sLog.outString("%s", skipped.c_str());
++                    if (isRA)
++                        handler->SendSysMessage(skipped.c_str());
++                    hasRandomBotCommand = true;
++                    return;
++                }
+ 
+                 std::list<std::string> messages = (sRandomPlayerbotMgr.*handler_copy)(bot);
+                 for (auto& msg : messages)
+@@ -5222,7 +5253,8 @@ std::list<std::string> RandomPlayerbotMgr::HandleConsoleUpdate(std::string param
+ std::list<std::string> RandomPlayerbotMgr::HandleConsolePid(std::string param)
+ {
+     std::list<std::string> messages;
+-    std::string pids = param.substr(4);
++    // kalimdor: the dispatch now hands the values themselves (Kamino 261).
++    std::string pids = param;
+     std::vector<std::string> pid = Qualified::getMultiQualifiers(pids, " ");
+ 
+     if (pid.size() == 0)
+@@ -5492,18 +5524,10 @@ std::list<std::string> RandomPlayerbotMgr::HandleConsoleMem(std::string param)
+ std::list<std::string> RandomPlayerbotMgr::HandleConsoleCleanMap(std::string param)
+ {
+     std::list<std::string> messages;
+-    for (uint32 i = 0; i < sMapStore.GetNumRows(); ++i)
+-    {
+-        if (!sMapStore.LookupEntry(i))
+-            continue;
+-
+-        uint32 mapId = sMapStore.LookupEntry(i)->MapID;
+-        boost::thread t([mapId]() {WorldPosition::unloadMapAndVMaps(mapId); });
+-        t.detach();
+-    }
+-
+-    std::string msg = "Map cleaning initiated.";
+-    messages.push_back(msg);
++    // kalimdor: refused - it started a detached thread per map, beside the
++    // map threads, to run WorldPosition::unloadMapAndVMaps, whose body is
++    // commented out: nothing was unloaded (Kamino 261).
++    messages.push_back("clean map: not available - it unloaded nothing (WorldPosition::unloadMapAndVMaps is empty) and ran threads beside the maps");
+     return messages;
+ }
+ 
