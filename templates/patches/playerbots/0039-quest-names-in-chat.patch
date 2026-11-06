@@ -1,0 +1,50 @@
+diff --git a/playerbot/ChatHelper.cpp b/playerbot/ChatHelper.cpp
+index 4e5da79..31f7913 100644
+--- a/playerbot/ChatHelper.cpp
++++ b/playerbot/ChatHelper.cpp
+@@ -448,7 +448,15 @@ std::string ChatHelper::formatQuest(Quest const* quest)
+     int loc_idx = sPlayerbotTextMgr.GetLocalePriority();
+     std::string title = quest->GetTitle();
+     sObjectMgr.GetQuestLocaleStrings(quest->GetQuestId(), loc_idx, &title);
++#ifdef MANGOSBOT_ZERO
++    // kalimdor: the 1.12 client has no quest links - it shows one, clickable,
++    // and raises an error when it is clicked (owner, 2026-11-06; Kamino 267):
++    // the name in quest yellow, no hyperlink. Bots still find each other's
++    // quests by name (ChatReplyAction::HandleLFGQuestsReply).
++    out << "|cFFFFFF00[" << title << "]|r";
++#else
+     out << "|cFFFFFF00|Hquest:" << quest->GetQuestId() << ':' << quest->GetQuestLevel() << "|h[" << title << "]|h|r";
++#endif
+     return out.str();
+ }
+ 
+diff --git a/playerbot/strategy/actions/SayAction.cpp b/playerbot/strategy/actions/SayAction.cpp
+index 8ee64c8..2a86a3f 100644
+--- a/playerbot/strategy/actions/SayAction.cpp
++++ b/playerbot/strategy/actions/SayAction.cpp
+@@ -897,14 +897,23 @@ bool ChatReplyAction::HandleWTBItemsReply(Player* bot, ChatChannelSource chatCha
+ bool ChatReplyAction::HandleLFGQuestsReply(Player* bot, ChatChannelSource chatChannelSource, std::string msg, std::string name)
+ {
+     auto messageQuestIds = bot->GetPlayerbotAI()->GetChatHelper()->ExtractAllQuestIds(msg);
++    auto botQuestIds = bot->GetPlayerbotAI()->GetAllCurrentQuestIds();
++
++    // kalimdor: a quest named the way bots name it to a 1.12 client, "[Title]"
++    // without a link (ChatHelper::formatQuest; Kamino 267) - found among the
++    // bot's own quests by its title.
++    for (auto botQuestId : botQuestIds)
++    {
++        Quest const* quest = sObjectMgr.GetQuestTemplate(botQuestId);
++        if (quest && msg.find("[" + quest->GetTitle() + "]") != std::string::npos)
++            messageQuestIds.insert(botQuestId);
++    }
+ 
+     if (messageQuestIds.empty())
+     {
+         return false;
+     }
+ 
+-    auto botQuestIds = bot->GetPlayerbotAI()->GetAllCurrentQuestIds();
+-
+     std::set<uint32> matchingQuestIds;
+     for (auto botQuestId : botQuestIds)
+     {
