@@ -398,7 +398,7 @@ one stack, silver ore ten; patch 0031).
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries thirty-eight changes to playerbots (`templates/patches/playerbots/`)
+teldrassil carries thirty-nine changes to playerbots (`templates/patches/playerbots/`)
 and three to the core (`templates/patches/mangos-classic/`), applied before
 every build:
 
@@ -627,6 +627,9 @@ every build:
   hearthstone and teleport shortcuts it tries): routes a bot tried and
   rejected leaked them, and a failed search kept a lock. (Kamino 259,
   2026-11-06.)
+- **playerbots 0039:** bots name quests in chat without a hyperlink - the
+  1.12 client has no quest links and raised an error when one was clicked -
+  and still recognise each other's quests by name. (Kamino 267, 2026-11-06.)
 - **mangos-classic 0003:** the remote console answers only a client still
   connected. A command's answer comes later, from the world thread; when the
   client had hung up, it was written into the freed connection - every time,
