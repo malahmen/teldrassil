@@ -1,0 +1,78 @@
+diff --git a/playerbot/TravelNode.cpp b/playerbot/TravelNode.cpp
+index 4a0e415..39dfb1b 100644
+--- a/playerbot/TravelNode.cpp
++++ b/playerbot/TravelNode.cpp
+@@ -1878,13 +1878,16 @@ TravelNodeRoute TravelNodeMap::getRoute(WorldPosition startPos, WorldPosition en
+             TravelNode* botNode = new TravelNode(startPos, "Bot Pos", false);
+             botNode->setPoint(startPos);
+             
++            // kalimdor: the bot's node goes with the route that is returned,
++            // or is freed - added to every route tried, the first rejected
++            // one would now free it under the next (Kamino 259).
+             for (auto& endNode : endNodes)
+             {
+                 TravelNodeRoute route = getRoute(botNode, endNode, bot);
+-                route.addTempNodes({botNode});
+ 
+                 if (!route.isEmpty())
+                 {
++                    route.addTempNodes({botNode});
+                     std::vector<WorldPosition> routePoints;
+                     for (auto& p : route.getNodes())
+                         routePoints.push_back(*p->getPosition());
+@@ -1892,6 +1895,7 @@ TravelNodeRoute TravelNodeMap::getRoute(WorldPosition startPos, WorldPosition en
+                     return route;
+                 }
+             }
++            delete botNode;
+         }
+     }
+ 
+@@ -1920,6 +1924,8 @@ TravelPath TravelNodeMap::getFullPath(WorldPosition startPos, WorldPosition endP
+     if (route.isEmpty())
+     {
+         route.cleanTempNodes();
++        // kalimdor: the shared lock was left held here (Kamino 259).
++        sTravelNodeMap.m_nMapMtx.unlock_shared();
+         return movePath;
+     }
+ 
+diff --git a/playerbot/TravelNode.h b/playerbot/TravelNode.h
+index 6c8cbf6..ecd4ae3 100644
+--- a/playerbot/TravelNode.h
++++ b/playerbot/TravelNode.h
+@@ -312,6 +312,25 @@ namespace ai
+     public:
+         TravelNodeRoute() {}
+         TravelNodeRoute(std::vector<TravelNode*> nodes1, std::vector<TravelNode*> tempNodes) { nodes = nodes1; if (tempNodes.size()) addTempNodes(tempNodes); }
++        // kalimdor: a route owns its temporary nodes (the hearthstone and
++        // teleport portals, "Bot Pos") and frees them when it goes - routes
++        // a caller rejected leaked them (Kamino 259). Moved, never copied:
++        // a copy would free them twice.
++        ~TravelNodeRoute() { cleanTempNodes(); }
++        TravelNodeRoute(const TravelNodeRoute&) = delete;
++        TravelNodeRoute& operator=(const TravelNodeRoute&) = delete;
++        TravelNodeRoute(TravelNodeRoute&& other) noexcept : nodes(std::move(other.nodes)), tempNodes(std::move(other.tempNodes)) { other.tempNodes.clear(); }
++        TravelNodeRoute& operator=(TravelNodeRoute&& other) noexcept
++        {
++            if (this != &other)
++            {
++                cleanTempNodes();
++                nodes = std::move(other.nodes);
++                tempNodes = std::move(other.tempNodes);
++                other.tempNodes.clear();
++            }
++            return *this;
++        }
+ 
+         bool isEmpty() { return nodes.empty(); }
+ 
+@@ -322,7 +341,7 @@ namespace ai
+         std::vector<TravelNode*>& getNodes() { return nodes; }
+ 
+         void addTempNodes(std::vector<TravelNode*> nodes) { tempNodes.insert(tempNodes.end(), nodes.begin(), nodes.end()); }
+-        void cleanTempNodes() { for (auto node : tempNodes) delete node; }
++        void cleanTempNodes() { for (auto node : tempNodes) delete node; tempNodes.clear(); }
+ 
+         TravelPath buildPath(std::vector<WorldPosition> pathToStart = {}, std::vector<WorldPosition> pathToEnd = {}, Unit* bot = nullptr);
+ 
