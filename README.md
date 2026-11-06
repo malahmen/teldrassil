@@ -398,7 +398,7 @@ one stack, silver ore ten; patch 0031).
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries thirty-nine changes to playerbots (`templates/patches/playerbots/`)
+teldrassil carries forty changes to playerbots (`templates/patches/playerbots/`)
 and three to the core (`templates/patches/mangos-classic/`), applied before
 every build:
 
@@ -630,6 +630,14 @@ every build:
 - **playerbots 0039:** bots name quests in chat without a hyperlink - the
   1.12 client has no quest links and raised an error when one was clicked -
   and still recognise each other's quests by name. (Kamino 267, 2026-11-06.)
+- **playerbots 0040:** bots look for a group for their group quests: a bot
+  with an elite, dungeon or raid quest says "LFG [quest]" in General and
+  LookingForGroup, bots with the same quest join it (any level), and the
+  group goes once it has its size - elite 3, dungeon 5, a raid its limit,
+  an open-world boss 40 - and its roles: 5 - one tank, one healer; 10 - two
+  and two; 20 - 2-3 tanks, 4-5 healers; 40 - 3-4 tanks, 10-12 healers.
+  Not full in time (6 minutes a member, at least 20), it breaks up and tries
+  again in 30 minutes. (Kamino 268, 2026-11-06.)
 - **mangos-classic 0003:** the remote console answers only a client still
   connected. A command's answer comes later, from the world thread; when the
   client had hung up, it was written into the freed connection - every time,

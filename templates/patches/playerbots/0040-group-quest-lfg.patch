@@ -1,0 +1,497 @@
+diff --git a/playerbot/PlayerbotAI.cpp b/playerbot/PlayerbotAI.cpp
+index 3eca863..f960288 100644
+--- a/playerbot/PlayerbotAI.cpp
++++ b/playerbot/PlayerbotAI.cpp
+@@ -2049,6 +2049,17 @@ void PlayerbotAI::HandleBotOutgoingPacket(const WorldPacket& packet)
+ 
+                 ChatChannelSource chatChannelSource = GetChatChannelSource(bot, msgtype, chanName);
+ 
++                // kalimdor: another bot looking for a group - "LFG"/"LFM" in a
++                // channel - is heard, past the bot-to-bot chat limits (one in
++                // 21, the chat cool-down): bots with the quest answer and
++                // join (values/GroupQuests.h; Kamino 268).
++                if (isFromFreeBot && msgtype == CHAT_MSG_CHANNEL &&
++                    (boost::algorithm::istarts_with(message, "LFG") || boost::algorithm::istarts_with(message, "LFM")))
++                {
++                    QueueChatResponse(msgtype, guid1, ObjectGuid(), message, chanName, name, isAiChat);
++                    return;
++                }
++
+                 if (!isAiChat || isFromFreeBot)
+                 {
+                     // random bot speaks, chat CD
+diff --git a/playerbot/strategy/actions/ActionContext.h b/playerbot/strategy/actions/ActionContext.h
+index 4fcaba2..f696a42 100644
+--- a/playerbot/strategy/actions/ActionContext.h
++++ b/playerbot/strategy/actions/ActionContext.h
+@@ -7,6 +7,7 @@
+ #include "BindToDefaultHomeAction.h"
+ #include "RethinkQuestTargetAction.h"
+ #include "DropGrayQuestsAction.h"
++#include "LookForGroupAction.h"
+ #include "EmoteAction.h"
+ #include "AddLootAction.h"
+ #include "LootAction.h"
+@@ -442,6 +443,7 @@ namespace ai
+             creators["bind to default home"] = [](PlayerbotAI* ai) { return new BindToDefaultHomeAction(ai); };
+             creators["rethink quest target"] = [](PlayerbotAI* ai) { return new RethinkQuestTargetAction(ai); };
+             creators["drop gray quests"] = [](PlayerbotAI* ai) { return new DropGrayQuestsAction(ai); };
++            creators["look for group"] = [](PlayerbotAI* ai) { return new LookForGroupAction(ai); };
+ 
+ #ifdef GenerateBotTests
+             creators["test"] = [](PlayerbotAI* ai) { return new TestAction(ai); };
+diff --git a/playerbot/strategy/actions/LookForGroupAction.cpp b/playerbot/strategy/actions/LookForGroupAction.cpp
+new file mode 100644
+index 0000000..82298f6
+--- /dev/null
++++ b/playerbot/strategy/actions/LookForGroupAction.cpp
+@@ -0,0 +1,56 @@
++#include "playerbot/playerbot.h"
++#include "LookForGroupAction.h"
++#include "playerbot/strategy/values/GroupQuests.h"
++
++using namespace ai;
++
++bool LookForGroupAction::Execute(Event& event)
++{
++    Quest const* quest = GroupQuests::Pending(bot);
++    if (!quest)
++        return false;
++
++    time_t const now = time(nullptr);
++    uint32 const wanted = GroupQuests::WantedSize(quest);
++    uint32 const have = GroupQuests::GroupSize(bot);
++
++    // A new search, or another quest: start the clock.
++    if (AI_VALUE2(int, "manual int", "lfg quest") != int(quest->GetQuestId()) || !AI_VALUE2(time_t, "manual time", "lfg since"))
++    {
++        SET_AI_VALUE2(int, "manual int", "lfg quest", int(quest->GetQuestId()));
++        SET_AI_VALUE2(time_t, "manual time", "lfg since", now);
++        SET_AI_VALUE2(time_t, "manual time", "lfg posted", 0);
++        SET_AI_VALUE2(bool, "manual bool", "lfg grouped", false);
++        SET_AI_VALUE2(std::string, "manual string", "lfg invited", "");
++    }
++
++    // Not full in time: a group formed for it breaks up; try again later.
++    if (now - AI_VALUE2(time_t, "manual time", "lfg since") > GroupQuests::WaitFor(wanted))
++    {
++        Group* group = bot->GetGroup();
++        bool const breakUp = group && AI_VALUE2(bool, "manual bool", "lfg grouped") && group->IsLeader(bot->GetObjectGuid());
++        sLog.outString("Bot #%d %s:%d <%s>: no group for %s (%u of %u) - %s, again in %d minutes", bot->GetGUIDLow(),
++            bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), quest->GetTitle().c_str(), have, wanted,
++            breakUp ? "the group breaks up" : "gives up for now", int(GroupQuests::RetryTime / 60));
++        if (breakUp)
++            group->Disband();
++
++        SET_AI_VALUE2(int, "manual int", "lfg quest", 0);
++        SET_AI_VALUE2(time_t, "manual time", "lfg since", 0);
++        SET_AI_VALUE2(bool, "manual bool", "lfg grouped", false);
++        SET_AI_VALUE2(time_t, "manual time", "lfg retry", now + GroupQuests::RetryTime);
++        return true;
++    }
++
++    if (now - AI_VALUE2(time_t, "manual time", "lfg posted") < GroupQuests::RepostTime)
++        return false;
++
++    // "LFG" first: that is what bots answer (ChatReplyAction::ChatReplyDo).
++    std::string const msg = "LFG " + ai->GetChatHelper()->formatQuest(quest) + " - " + std::to_string(wanted - have) + " more";
++    ai->SayToGeneral(msg);
++    ai->SayToLFG(msg);
++    SET_AI_VALUE2(time_t, "manual time", "lfg posted", now);
++    sLog.outString("Bot #%d %s:%d <%s>: looks for a group for %s (%u of %u)", bot->GetGUIDLow(),
++        bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), quest->GetTitle().c_str(), have, wanted);
++    return true;
++}
+diff --git a/playerbot/strategy/actions/LookForGroupAction.h b/playerbot/strategy/actions/LookForGroupAction.h
+new file mode 100644
+index 0000000..f102898
+--- /dev/null
++++ b/playerbot/strategy/actions/LookForGroupAction.h
+@@ -0,0 +1,15 @@
++#pragma once
++#include "playerbot/strategy/Action.h"
++
++namespace ai
++{
++    // kalimdor: says "LFG [quest]" for a group quest, waits for bots to join,
++    // gives up for a while when no group fills in time (values/GroupQuests.h;
++    // Kamino 268).
++    class LookForGroupAction : public Action
++    {
++    public:
++        LookForGroupAction(PlayerbotAI* ai) : Action(ai, "look for group") {}
++        virtual bool Execute(Event& event) override;
++    };
++}
+diff --git a/playerbot/strategy/actions/SayAction.cpp b/playerbot/strategy/actions/SayAction.cpp
+index 2a86a3f..afe4a23 100644
+--- a/playerbot/strategy/actions/SayAction.cpp
++++ b/playerbot/strategy/actions/SayAction.cpp
+@@ -1,5 +1,6 @@
+ 
+ #include "playerbot/playerbot.h"
++#include "playerbot/strategy/values/GroupQuests.h"
+ #include "SayAction.h"
+ #include "playerbot/PlayerbotTextMgr.h"
+ #include "Chat/ChannelMgr.h"
+@@ -923,6 +924,40 @@ bool ChatReplyAction::HandleLFGQuestsReply(Player* bot, ChatChannelSource chatCh
+         }
+     }
+ 
++    // kalimdor: a bot with the same unfinished group quest, in no group,
++    // joins the one looking - any level, higher ones help - if it is a bot
++    // on the same map (its AI runs in this thread) whose group is not full
++    // yet (values/GroupQuests.h; owner, 2026-11-06; Kamino 268).
++    if (!matchingQuestIds.empty() && !bot->GetGroup() && !bot->GetGroupInvite())
++    {
++        Player* announcer = sObjectMgr.GetPlayer(name.c_str());
++        PlayerbotAI* announcerAi = announcer ? announcer->GetPlayerbotAI() : nullptr;
++        if (announcerAi && announcer != bot && !announcerAi->IsRealPlayer() && announcer->GetMapId() == bot->GetMapId() &&
++            announcer->GetTeam() == bot->GetTeam() && !announcer->InBattleGround())
++        {
++            uint32 const questId = uint32(announcerAi->GetAiObjectContext()->GetValue<int>("manual int", "lfg quest")->Get());
++            Quest const* quest = questId && matchingQuestIds.count(questId) ? sObjectMgr.GetQuestTemplate(questId) : nullptr;
++            Group* group = announcer->GetGroup();
++            if (quest && GroupQuests::IsGroupQuest(quest) && bot->GetQuestStatus(questId) == QUEST_STATUS_INCOMPLETE &&
++                (!group || group->IsLeader(announcer->GetObjectGuid())) && GroupQuests::GroupSize(announcer) < GroupQuests::WantedSize(quest) &&
++                GroupQuests::RoleFits(announcer, bot, GroupQuests::WantedSize(quest)))
++            {
++                if (group && !group->IsRaidGroup() && GroupQuests::GroupSize(announcer) > 4)
++                    group->ConvertToRaid();
++                auto invited = announcerAi->GetAiObjectContext()->GetValue<std::string>("manual string", "lfg invited");
++                invited->Set(invited->Get() + std::to_string(bot->GetGUIDLow()) + ",");
++                WorldPacket p;
++                p << bot->GetName();
++                p << uint32(0);
++                announcer->GetSession()->HandleGroupInviteOpcode(p);
++                announcerAi->GetAiObjectContext()->GetValue<bool>("manual bool", "lfg grouped")->Set(true);
++                sLog.outString("Bot #%d %s:%d <%s>: joins %s's group for %s (%u of %u, %s)", bot->GetGUIDLow(),
++                    bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), announcer->GetName(),
++                    quest->GetTitle().c_str(), GroupQuests::GroupSize(announcer), GroupQuests::WantedSize(quest), GroupQuests::RoleName(bot));
++            }
++        }
++    }
++
+     if (!matchingQuestIds.empty())
+     {
+         std::map<std::string, std::string> placeholders;
+diff --git a/playerbot/strategy/generic/TravelStrategy.cpp b/playerbot/strategy/generic/TravelStrategy.cpp
+index 9ae87f2..a95df70 100644
+--- a/playerbot/strategy/generic/TravelStrategy.cpp
++++ b/playerbot/strategy/generic/TravelStrategy.cpp
+@@ -168,6 +168,12 @@ void TravelStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
+         "gray quest",
+         NextAction::array(0, new NextAction("drop gray quests", 7.0f), NULL)));
+ 
++    // kalimdor: a group quest without its group - say so in chat and wait
++    // for bots with it to join (values/GroupQuests.h; Kamino 268).
++    triggers.push_back(new TriggerNode(
++        "group quest pending",
++        NextAction::array(0, new NextAction("look for group", 6.63f), NULL)));
++
+     triggers.push_back(new TriggerNode(
+         "quest turn in due",
+         NextAction::array(0, new NextAction("request quest travel target::turnin", 6.62f), NULL)));
+diff --git a/playerbot/strategy/triggers/GroupQuestPendingTrigger.cpp b/playerbot/strategy/triggers/GroupQuestPendingTrigger.cpp
+new file mode 100644
+index 0000000..61419bb
+--- /dev/null
++++ b/playerbot/strategy/triggers/GroupQuestPendingTrigger.cpp
+@@ -0,0 +1,16 @@
++#include "playerbot/playerbot.h"
++#include "GroupQuestPendingTrigger.h"
++#include "playerbot/strategy/values/GroupQuests.h"
++
++using namespace ai;
++
++bool GroupQuestPendingTrigger::IsActive()
++{
++    if (ai->IsRealPlayer())
++        return false;
++
++    if (AI_VALUE2(time_t, "manual time", "lfg retry") > time(nullptr))
++        return false;
++
++    return GroupQuests::Pending(bot) != nullptr;
++}
+diff --git a/playerbot/strategy/triggers/GroupQuestPendingTrigger.h b/playerbot/strategy/triggers/GroupQuestPendingTrigger.h
+new file mode 100644
+index 0000000..3b1880f
+--- /dev/null
++++ b/playerbot/strategy/triggers/GroupQuestPendingTrigger.h
+@@ -0,0 +1,14 @@
++#pragma once
++#include "playerbot/strategy/Trigger.h"
++
++namespace ai
++{
++    // kalimdor: a group quest to look for a group for, and not waiting to
++    // retry after a failed search (values/GroupQuests.h; Kamino 268).
++    class GroupQuestPendingTrigger : public Trigger
++    {
++    public:
++        GroupQuestPendingTrigger(PlayerbotAI* ai) : Trigger(ai, "group quest pending", 60) {}
++        virtual bool IsActive() override;
++    };
++}
+diff --git a/playerbot/strategy/triggers/TriggerContext.h b/playerbot/strategy/triggers/TriggerContext.h
+index 6a19141..cacb346 100644
+--- a/playerbot/strategy/triggers/TriggerContext.h
++++ b/playerbot/strategy/triggers/TriggerContext.h
+@@ -7,6 +7,7 @@
+ #include "QuestProgressTrigger.h"
+ #include "QuestTurnInDueTrigger.h"
+ #include "GrayQuestTrigger.h"
++#include "GroupQuestPendingTrigger.h"
+ #include "GenericTriggers.h"
+ #include "LootTriggers.h"
+ #include "GenericTriggers.h"
+@@ -96,6 +97,7 @@ namespace ai
+             creators["quest progress"] = [](PlayerbotAI* ai) { return new QuestProgressTrigger(ai); };
+             creators["quest turn in due"] = [](PlayerbotAI* ai) { return new QuestTurnInDueTrigger(ai); };
+             creators["gray quest"] = [](PlayerbotAI* ai) { return new GrayQuestTrigger(ai); };
++            creators["group quest pending"] = [](PlayerbotAI* ai) { return new GroupQuestPendingTrigger(ai); };
+             creators["enemy player near"] = [](PlayerbotAI* ai) { return new EnemyPlayerNear(ai); };
+ 
+             creators["combat start"] = [](PlayerbotAI* ai) { return new CombatStartTrigger(ai); };
+diff --git a/playerbot/strategy/values/GroupQuests.cpp b/playerbot/strategy/values/GroupQuests.cpp
+new file mode 100644
+index 0000000..6c4822c
+--- /dev/null
++++ b/playerbot/strategy/values/GroupQuests.cpp
+@@ -0,0 +1,175 @@
++#include "playerbot/playerbot.h"
++#include "GroupQuests.h"
++#include "QuestFlow.h"
++#include "Maps/Map.h"
++
++#include <algorithm>
++#include <set>
++
++using namespace ai;
++
++namespace
++{
++    // A quest whose kill target is an open-world boss (world-boss rank).
++    bool TargetsWorldBoss(Quest const* quest)
++    {
++        for (int i = 0; i < QUEST_OBJECTIVES_COUNT; ++i)
++            if (quest->ReqCreatureOrGOId[i] > 0)
++                if (CreatureInfo const* info = ObjectMgr::GetCreatureTemplate(quest->ReqCreatureOrGOId[i]))
++                    if (info->Rank == CREATURE_ELITE_WORLDBOSS)
++                        return true;
++        return false;
++    }
++
++    enum Role { Tank, Healer, Damage };
++
++    Role RoleOf(Player* player)
++    {
++        if (PlayerbotAI::IsTank(player, false))
++            return Tank;
++        if (PlayerbotAI::IsHeal(player, false))
++            return Healer;
++        return Damage;
++    }
++
++    struct Limits { uint32 minTanks, maxTanks, minHealers, maxHealers; };
++
++    Limits LimitsFor(uint32 wanted)
++    {
++        if (wanted <= 3)
++            return { 0, wanted, 0, wanted };
++        if (wanted <= 5)
++            return { 1, 1, 1, 1 };
++        if (wanted <= 10)
++            return { 2, 2, 2, 2 };
++        if (wanted <= 20)
++            return { 2, 3, 4, 5 };
++        return { 3, 4, 10, 12 };
++    }
++}
++
++bool GroupQuests::IsGroupQuest(Quest const* quest)
++{
++    return quest && (quest->GetType() == QUEST_TYPE_ELITE || quest->GetType() == QUEST_TYPE_DUNGEON || quest->GetType() == QUEST_TYPE_RAID ||
++        TargetsWorldBoss(quest));
++}
++
++uint32_t GroupQuests::WantedSize(Quest const* quest)
++{
++    // An open-world boss is a raid (owner, 2026-11-06).
++    if (TargetsWorldBoss(quest))
++        return 40;
++
++    // The quest's zone tells the instance: a dungeon 5, a raid its limit.
++    if (quest->GetZoneOrSort() > 0)
++        if (AreaTableEntry const* area = GetAreaEntryByAreaID(quest->GetZoneOrSort()))
++            if (MapEntry const* map = sMapStore.LookupEntry(area->mapid))
++            {
++                if (map->IsRaid())
++                {
++                    InstanceTemplate const* instance = ObjectMgr::GetInstanceTemplate(area->mapid);
++                    return instance && instance->maxPlayers ? instance->maxPlayers : 40;
++                }
++                if (map->IsNonRaidDungeon())
++                    return 5;
++            }
++
++    switch (quest->GetType())
++    {
++        case QUEST_TYPE_RAID: return 40;
++        case QUEST_TYPE_DUNGEON: return 5;
++        default: return 3;
++    }
++}
++
++time_t GroupQuests::WaitFor(uint32_t wanted)
++{
++    return std::max<time_t>(MinWait, WaitPerMember * wanted);
++}
++
++uint32_t GroupQuests::GroupSize(Player* bot)
++{
++    // Invitations still open count: bots invited in the same second pushed
++    // a 3-bot group past 3 (dev server). A group not formed yet is the
++    // leader's pending invite, the leader one of its invitees.
++    if (Group* group = bot->GetGroup())
++        return group->GetMembersCount() + group->GetInviteesCount();
++    Group* pending = bot->GetGroupInvite();
++    if (pending && pending->GetLeaderGuid() == bot->GetObjectGuid())
++        return std::max<uint32_t>(1, pending->GetInviteesCount());
++    return 1;
++}
++
++const char* GroupQuests::RoleName(Player* player)
++{
++    switch (RoleOf(player))
++    {
++        case Tank: return "tank";
++        case Healer: return "healer";
++        default: return "damage";
++    }
++}
++
++bool GroupQuests::RoleFits(Player* announcer, Player* candidate, uint32_t wanted)
++{
++    Limits const limits = LimitsFor(wanted);
++    uint32 counts[3] = { 0, 0, 0 };
++    uint32 total = 0;
++    std::set<uint32> counted;
++    auto count = [&](Player* player)
++    {
++        if (player && counted.insert(player->GetGUIDLow()).second)
++        {
++            ++counts[RoleOf(player)];
++            ++total;
++        }
++    };
++
++    count(announcer);
++    if (Group* group = announcer->GetGroup())
++        for (auto const& slot : group->GetMemberSlots())
++            count(sObjectMgr.GetPlayer(slot.guid));
++
++    // The bots it invited that have not answered yet.
++    Group* const pending = announcer->GetGroup() ? announcer->GetGroup() : announcer->GetGroupInvite();
++    std::string const invited = announcer->GetPlayerbotAI()->GetAiObjectContext()->GetValue<std::string>("manual string", "lfg invited")->Get();
++    for (std::string const& id : split(invited, ','))
++        if (!id.empty())
++            if (Player* player = sObjectMgr.GetPlayer(ObjectGuid(HIGHGUID_PLAYER, uint32(std::stoul(id)))))
++                if (pending && player->GetGroupInvite() == pending)
++                    count(player);
++
++    Role const role = RoleOf(candidate);
++    ++counts[role];
++    ++total;
++    if (total > wanted || counts[Tank] > limits.maxTanks || counts[Healer] > limits.maxHealers)
++        return false;
++
++    // The slots left must still hold the tanks and healers it needs.
++    uint32 const stillNeeded = (counts[Tank] < limits.minTanks ? limits.minTanks - counts[Tank] : 0) +
++        (counts[Healer] < limits.minHealers ? limits.minHealers - counts[Healer] : 0);
++    return wanted - total >= stillNeeded;
++}
++
++Quest const* GroupQuests::Pending(Player* bot)
++{
++    if (bot->InBattleGround() || bot->GetMap()->IsDungeon())
++        return nullptr;
++
++    Group* group = bot->GetGroup();
++    if (group && !group->IsLeader(bot->GetObjectGuid()))
++        return nullptr;
++
++    for (uint8 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
++    {
++        uint32 const questId = bot->GetQuestSlotQuestId(slot);
++        Quest const* quest = sObjectMgr.GetQuestTemplate(questId);
++        if (!IsGroupQuest(quest) || bot->GetQuestStatus(questId) != QUEST_STATUS_INCOMPLETE || QuestFlow::IsGrey(bot, quest))
++            continue;
++
++        if (GroupSize(bot) < WantedSize(quest))
++            return quest;
++    }
++
++    return nullptr;
++}
+diff --git a/playerbot/strategy/values/GroupQuests.h b/playerbot/strategy/values/GroupQuests.h
+new file mode 100644
+index 0000000..4b2d7a4
+--- /dev/null
++++ b/playerbot/strategy/values/GroupQuests.h
+@@ -0,0 +1,54 @@
++#pragma once
++
++#include <cstdint>
++#include <ctime>
++
++// kalimdor: bots look for a group for their group quests, in chat, and
++// answer each other (owner, 2026-11-06; Kamino 268). A bot with an unfinished
++// elite, dungeon or raid quest that is not grey, and no group big enough for
++// it (alone, or leading a smaller one), says "LFG [quest]" in its zone's
++// General and in LookingForGroup, every RepostTime while it waits. A bot on
++// the same map with the same unfinished quest, in no group, is invited - any
++// level: higher bots help (ChatReplyAction::HandleLFGQuestsReply). Size by
++// the quest: elite 3, dungeon 5, raid its instance's limit (Zul'Gurub 20,
++// Molten Core 40). It waits WaitPerMember a member, at least MinWait (a
++// dungeon 30 minutes - group forming is slow); not full by then, a group it
++// formed so is broken up and it tries again after RetryTime. Once full,
++// upstream's "can fight elite/boss" lets the quest travel take the group.
++// A quest whose target is an open-world boss is a raid (owner: world bosses
++// are like raids), 40. Roles (owner, 2026-11-06), by PlayerbotAI::IsTank and
++// IsHeal, damage the rest, melee or ranged: elite 3 - any; 5 - exactly 1
++// tank, 1 healer; 10 - exactly 2 and 2; 20 - 2-3 tanks, 4-5 healers; 40 -
++// 3-4 tanks, 10-12 healers. A bot joins only if its role still fits and the
++// slots left can still hold the minimum tanks and healers.
++
++class Player;
++class Quest;
++
++namespace ai
++{
++    class GroupQuests
++    {
++    public:
++        static constexpr time_t WaitPerMember = 6 * 60;
++        static constexpr time_t MinWait = 20 * 60;
++        static constexpr time_t RepostTime = 15 * 60;
++        static constexpr time_t RetryTime = 30 * 60;
++
++        static bool IsGroupQuest(Quest const* quest);
++        // The group it needs: elite 3, dungeon 5, raid the instance's limit.
++        static uint32_t WantedSize(Quest const* quest);
++        static time_t WaitFor(uint32_t wanted);
++        // Its size now: the bot's group with the invitations still open, or 1
++        // alone.
++        static uint32_t GroupSize(Player* bot);
++        // Whether the candidate fits the announcer's group by role, counting
++        // its members and the bots it has invited and not heard back from.
++        static bool RoleFits(Player* announcer, Player* candidate, uint32_t wanted);
++        // "tank", "healer" or "damage", for the log.
++        static const char* RoleName(Player* player);
++        // The group quest it should look for a group for, or none: alone or
++        // leading, unfinished, not grey, the group not yet big enough.
++        static Quest const* Pending(Player* bot);
++    };
++}
