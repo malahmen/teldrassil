@@ -1,0 +1,675 @@
+diff --git a/playerbot/RandomItemMgr.cpp b/playerbot/RandomItemMgr.cpp
+index 2e04607..ecf1c6b 100644
+--- a/playerbot/RandomItemMgr.cpp
++++ b/playerbot/RandomItemMgr.cpp
+@@ -149,6 +149,29 @@ void RandomItemMgr::Init()
+     BuildGlyphCache();
+ #endif
+     //BuildRarityCache();
++    // kalimdor: the rarity upstream's builder would work out - the best drop
++    // chance from the loot tables, 0.1-0.6 s an item, about half an hour for
++    // all, too long at a start - worked out once and shipped (sql/0002), read
++    // here; the bots' value of an item (values/AuctionGoods.h; Kamino 271).
++    LoadItemRarity();
++}
++
++void RandomItemMgr::LoadItemRarity()
++{
++    auto results = WorldDatabase.Query("SELECT `item`, `chance` FROM `kalimdor_item_rarity`");
++    if (!results)
++    {
++        sLog.outString("Item rarity: no kalimdor_item_rarity rows");
++        return;
++    }
++    uint32 count = 0;
++    do
++    {
++        Field* fields = results->Fetch();
++        rarityCache[fields[0].GetUInt32()] = fields[1].GetFloat();
++        ++count;
++    } while (results->NextRow());
++    sLog.outString("Item rarity: %u items", count);
+ }
+ 
+ RandomItemMgr::~RandomItemMgr()
+diff --git a/playerbot/RandomItemMgr.h b/playerbot/RandomItemMgr.h
+index 30b7a3b..85f2b6e 100644
+--- a/playerbot/RandomItemMgr.h
++++ b/playerbot/RandomItemMgr.h
+@@ -198,6 +198,8 @@ class RandomItemMgr
+         void BuildPotionCache();
+         void BuildTradeCache();
+         void BuildRarityCache();
++        // kalimdor: rarity from kalimdor_item_rarity (sql/0002; Kamino 271).
++        void LoadItemRarity();
+         void BuildGlyphCache();
+         void LoadRandomEnchantments();
+         bool CanEquipItem(BotEquipKey key, ItemPrototype const* proto);
+diff --git a/playerbot/strategy/actions/AhAction.cpp b/playerbot/strategy/actions/AhAction.cpp
+index ea0f8c1..8fe795d 100644
+--- a/playerbot/strategy/actions/AhAction.cpp
++++ b/playerbot/strategy/actions/AhAction.cpp
+@@ -5,6 +5,7 @@
+ #include "playerbot/RandomItemMgr.h"
+ #include "playerbot/strategy/values/BudgetValues.h"
+ #include "playerbot/strategy/values/ItemUsageValue.h"
++#include "playerbot/strategy/values/AuctionGoods.h"
+ 
+ using namespace ai;
+ 
+@@ -87,6 +88,12 @@ bool AhAction::ExecuteCommand(Player* requester, std::string text, Unit* auction
+                 uint32 basePerItem = ItemUsageValue::GetBotSellPrice(proto, bot);
+                 uint32 initialPricePercentage = urand(75, 100);
+                 uint32 pricePerItem = (basePerItem * initialPricePercentage) / 100;
++                // kalimdor: 10% cheaper for each time it came back unsold
++                // (values/AuctionGoods.h; Kamino 271).
++                pricePerItem = pricePerItem * AuctionGoods::PricePercent(ai, proto->ItemId) / 100;
++                // kalimdor: a trader prices to sell (Kamino 271).
++                if (AuctionGoods::IsTrader(bot))
++                    pricePerItem = AuctionGoods::TraderPrice(proto, pricePerItem);
+                 if (!pricePerItem)
+                     pricePerItem = 1;
+                 pricePerItemCache[proto->ItemId] = pricePerItem;
+@@ -178,6 +185,10 @@ bool AhBidAction::ExecuteCommand(Player* requester, std::string text, Unit* auct
+ 
+     std::vector<std::pair<AuctionEntry*, uint32>> auctionPowers;
+ 
++    // kalimdor: a buying trip is done whatever it found (Kamino 271).
++    if (text == "vendor")
++        AuctionGoods::BuyTripDone(ai);
++
+     if (text == "vendor")
+     {
+         ItemUsage usage;
+diff --git a/playerbot/strategy/actions/BankAction.cpp b/playerbot/strategy/actions/BankAction.cpp
+index 19ec5c6..36dbcd7 100644
+--- a/playerbot/strategy/actions/BankAction.cpp
++++ b/playerbot/strategy/actions/BankAction.cpp
+@@ -285,8 +285,9 @@ bool BankAction::AutoWithdraw()
+ {
+     bool withdrew = false;
+ 
+-    if (AI_VALUE(uint8, "bag space") > 80)
+-        return false;
++    // kalimdor: with full bags only stacks marked to sell, to make room in
++    // the bank (values/AuctionGoods.h; Kamino 271).
++    bool const onlyToSell = AI_VALUE(uint8, "bag space") > 80;
+ 
+     auto checkAndWithdraw = [&](Item* pItem) -> bool
+     {
+@@ -303,6 +304,8 @@ bool BankAction::AutoWithdraw()
+         ItemUsage usage = AI_VALUE2(ItemUsage, "item usage", itemId);
+         if (usage == ItemUsage::ITEM_USAGE_BANK)
+             return false;        
++        if (onlyToSell && usage != ItemUsage::ITEM_USAGE_VENDOR)
++            return false;
+ 
+         ItemPosCountVec dest;
+         uint8 bagSlot;
+diff --git a/playerbot/strategy/actions/MailAction.cpp b/playerbot/strategy/actions/MailAction.cpp
+index 00b80dd..054bdc1 100644
+--- a/playerbot/strategy/actions/MailAction.cpp
++++ b/playerbot/strategy/actions/MailAction.cpp
+@@ -2,6 +2,7 @@
+ #include "Mails/Mail.h"
+ #include "playerbot/playerbot.h"
+ #include "MailAction.h"
++#include "playerbot/strategy/values/AuctionGoods.h"
+ #include "playerbot/PlayerbotAIConfig.h"
+ #include "playerbot/Helpers.h"
+ 
+@@ -106,14 +107,22 @@ public:
+                 ai->TellPlayer(requester, out.str(), PlayerbotSecurityLevel::PLAYERBOT_SECURITY_ALLOW_ALL, false);
+             }
+ 
++            // kalimdor: a sale resets the item's unsold count (Kamino 271) -
++            // read before the mail is removed.
++            uint32 const soldItem = AuctionItem(mail, AUCTION_SUCCESSFUL);
+             WorldPacket packet;
+             packet << mailbox;
+             packet << mail->messageID;
+             bot->GetSession()->HandleMailTakeMoney(packet);
+             RemoveMail(bot, mail->messageID, mailbox);
++            if (soldItem)
++                AuctionGoods::Sold(ai, soldItem);
+         }
+         else if (mail->has_items)
+         {
++            // kalimdor: an expired auction counts once more unsold (Kamino
++            // 271) - read before the mail is removed.
++            uint32 const returnedItem = AuctionItem(mail, AUCTION_EXPIRED);
+             std::list<uint32> guids;
+             for (MailItemInfoVec::iterator i = mail->items.begin(); i != mail->items.end(); ++i)
+             {
+@@ -150,6 +159,8 @@ public:
+             }
+ 
+             RemoveMail(bot, mail->messageID, mailbox);
++            if (returnedItem)
++                AuctionGoods::Returned(ai, returnedItem);
+         }
+         else if (mail->sender < 10 && !ai->HasActivePlayerMaster()) //Remove empty mails from auctionhouse.
+         {
+@@ -191,6 +202,18 @@ public:
+     static TakeMailProcessor instance;
+ 
+ private:
++    // kalimdor: the item of an auction-house mail with this outcome - its
++    // subject is "item:randomproperty:outcome" - or 0.
++    static uint32 AuctionItem(Mail* mail, uint32 outcome)
++    {
++        if (mail->stationery != MAIL_STATIONERY_AUCTION)
++            return 0;
++        std::vector<std::string> parts = split(mail->subject, ':');
++        if (parts.size() != 3 || uint32(atoi(parts[2].c_str())) != outcome)
++            return 0;
++        return uint32(atoi(parts[0].c_str()));
++    }
++
+     bool CheckBagSpace(Player* bot)
+     {
+         uint32 totalused = 0, total = 16;
+diff --git a/playerbot/strategy/values/AuctionGoods.cpp b/playerbot/strategy/values/AuctionGoods.cpp
+new file mode 100644
+index 0000000..7fe56f8
+--- /dev/null
++++ b/playerbot/strategy/values/AuctionGoods.cpp
+@@ -0,0 +1,263 @@
++#include "playerbot/playerbot.h"
++#include "AuctionGoods.h"
++#include "Archetypes.h"
++#include "playerbot/RandomItemMgr.h"
++#include "playerbot/RandomPlayerbotMgr.h"
++#include "CraftValues.h"
++#include "playerbot/ServerFacade.h"
++
++using namespace ai;
++
++namespace
++{
++    // "item:count,item:count,..." - one saved value, not one per item.
++    std::vector<std::pair<uint32, int>> ReadCounts(PlayerbotAI* ai)
++    {
++        std::vector<std::pair<uint32, int>> counts;
++        std::string const text = ai->GetAiObjectContext()->GetValue<std::string>("manual saved string", "ah unsold")->Get();
++        for (std::string const& entry : split(text, ','))
++        {
++            size_t const colon = entry.find(':');
++            if (colon == std::string::npos)
++                continue;
++            uint32 const item = uint32(atoi(entry.substr(0, colon).c_str()));
++            int const count = atoi(entry.substr(colon + 1).c_str());
++            if (item && count > 0)
++                counts.push_back({ item, count });
++        }
++        return counts;
++    }
++
++    void WriteCounts(PlayerbotAI* ai, std::vector<std::pair<uint32, int>> const& counts)
++    {
++        std::ostringstream out;
++        size_t const first = counts.size() > AuctionGoods::MaxTracked ? counts.size() - AuctionGoods::MaxTracked : 0;
++        for (size_t i = first; i < counts.size(); ++i)
++            out << counts[i].first << ":" << counts[i].second << ",";
++        ai->GetAiObjectContext()->GetValue<std::string>("manual saved string", "ah unsold")->Set(out.str());
++    }
++
++    void SetCount(PlayerbotAI* ai, uint32 itemId, int count)
++    {
++        std::vector<std::pair<uint32, int>> counts = ReadCounts(ai);
++        counts.erase(std::remove_if(counts.begin(), counts.end(), [itemId](auto const& c) { return c.first == itemId; }), counts.end());
++        if (count > 0)
++            counts.push_back({ itemId, count });
++        WriteCounts(ai, counts);
++    }
++}
++
++int AuctionGoods::Unsold(PlayerbotAI* ai, uint32 itemId)
++{
++    for (auto const& [item, count] : ReadCounts(ai))
++        if (item == itemId)
++            return count;
++    return 0;
++}
++
++void AuctionGoods::Returned(PlayerbotAI* ai, uint32 itemId)
++{
++    SetCount(ai, itemId, Unsold(ai, itemId) + 1);
++}
++
++void AuctionGoods::Sold(PlayerbotAI* ai, uint32 itemId)
++{
++    if (Unsold(ai, itemId))
++        SetCount(ai, itemId, 0);
++}
++
++uint32 AuctionGoods::PricePercent(PlayerbotAI* ai, uint32 itemId)
++{
++    if (IsTrader(ai->GetBot()))
++        return 100;
++    int const unsold = std::min(Unsold(ai, itemId), Relists - 1);
++    return 100 - StepPercent * uint32(unsold);
++}
++
++bool AuctionGoods::IsTrader(Player* bot)
++{
++    Archetype const* archetype = Archetypes::Of(bot);
++    return archetype && archetype->name == "trader";
++}
++
++bool AuctionGoods::IsValuable(ItemPrototype const* proto)
++{
++    if (proto->Quality >= ITEM_QUALITY_RARE)
++        return true;
++    // Gear by its quality only: nearly every green is a world drop under 1%
++    // (dev data), and gear below blue goes to a vendor (owner).
++    if (proto->Class == ITEM_CLASS_ARMOR || proto->Class == ITEM_CLASS_WEAPON)
++        return false;
++    float const chance = sRandomItemMgr.GetItemRarity(proto->ItemId);
++    return chance > 0.0f && chance <= RareDropChance;
++}
++
++bool AuctionGoods::IsScarce(uint32 itemId)
++{
++    return sRandomPlayerbotMgr.GetAhPrices(itemId).size() < ScarceListings;
++}
++
++ItemUsage AuctionGoods::Route(PlayerbotAI* ai, ItemPrototype const* proto)
++{
++    Player* bot = ai->GetBot();
++    if (ai->HasActivePlayerMaster() || !sRandomPlayerbotMgr.IsFreeBot(bot) || IsTrader(bot))
++        return ItemUsage::ITEM_USAGE_NONE;
++
++    if (proto->Bonding == BIND_WHEN_PICKED_UP || proto->Bonding == BIND_QUEST_ITEM || proto->Quality == ITEM_QUALITY_POOR)
++        return ItemUsage::ITEM_USAGE_NONE;
++    if (Item* item = ItemUsageValue::CurrentItem(proto, bot))
++        if (item->IsSoulBound())
++            return ItemUsage::ITEM_USAGE_NONE;
++
++    // Not worth listing (upstream's measure): the auction action skips it,
++    // so marked for the auction house it would stay in the bags for good.
++    bool const worthListing = ItemUsageValue::IsMoreProfitableToSellToAHThanToVendor(proto, bot);
++
++    // Valuable: the auction house while few are listed, else the bank -
++    // never a vendor.
++    if (IsValuable(proto))
++        return IsScarce(proto->ItemId) && worthListing ? ItemUsage::ITEM_USAGE_AH : BankOrSell(ai, proto);
++
++    // Gear below blue: a vendor.
++    if ((proto->Class == ITEM_CLASS_ARMOR || proto->Class == ITEM_CLASS_WEAPON) && proto->SellPrice > 0)
++        return ItemUsage::ITEM_USAGE_VENDOR;
++
++    // Materials and recipes: the auction house, after Relists unsold the
++    // bank - never a vendor.
++    if (proto->Class == ITEM_CLASS_TRADE_GOODS || proto->Class == ITEM_CLASS_REAGENT || proto->Class == ITEM_CLASS_RECIPE)
++        return worthListing && Unsold(ai, proto->ItemId) < Relists ? ItemUsage::ITEM_USAGE_AH : BankOrSell(ai, proto);
++
++    return ItemUsage::ITEM_USAGE_NONE;
++}
++
++double AuctionGoods::Value(ItemPrototype const* proto, uint32 count)
++{
++    double unit = ItemUsageValue::GetAHMedianBuyoutPricePerItem(proto);
++    if (!unit)
++        unit = ItemUsageValue::GetItemBaseValue(proto);
++    if (!unit)
++        unit = proto->SellPrice;
++
++    float const chance = sRandomItemMgr.GetItemRarity(proto->ItemId);
++    double const rarity = chance > 0.0f ? std::min(20.0, 1.0 + 10.0 / chance) : 1.0;
++
++    size_t const listed = sRandomPlayerbotMgr.GetAhPrices(proto->ItemId).size();
++    double const availability = listed == 0 ? 2.0 : listed < ScarceListings ? 1.5 : 1.0;
++
++    return unit * std::max<uint32>(1, count) * rarity * availability;
++}
++
++bool AuctionGoods::BankFull(PlayerbotAI* ai)
++{
++    return ai->GetAiObjectContext()->GetValue<uint8>("bank space")->Get() > 80;
++}
++
++Item* AuctionGoods::LeastValuableInBank(PlayerbotAI* ai, double* value)
++{
++    Item* least = nullptr;
++    double leastValue = 0;
++    for (Item* item : ai->GetAiObjectContext()->GetValue<std::list<Item*>>("bank items", "all")->Get())
++    {
++        ItemPrototype const* proto = item ? item->GetProto() : nullptr;
++        if (!proto || IsValuable(proto) || !proto->SellPrice || proto->Class == ITEM_CLASS_CONTAINER || proto->Class == ITEM_CLASS_QUEST)
++            continue;
++        double const v = Value(proto, item->GetCount());
++        if (!least || v < leastValue)
++        {
++            least = item;
++            leastValue = v;
++        }
++    }
++    if (value)
++        *value = leastValue;
++    return least;
++}
++
++namespace
++{
++    // A stack in the bags worth more than the bank's least valuable one, of
++    // a kind that goes to the bank (valuables aside - they wait anyway).
++    bool BetterWaiting(PlayerbotAI* ai, uint32 leastItemId, double leastValue)
++    {
++        for (Item* item : ai->GetAiObjectContext()->GetValue<std::list<Item*>>("inventory items", "inventory")->Get())
++        {
++            ItemPrototype const* proto = item ? item->GetProto() : nullptr;
++            if (!proto || proto->ItemId == leastItemId || AuctionGoods::IsValuable(proto))
++                continue;
++            if (proto->Class != ITEM_CLASS_TRADE_GOODS && proto->Class != ITEM_CLASS_REAGENT && proto->Class != ITEM_CLASS_RECIPE &&
++                proto->Class != ITEM_CLASS_ARMOR && proto->Class != ITEM_CLASS_WEAPON)
++                continue;
++            if (AuctionGoods::Value(proto, item->GetCount()) > leastValue)
++                return true;
++        }
++        return false;
++    }
++}
++
++ItemUsage AuctionGoods::BankOrSell(PlayerbotAI* ai, ItemPrototype const* proto)
++{
++    Player* bot = ai->GetBot();
++    if (ai->HasActivePlayerMaster() || !sRandomPlayerbotMgr.IsFreeBot(bot) || !BankFull(ai) || IsValuable(proto) || !proto->SellPrice)
++        return ItemUsage::ITEM_USAGE_BANK;
++
++    double leastValue = 0;
++    Item* least = LeastValuableInBank(ai, &leastValue);
++    if (!least)
++        return ItemUsage::ITEM_USAGE_BANK;
++
++    if (least->GetProto()->ItemId == proto->ItemId)
++        return BetterWaiting(ai, proto->ItemId, leastValue) ? ItemUsage::ITEM_USAGE_VENDOR : ItemUsage::ITEM_USAGE_BANK;
++
++    Item* item = ItemUsageValue::CurrentItem(proto, bot);
++    return Value(proto, item ? item->GetCount() : 1) <= leastValue ? ItemUsage::ITEM_USAGE_VENDOR : ItemUsage::ITEM_USAGE_BANK;
++}
++
++uint32 AuctionGoods::TraderPrice(ItemPrototype const* proto, uint32 upstreamPrice)
++{
++    uint32 const lowest = ItemUsageValue::GetAHListingLowestBuyoutPricePerItem(proto);
++    uint32 const price = lowest ? lowest * (100 - TraderUndercutPercent) / 100 : upstreamPrice * TraderNoListingPercent / 100;
++    return std::max<uint32>(1, std::min(price, upstreamPrice));
++}
++
++bool AuctionGoods::MailIsCache(PlayerbotAI* ai)
++{
++    return IsTrader(ai->GetBot()) && BankFull(ai) && ai->GetAiObjectContext()->GetValue<uint8>("bag space")->Get() > 80;
++}
++
++bool AuctionGoods::WantsToBuy(PlayerbotAI* ai)
++{
++    Player* bot = ai->GetBot();
++    AiObjectContext* context = ai->GetAiObjectContext();
++    if (ai->HasActivePlayerMaster() || !sRandomPlayerbotMgr.IsFreeBot(bot))
++        return false;
++    if (context->GetValue<time_t>("manual time", "ah buy next")->Get() > time(nullptr))
++        return false;
++
++    for (uint32 spellId : context->GetValue<std::vector<uint32>>("craft spells")->Get())
++    {
++        bool firstAid = false;
++        SkillLineAbilityMapBounds bounds = sSpellMgr.GetSkillLineAbilityMapBoundsBySpellId(spellId);
++        for (auto it = bounds.first; it != bounds.second; ++it)
++            if (it->second->skillId == SKILL_FIRST_AID)
++                firstAid = true;
++        if (!firstAid || !ShouldCraftSpellValue::SpellGivesSkillUp(spellId, bot))
++            continue;
++
++        SpellEntry const* spell = sServerFacade.LookupSpellInfo(spellId);
++        if (!spell)
++            continue;
++        for (uint8 i = 0; i < MAX_SPELL_REAGENTS; ++i)
++        {
++            if (spell->ReagentCount[i] <= 0 || !spell->Reagent[i])
++                continue;
++            if (bot->GetItemCount(spell->Reagent[i]) < uint32(spell->ReagentCount[i]) && !sRandomPlayerbotMgr.GetAhPrices(spell->Reagent[i]).empty())
++                return true;
++        }
++    }
++    return false;
++}
++
++void AuctionGoods::BuyTripDone(PlayerbotAI* ai)
++{
++    ai->GetAiObjectContext()->GetValue<time_t>("manual time", "ah buy next")->Set(time(nullptr) + BuyTripPause);
++}
+diff --git a/playerbot/strategy/values/AuctionGoods.h b/playerbot/strategy/values/AuctionGoods.h
+new file mode 100644
+index 0000000..c0c72fc
+--- /dev/null
++++ b/playerbot/strategy/values/AuctionGoods.h
+@@ -0,0 +1,78 @@
++#pragma once
++#include "playerbot/strategy/values/ItemUsageValue.h"
++
++namespace ai
++{
++    // kalimdor: a random bot's goods by the owner's rules (2026-11-07; Kamino
++    // 271). Bots listed goods at the auction house, nobody bought, the
++    // auctions expired and came back by mail (dev: 56,012 expired, 403
++    // sold), bags stayed full. Now an unsold item is relisted Relists times,
++    // StepPercent cheaper each; still unsold, materials and recipes go to
++    // the bank, to sell later; gear below blue goes to a vendor; valuable
++    // items go to the auction house only while few are listed (Scarce), else
++    // the bank, never a vendor. Traders are exempt: upstream's ways.
++    // Value (owner): rarity - the drop chance, kalimdor's item rarity table
++    // (sql/0002) - availability at the auction house, its price; the vendor
++    // price least. A full bank (over 80%, upstream's deposit limit) makes
++    // room: a stack bound for it worth no more than the bank's least
++    // valuable goes to a vendor; worth more, that bank stack is withdrawn
++    // and sold instead (valuables never), traders too. Traders price to
++    // sell: under the lowest listing (TraderUndercutPercent), or
++    // TraderNoListingPercent of upstream's price; with a full bank and full
++    // bags they leave item mail in the mailbox. Bots buy what their crafting
++    // lacks - first aid's cloth, the only craft random bots do (Kamino 257):
++    // a trip to the auction house when it is listed, at most every
++    // BuyTripPause.
++    class AuctionGoods
++    {
++    public:
++        static constexpr int Relists = 5;
++        static constexpr uint32 StepPercent = 10;
++        // Fewer listed than this is scarce.
++        static constexpr uint32 ScarceListings = 3;
++        // A drop chance (%) at or below this is a rare drop (materials and
++        // recipes; spawn rarity - Black Lotus, 100% a herb - not yet).
++        static constexpr float RareDropChance = 1.0f;
++        // Items with a count kept at most, the oldest dropped.
++        static constexpr size_t MaxTracked = 100;
++
++        // How often it came back unsold since it last sold.
++        static int Unsold(PlayerbotAI* ai, uint32 itemId);
++        // An expired auction taken from the mail, or a sale.
++        static void Returned(PlayerbotAI* ai, uint32 itemId);
++        static void Sold(PlayerbotAI* ai, uint32 itemId);
++        // The price to list at, in percent of upstream's.
++        static uint32 PricePercent(PlayerbotAI* ai, uint32 itemId);
++
++        static bool IsTrader(Player* bot);
++        static bool IsValuable(ItemPrototype const* proto);
++        static bool IsScarce(uint32 itemId);
++        // The owner's choice for an item upstream would sell, or
++        // ITEM_USAGE_NONE to leave it to upstream.
++        static ItemUsage Route(PlayerbotAI* ai, ItemPrototype const* proto);
++
++        // A stack's worth: its auction price (median buyout, else upstream's
++        // item value; the vendor price last) times its count, times its
++        // rarity (a 1% drop about 11, 10% about 2) and its availability (none
++        // listed 2, fewer than ScarceListings 1.5).
++        static double Value(ItemPrototype const* proto, uint32 count);
++        static bool BankFull(PlayerbotAI* ai);
++        // The bank's least valuable stack, valuables aside, or null.
++        static Item* LeastValuableInBank(PlayerbotAI* ai, double* value);
++        // For an item bound for the bank: the bank, or a vendor when the
++        // bank is full and it is worth no more than the bank's least
++        // valuable stack - or is that stack, with something better waiting.
++        static ItemUsage BankOrSell(PlayerbotAI* ai, ItemPrototype const* proto);
++
++        static constexpr uint32 TraderUndercutPercent = 5;
++        static constexpr uint32 TraderNoListingPercent = 75;
++        static constexpr time_t BuyTripPause = 30 * 60;
++        // A trader's price per item for what upstream would ask.
++        static uint32 TraderPrice(ItemPrototype const* proto, uint32 upstreamPrice);
++        // A trader keeps its item mail in the mailbox (bank and bags full).
++        static bool MailIsCache(PlayerbotAI* ai);
++        // Something its crafting lacks is listed at the auction house.
++        static bool WantsToBuy(PlayerbotAI* ai);
++        static void BuyTripDone(PlayerbotAI* ai);
++    };
++}
+diff --git a/playerbot/strategy/values/BankValues.cpp b/playerbot/strategy/values/BankValues.cpp
+index 80d5641..7276f74 100644
+--- a/playerbot/strategy/values/BankValues.cpp
++++ b/playerbot/strategy/values/BankValues.cpp
+@@ -1,6 +1,7 @@
+ 
+ #include "playerbot/playerbot.h"
+ #include "BankValues.h"
++#include "AuctionGoods.h"
+ #include "ItemCountValue.h"
+ #include "Guilds/Guild.h"
+ #include "Guilds/GuildMgr.h"
+@@ -24,8 +25,16 @@ bool ShouldBankDepositValue::Calculate()
+ 
+ bool ShouldBankWithdrawValue::Calculate()
+ {
++    // kalimdor: with full bags only the bank's least valuable stack, marked
++    // to sell to make room, and only into a free slot (values/AuctionGoods.h;
++    // Kamino 271).
+     if (AI_VALUE(uint8, "bag space") > 80)
+-        return false;
++    {
++        if (AI_VALUE(uint8, "bag space") >= 100)
++            return false;
++        Item* least = AuctionGoods::LeastValuableInBank(ai, nullptr);
++        return least && AI_VALUE2(ItemUsage, "item usage", ItemQualifier(least).GetQualifier()) == ItemUsage::ITEM_USAGE_VENDOR;
++    }
+ 
+     uint32 inBankCount = AI_VALUE2(uint32, "bank item count", "all");
+     uint32 stayInBankCount = AI_VALUE2(uint32, "bank item count", "usage " + std::to_string((uint8)ItemUsage::ITEM_USAGE_BANK));
+diff --git a/playerbot/strategy/values/ItemUsageValue.cpp b/playerbot/strategy/values/ItemUsageValue.cpp
+index c0b18e0..8094002 100644
+--- a/playerbot/strategy/values/ItemUsageValue.cpp
++++ b/playerbot/strategy/values/ItemUsageValue.cpp
+@@ -5,6 +5,7 @@
+ #include "MountValues.h"
+ #include "BudgetValues.h"
+ #include "GuildValues.h"
++#include "AuctionGoods.h"
+ 
+ #include "playerbot/RandomItemMgr.h"
+ #include "playerbot/ServerFacade.h"
+@@ -434,11 +435,13 @@ if ((proto->Class == ITEM_CLASS_PROJECTILE ||
+     //BANK - items for future use
+     if (!ai->HasActivePlayerMaster() && sRandomPlayerbotMgr.IsFreeBot(bot))
+     {
++        // kalimdor: a full bank makes room - the bank, or a vendor
++        // (values/AuctionGoods.h; Kamino 271).
+         if (IsItemUsefulForFutureEquip(proto))
+-            return ItemUsage::ITEM_USAGE_BANK;
++            return AuctionGoods::BankOrSell(ai, proto);
+ 
+         if (IsItemUsefulForFutureCraft(proto))
+-            return ItemUsage::ITEM_USAGE_BANK;
++            return AuctionGoods::BankOrSell(ai, proto);
+     }
+ 
+     if (proto->Class == ItemClass::ITEM_CLASS_CONSUMABLE)
+@@ -468,6 +471,14 @@ if ((proto->Class == ITEM_CLASS_PROJECTILE ||
+ 
+     uint32 ahPrice = 0;
+ 
++    // kalimdor: the owner's rules for a random bot's goods - the auction
++    // house, the bank or a vendor (values/AuctionGoods.h; Kamino 271).
++    {
++        ItemUsage const routed = AuctionGoods::Route(ai, proto);
++        if (routed != ItemUsage::ITEM_USAGE_NONE)
++            return routed;
++    }
++
+     //VENDOR/AH
+     if (proto->SellPrice > 0 || AI_VALUE2_EXISTS(int, "manual int", "expected ah sell price for " + std::to_string(itemId),-1) != 0)
+     {
+diff --git a/playerbot/strategy/values/MaintenanceValues.cpp b/playerbot/strategy/values/MaintenanceValues.cpp
+index ec3cbaf..86f3d28 100644
+--- a/playerbot/strategy/values/MaintenanceValues.cpp
++++ b/playerbot/strategy/values/MaintenanceValues.cpp
+@@ -1,5 +1,6 @@
+ 
+ #include "MaintenanceValues.h"
++#include "AuctionGoods.h"
+ #include "Archetypes.h"
+ #include "Mails/Mail.h"
+ #include "playerbot/strategy/values/GuildValues.h"
+@@ -77,6 +78,11 @@ bool CanGetMailValue::Calculate() {
+     if (AI_VALUE(bool, "should sell") && AI_VALUE(bool, "can sell"))
+         return false;
+ 
++    // kalimdor: a trader with a full bank and full bags keeps its item mail
++    // in the mailbox until there is room (owner, 2026-11-07; Kamino 271).
++    if (AuctionGoods::MailIsCache(ai))
++        return false;
++
+     time_t cur_time = time(0);
+ 
+     for (PlayerMails::iterator itr = bot->GetMailBegin(); itr != bot->GetMailEnd(); ++itr)
+diff --git a/playerbot/strategy/values/MaintenanceValues.h b/playerbot/strategy/values/MaintenanceValues.h
+index a1210ef..8289d9f 100644
+--- a/playerbot/strategy/values/MaintenanceValues.h
++++ b/playerbot/strategy/values/MaintenanceValues.h
+@@ -115,7 +115,11 @@ namespace ai
+     {
+     public:
+         CanAHBuyValue(PlayerbotAI* ai) : BoolCalculatedValue(ai, "can ah buy", 2) {}
+-        virtual bool Calculate() override { return ai->HasStrategy("rpg vendor", BotState::BOT_STATE_NON_COMBAT) && !AI_VALUE(bool, "should repair") && !AI_VALUE(bool, "should sell") && !AI_VALUE(bool, "can get mail") && AI_VALUE2(uint32, "free money for", (uint32)NeedMoneyFor::ah) > 0; };
++        // kalimdor: full bags (all "should sell" means, the bots' usual
++        // state) stop buying only with something to sell to a vendor, and
++        // waiting mail no longer does - bots with hundreds of mails never
++        // bought (dev: 47 of 51 checks; Kamino 271).
++        virtual bool Calculate() override { return ai->HasStrategy("rpg vendor", BotState::BOT_STATE_NON_COMBAT) && !AI_VALUE(bool, "should repair") && !(AI_VALUE(bool, "should sell") && AI_VALUE(bool, "can sell")) && AI_VALUE2(uint32, "free money for", (uint32)NeedMoneyFor::ah) > 0; };
+     };
+ 
+ 
+diff --git a/playerbot/strategy/values/StatsValues.cpp b/playerbot/strategy/values/StatsValues.cpp
+index 4bb811b..658ce4e 100644
+--- a/playerbot/strategy/values/StatsValues.cpp
++++ b/playerbot/strategy/values/StatsValues.cpp
+@@ -175,7 +175,10 @@ uint8 BagSpaceValue::Calculate()
+ 
+ uint8 BankSpaceValue::Calculate()
+ {
+-    uint32 totalused = 0, total = 16;
++    // kalimdor: the bank's own slots, 24 - it took the backpack's 16, so 13
++    // items read as more than 80% and no bot ever banked again (dev: 102 of
++    // 108 bots; Kamino 271).
++    uint32 totalused = 0, total = BANK_SLOT_ITEM_END - BANK_SLOT_ITEM_START;
+     for (uint8 slot = BANK_SLOT_ITEM_START; slot < BANK_SLOT_ITEM_END; slot++)
+     {
+         if (bot->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
+diff --git a/playerbot/strategy/values/TravelValues.cpp b/playerbot/strategy/values/TravelValues.cpp
+index c0c9be4..9668e64 100644
+--- a/playerbot/strategy/values/TravelValues.cpp
++++ b/playerbot/strategy/values/TravelValues.cpp
+@@ -1,5 +1,6 @@
+ #include "playerbot/playerbot.h"
+ #include "TravelValues.h"
++#include "AuctionGoods.h"
+ #include "QuestValues.h"
+ #include "SharedValueContext.h"
+ #include "BudgetValues.h"
+@@ -279,6 +280,10 @@ bool NeedTravelPurposeValue::Calculate()
+             return true;
+         if (AI_VALUE2(bool, "has strategy", "free") && AI_VALUE(bool, "should ah sell") && AI_VALUE(bool, "can ah sell"))
+             return true;
++        // kalimdor: to buy what its crafting lacks (values/AuctionGoods.h;
++        // Kamino 271).
++        if (AuctionGoods::WantsToBuy(ai) && AI_VALUE(bool, "can ah buy"))
++            return true;
+         break;
+     case TravelDestinationPurpose::GatherFishing:
+         if (!AI_VALUE2(bool, "has strategy", "tfish"))
