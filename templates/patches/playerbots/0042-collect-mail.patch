@@ -1,0 +1,35 @@
+diff --git a/playerbot/strategy/values/MaintenanceValues.cpp b/playerbot/strategy/values/MaintenanceValues.cpp
+index 7bfcd95..ec3cbaf 100644
+--- a/playerbot/strategy/values/MaintenanceValues.cpp
++++ b/playerbot/strategy/values/MaintenanceValues.cpp
+@@ -68,7 +68,13 @@ bool CanGetMailValue::Calculate() {
+     if (!ai->HasStrategy("rpg vendor", BotState::BOT_STATE_NON_COMBAT))
+         return false;
+ 
+-    if (AI_VALUE(bool, "should sell"))
++    // kalimdor: selling first only when there is something to sell to a
++    // vendor. Bags over 80% full (all "should sell" means) are the bots'
++    // usual state - trade goods kept by their stacks (Kamino 254) and for the
++    // auction house - so they never took their mail; the unsold auctions
++    // came back by mail and stayed (dev: 59 of 66 checks; Kamino 270). The
++    // mail is taken down to two free slots (TakeMailProcessor).
++    if (AI_VALUE(bool, "should sell") && AI_VALUE(bool, "can sell"))
+         return false;
+ 
+     time_t cur_time = time(0);
+@@ -99,9 +105,14 @@ bool ShouldGetMailValue::Calculate() {
+ 
+         int32 waitingInBoxTime = cur_time - (*itr)->deliver_time;
+ 
++        // kalimdor: a mail under an hour old waits - and only that one; it
++        // returned false for the whole inbox, and with expired auctions
++        // arriving all the time there was always one: bots never took their
++        // mail (meksha 13,287 mails, up to 145 a bot; dev 64,420 - Kamino
++        // 270).
+         if (!hasGuildShareList && waitingInBoxTime < HOUR) //Let mail sit in the inbox for atleast 1 hour
+         {
+-            return false;
++            continue;
+         }
+ 
+         if ((*itr)->has_items && waitingInBoxTime > HOUR * 4) //Items are allowed to sit in the mail for max 4 hours.

@@ -398,7 +398,7 @@ one stack, silver ore ten; patch 0031).
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries forty-one changes to playerbots (`templates/patches/playerbots/`)
+teldrassil carries forty-two changes to playerbots (`templates/patches/playerbots/`)
 and three to the core (`templates/patches/mangos-classic/`), applied before
 every build:
 
@@ -642,6 +642,10 @@ every build:
   it still raises first aid, one a minute at most - upstream's crafting was
   never on for random bots - and first aid takes real cloth even with the
   item cheat. (Kamino 257, 2026-11-06.)
+- **playerbots 0042:** bots collect their mail - expired auctions and
+  battleground marks piled up because one fresh mail stopped the whole
+  inbox and full bags (their usual state) blocked the trip. (Kamino 270,
+  2026-11-07.)
 - **mangos-classic 0003:** the remote console answers only a client still
   connected. A command's answer comes later, from the world thread; when the
   client had hung up, it was written into the freed connection - every time,
