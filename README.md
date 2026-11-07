@@ -398,7 +398,7 @@ one stack, silver ore ten; patch 0031).
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries forty-two changes to playerbots (`templates/patches/playerbots/`)
+teldrassil carries forty-three changes to playerbots (`templates/patches/playerbots/`)
 and three to the core (`templates/patches/mangos-classic/`), applied before
 every build:
 
@@ -646,6 +646,14 @@ every build:
   battleground marks piled up because one fresh mail stopped the whole
   inbox and full bags (their usual state) blocked the trip. (Kamino 270,
   2026-11-07.)
+- **playerbots 0043:** bots' goods by the owner's rules - an unsold item is
+  relisted 10% cheaper up to five times, then materials go to the bank, gear
+  below blue to a vendor, valuables to the auction house only when scarce; a
+  full bank sells its least valuable stack; traders price to sell; bots buy
+  the cloth their first aid lacks. Also fixes bank space (16 slots counted,
+  not 24 - no bot banked). The items' rarity comes from kalimdor's
+  `sql/0002-item-rarity.sql`; without it the value goes on price and
+  availability alone. (Kamino 271, 2026-11-07.)
 - **mangos-classic 0003:** the remote console answers only a client still
   connected. A command's answer comes later, from the world thread; when the
   client had hung up, it was written into the freed connection - every time,
