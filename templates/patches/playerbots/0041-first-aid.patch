@@ -1,0 +1,256 @@
+diff --git a/playerbot/PlayerbotAI.cpp b/playerbot/PlayerbotAI.cpp
+index f960288..e151d1b 100644
+--- a/playerbot/PlayerbotAI.cpp
++++ b/playerbot/PlayerbotAI.cpp
+@@ -6012,7 +6012,16 @@ bool PlayerbotAI::HasSpellItems(uint32 spellId, const Item* castItem) const
+     const SpellEntry* spellEntry = sSpellTemplate.LookupEntry<SpellEntry>(spellId);
+     if (spellEntry)
+     {
+-        if (HasCheat(BotCheatMask::item))
++        // kalimdor: first aid takes real cloth even with the item cheat -
++        // bandages are made from cloth (owner, 2026-11-04; Kamino 257); a
++        // dev bot made 7 and kept its 20 linen.
++        bool firstAid = false;
++        SkillLineAbilityMapBounds bounds = sSpellMgr.GetSkillLineAbilityMapBoundsBySpellId(spellId);
++        for (auto it = bounds.first; it != bounds.second; ++it)
++            if (it->second->skillId == SKILL_FIRST_AID)
++                firstAid = true;
++
++        if (HasCheat(BotCheatMask::item) && !firstAid)
+         {
+             return true;
+         }
+diff --git a/playerbot/strategy/actions/ActionContext.h b/playerbot/strategy/actions/ActionContext.h
+index f696a42..39e21a3 100644
+--- a/playerbot/strategy/actions/ActionContext.h
++++ b/playerbot/strategy/actions/ActionContext.h
+@@ -8,6 +8,7 @@
+ #include "RethinkQuestTargetAction.h"
+ #include "DropGrayQuestsAction.h"
+ #include "LookForGroupAction.h"
++#include "MakeBandageAction.h"
+ #include "EmoteAction.h"
+ #include "AddLootAction.h"
+ #include "LootAction.h"
+@@ -444,6 +445,7 @@ namespace ai
+             creators["rethink quest target"] = [](PlayerbotAI* ai) { return new RethinkQuestTargetAction(ai); };
+             creators["drop gray quests"] = [](PlayerbotAI* ai) { return new DropGrayQuestsAction(ai); };
+             creators["look for group"] = [](PlayerbotAI* ai) { return new LookForGroupAction(ai); };
++            creators["make bandage"] = [](PlayerbotAI* ai) { return new MakeBandageAction(ai); };
+ 
+ #ifdef GenerateBotTests
+             creators["test"] = [](PlayerbotAI* ai) { return new TestAction(ai); };
+diff --git a/playerbot/strategy/actions/MakeBandageAction.cpp b/playerbot/strategy/actions/MakeBandageAction.cpp
+new file mode 100644
+index 0000000..0e5844a
+--- /dev/null
++++ b/playerbot/strategy/actions/MakeBandageAction.cpp
+@@ -0,0 +1,89 @@
++#include "playerbot/playerbot.h"
++#include "MakeBandageAction.h"
++#include "playerbot/strategy/values/CraftValues.h"
++#include "playerbot/ServerFacade.h"
++
++using namespace ai;
++
++namespace
++{
++    // How many it can make from the cloth really in its bags: upstream's
++    // "has reagents for" says yes to anything for a bot with the item cheat
++    // (random bots by default), but the craft itself takes real cloth -
++    // seven dev bots tried every 5 minutes with none.
++    uint32 CanMake(Player* bot, SpellEntry const* spell)
++    {
++        uint32 count = 0;
++        bool any = false;
++        for (uint8 i = 0; i < MAX_SPELL_REAGENTS; ++i)
++        {
++            if (spell->ReagentCount[i] <= 0 || !spell->Reagent[i])
++                continue;
++            uint32 const n = bot->GetItemCount(spell->Reagent[i]) / spell->ReagentCount[i];
++            count = any ? std::min(count, n) : n;
++            any = true;
++        }
++        return count;
++    }
++}
++
++uint32 MakeBandageAction::BandageToMake(PlayerbotAI* ai)
++{
++    Player* bot = ai->GetBot();
++    AiObjectContext* context = ai->GetAiObjectContext();
++
++    uint32 best = 0;
++    uint32 bestLevel = 0;
++    bool bestSkillUp = false;
++    for (uint32 spellId : AI_VALUE(std::vector<uint32>, "craft spells"))
++    {
++        uint32 level = 0;
++        SkillLineAbilityMapBounds bounds = sSpellMgr.GetSkillLineAbilityMapBoundsBySpellId(spellId);
++        for (auto it = bounds.first; it != bounds.second; ++it)
++            if (it->second->skillId == SKILL_FIRST_AID)
++                level = std::max<uint32>(1, it->second->max_value);
++        if (!level)
++            continue;
++
++        SpellEntry const* spell = sServerFacade.LookupSpellInfo(spellId);
++        if (!spell || !CanMake(bot, spell))
++            continue;
++
++        // A recipe that still raises the skill first, then the best bandage.
++        bool const skillUp = ShouldCraftSpellValue::SpellGivesSkillUp(spellId, bot);
++        if (!skillUp && !AI_VALUE2(bool, "should craft spell", spellId))
++            continue;
++
++        if (best && (bestSkillUp && !skillUp || bestSkillUp == skillUp && level <= bestLevel))
++            continue;
++
++        best = spellId;
++        bestLevel = level;
++        bestSkillUp = skillUp;
++    }
++    return best;
++}
++
++bool MakeBandageAction::Execute(Event& event)
++{
++    uint32 const spellId = BandageToMake(ai);
++    if (!spellId)
++        return false;
++
++    SpellEntry const* spell = sServerFacade.LookupSpellInfo(spellId);
++    ItemPrototype const* bandage = spell ? ObjectMgr::GetItemPrototype(spell->EffectItemType[0]) : nullptr;
++    if (!bandage)
++        return false;
++
++    ai->StopMoving();
++    uint32 duration = 0;
++    if (!ai->CastSpell(spellId, bot, nullptr, true, &duration))
++        return false;
++
++    sLog.outString("Bot #%d %s:%d <%s>: makes a %s (first aid %u, cloth for %u more)", bot->GetGUIDLow(), bot->GetTeam() == ALLIANCE ? "A" : "H",
++        bot->GetLevel(), bot->GetName(), bandage->Name1, bot->GetSkillValuePure(SKILL_FIRST_AID), CanMake(bot, spell) - 1);
++    // Half a second over the cast: a move the moment it ends would cancel
++    // it (MovementAction interrupts any cast).
++    SetDuration(duration + 500);
++    return true;
++}
+diff --git a/playerbot/strategy/actions/MakeBandageAction.h b/playerbot/strategy/actions/MakeBandageAction.h
+new file mode 100644
+index 0000000..abdcc63
+--- /dev/null
++++ b/playerbot/strategy/actions/MakeBandageAction.h
+@@ -0,0 +1,28 @@
++#pragma once
++#include "playerbot/strategy/Action.h"
++
++namespace ai
++{
++    // kalimdor: first aid levelled like a profession (owner, 2026-11-04;
++    // Kamino 257). Upstream crafts only in its "rpg craft" strategy, which
++    // no random bot gets (RpgStrategy::OnStrategyAdded): no bot on meksha
++    // ever made a bandage, all 125 with first aid at 1, linen in their bags.
++    // This makes bandages - first aid only, the other professions are 212's -
++    // when the cloth is there and the bandage still raises the skill or is
++    // wanted (upstream "should craft spell"): the best such recipe, one at a
++    // time, at most one a minute (the trigger's interval), so travel is not
++    // stalled - cast here, not through the "castnc" chat command, which
++    // aims at the bot's target and failed every time on dev. Cloth
++    // is kept for it upstream (ItemUsageValue::IsItemNeededForUsefullCraft),
++    // the next ranks trained upstream ("trainer trade" travel, rpg train),
++    // the bandages used upstream ("use bandage", use potions strategy).
++    class MakeBandageAction : public Action
++    {
++    public:
++        MakeBandageAction(PlayerbotAI* ai) : Action(ai, "make bandage") {}
++        virtual bool Execute(Event& event) override;
++
++        // The first aid recipe to make now, or 0.
++        static uint32 BandageToMake(PlayerbotAI* ai);
++    };
++}
+diff --git a/playerbot/strategy/generic/TravelStrategy.cpp b/playerbot/strategy/generic/TravelStrategy.cpp
+index a95df70..83ee376 100644
+--- a/playerbot/strategy/generic/TravelStrategy.cpp
++++ b/playerbot/strategy/generic/TravelStrategy.cpp
+@@ -174,6 +174,13 @@ void TravelStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
+         "group quest pending",
+         NextAction::array(0, new NextAction("look for group", 6.63f), NULL)));
+ 
++    // kalimdor: first aid levelled like a profession - bandages from the
++    // cloth in its bags, one a minute at most, a pause like eating
++    // (actions/MakeBandageAction.h; Kamino 257).
++    triggers.push_back(new TriggerNode(
++        "can make bandage",
++        NextAction::array(0, new NextAction("make bandage", 3.0f), NULL)));
++
+     triggers.push_back(new TriggerNode(
+         "quest turn in due",
+         NextAction::array(0, new NextAction("request quest travel target::turnin", 6.62f), NULL)));
+diff --git a/playerbot/strategy/triggers/MakeBandageTrigger.cpp b/playerbot/strategy/triggers/MakeBandageTrigger.cpp
+new file mode 100644
+index 0000000..d7b10ae
+--- /dev/null
++++ b/playerbot/strategy/triggers/MakeBandageTrigger.cpp
+@@ -0,0 +1,21 @@
++#include "playerbot/playerbot.h"
++#include "MakeBandageTrigger.h"
++#include "playerbot/strategy/actions/MakeBandageAction.h"
++
++using namespace ai;
++
++bool MakeBandageTrigger::IsActive()
++{
++    if (ai->IsRealPlayer() || !ai->HasSkill(SKILL_FIRST_AID))
++        return false;
++
++    if (bot->IsMounted() || bot->IsTaxiFlying())
++        return false;
++
++    // A bandage needs one free slot; bots' bags run near full (dev: 15 of
++    // 40 had a backpack slot free).
++    if (AI_VALUE(uint8, "bag space") >= 100)
++        return false;
++
++    return MakeBandageAction::BandageToMake(ai) != 0;
++}
+diff --git a/playerbot/strategy/triggers/MakeBandageTrigger.h b/playerbot/strategy/triggers/MakeBandageTrigger.h
+new file mode 100644
+index 0000000..472d59d
+--- /dev/null
++++ b/playerbot/strategy/triggers/MakeBandageTrigger.h
+@@ -0,0 +1,14 @@
++#pragma once
++#include "playerbot/strategy/Trigger.h"
++
++namespace ai
++{
++    // kalimdor: cloth for a bandage that raises first aid or is wanted, on
++    // foot; checked once a minute (actions/MakeBandageAction.h; Kamino 257).
++    class MakeBandageTrigger : public Trigger
++    {
++    public:
++        MakeBandageTrigger(PlayerbotAI* ai) : Trigger(ai, "can make bandage", 60) {}
++        virtual bool IsActive() override;
++    };
++}
+diff --git a/playerbot/strategy/triggers/TriggerContext.h b/playerbot/strategy/triggers/TriggerContext.h
+index cacb346..4b06d1f 100644
+--- a/playerbot/strategy/triggers/TriggerContext.h
++++ b/playerbot/strategy/triggers/TriggerContext.h
+@@ -8,6 +8,7 @@
+ #include "QuestTurnInDueTrigger.h"
+ #include "GrayQuestTrigger.h"
+ #include "GroupQuestPendingTrigger.h"
++#include "MakeBandageTrigger.h"
+ #include "GenericTriggers.h"
+ #include "LootTriggers.h"
+ #include "GenericTriggers.h"
+@@ -98,6 +99,7 @@ namespace ai
+             creators["quest turn in due"] = [](PlayerbotAI* ai) { return new QuestTurnInDueTrigger(ai); };
+             creators["gray quest"] = [](PlayerbotAI* ai) { return new GrayQuestTrigger(ai); };
+             creators["group quest pending"] = [](PlayerbotAI* ai) { return new GroupQuestPendingTrigger(ai); };
++            creators["can make bandage"] = [](PlayerbotAI* ai) { return new MakeBandageTrigger(ai); };
+             creators["enemy player near"] = [](PlayerbotAI* ai) { return new EnemyPlayerNear(ai); };
+ 
+             creators["combat start"] = [](PlayerbotAI* ai) { return new CombatStartTrigger(ai); };
