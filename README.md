@@ -366,6 +366,32 @@ to what the server has.
 `keep_stacks` (top level of the roster) - stacks of an item a bot keeps
 before the rest is sold, by item id: `{"2770": 1, "2775": 10}` (copper ore
 one stack, silver ore ten; patch 0031).
+
+`battlegrounds` (top level of the roster) - who queues and how many (patch
+0045, Kamino 242). Bots whose archetype weighs `enlist-battlegrounds` above 0
+enlist: they queue whenever they can and may wait as long as they like (they
+keep questing). The rest queue only where a real player waits, and leave when
+none does any more or after `queue_timeout_minutes`. Every bot leaves a queue
+its level has left. All keys are optional:
+
+```json
+"battlegrounds": {
+    "auto_join": "enlisted",
+    "enlisted": [10, 10, 15, 15, 40],
+    "others": [10, 10, 15, 0, 40],
+    "per_queue": 0,
+    "total": 0,
+    "queue_timeout_minutes": 15,
+    "log": true
+}
+```
+
+`auto_join`: who queues with no real player waiting - `enlisted` (the
+default), `all` or `none`. `enlisted` and `others`: per side, bots queued or
+inside, for the level bands 10-19, 20-29, 30-39, 40 to the cap - 1, and the
+cap; `others` at most `enlisted` in each. `per_queue`: per side in one
+battleground and bracket (0: its team size). `total`: all bots, server-wide
+(0: no limit). `log`: a `BgSlots:` line per check, join and leave.
   And `gray_quests`: `drop` (the default), `keep` or `at_cap` - whether a
   quest that gives no XP any more is dropped from the bot's log and refused,
   kept, or kept and taken only at the level cap (log space permitting). It also has `pvp`:
@@ -398,7 +424,7 @@ one stack, silver ore ten; patch 0031).
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries forty-four changes to playerbots (`templates/patches/playerbots/`)
+teldrassil carries forty-five changes to playerbots (`templates/patches/playerbots/`)
 and three to the core (`templates/patches/mangos-classic/`), applied before
 every build:
 
@@ -658,6 +684,12 @@ every build:
   24 hours, not an item listed five times already, under the lowest listing;
   with mail waiting they take it by the auction house, the soonest-expiring
   first. (Kamino 272, 2026-11-08.)
+- **playerbots 0045:** battleground queueing by the owner's design - bots
+  whose archetype weighs `enlist-battlegrounds` queue whenever they can, the
+  rest only where a real player waits and not for long; no cool-down; caps
+  per side and level band from the roster's `battlegrounds`; a join takes its
+  slot at once, and a bot leaves a queue its level has left. (Kamino 242, 244,
+  245, 2026-11-08.)
 - **mangos-classic 0003:** the remote console answers only a client still
   connected. A command's answer comes later, from the world thread; when the
   client had hung up, it was written into the freed connection - every time,
