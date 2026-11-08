@@ -714,6 +714,10 @@ guilds and characters live in its memory, and a change made under it is
 overwritten. It saves the world, stops it, writes everything in one
 transaction, puts the new `aiplayerbot.conf` and card file in place (keeping
 the old ones under `~/.config/teldrassil/backups`), and starts it again.
+While it is stopped it also removes the values playerbots stored for
+characters that no longer exist (`ai_playerbot_db_store`: archetype, mood,
+strategies) - playerbots' own deletion, as in a fresh population, leaves
+them behind; `roster plan` says how many there are (Kamino 266).
 
 **A failed step leaves the realm as it found it.** Once `roster apply` or
 `attune apply` has stopped a running world server, whatever ends it early -
@@ -737,9 +741,13 @@ running before is left running.
   can only answer. A bot acts on commands, typed exactly; most work only from
   its master (the player whose party it is in), ten from anyone - `commands
   --any` lists them, e.g. `/w <bot> guild invite`.
-- **Never send a bot a chat command from the remote console.**
-  `rndbot c <bot> ...` and `rndbot do ...` get no answer and have crashed the
-  world server; `console` refuses them, and any argument with a line break
+- **Bot chat commands go in game, not through the remote console.**
+  `rndbot c <bot> ...` and `rndbot do ...` from the console get no answer -
+  the bot replies to an in-game master. (They once crashed the world server:
+  the console answered into a closed connection, fixed in the core, Kamino
+  260.) `console` refuses playerbots' test tools - `rndbot grid
+  load|unload|cycle`, `rndbot taxtest`, `rndbot zoneupd`, which act outside
+  the game's normal flow (Kamino 262) - and any argument with a line break
   (the console would read a second command there) - on stdin, any line with a
   carriage return.
 - **cmangos creates four accounts** (ADMINISTRATOR, GAMEMASTER, MODERATOR,

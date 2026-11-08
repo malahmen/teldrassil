@@ -60,8 +60,8 @@ chk "  the others are still sent"                          'grep -qx "server inf
 reset
 feed $'saveall\r\nserver info\n' console --stdin
 chk "a line with a carriage return: refused, nothing sent" '[[ $rc -ne 0 && "$out" == *"carriage return"* && ! -s "$T/ra.log" ]]'
-feed $'saveall\nrndbot c Bob talents\n' console --stdin
-chk "a bot chat command on stdin: refused, nothing sent"   '[[ $rc -ne 0 && "$out" == *"Refused"* && ! -s "$T/ra.log" ]]'
+feed $'saveall\nrndbot taxtest Bob 1 2\n' console --stdin
+chk "a test tool on stdin: refused, nothing sent"   '[[ $rc -ne 0 && "$out" == *"Refused"* && ! -s "$T/ra.log" ]]'
 feed $'\n  \n' console --stdin
 chk "no command on stdin: an error"                        '[[ $rc -ne 0 && "$out" == *"no command on stdin"* ]]'
 feed $'saveall\n' console --stdin saveall

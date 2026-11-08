@@ -137,11 +137,16 @@ cmd_restart() {
 # The remote console
 # -----------------------------------------------------------------------------
 
-# Commands that must never go through the console. Sending a bot a chat
-# command from it ('rndbot c <bot> ...', 'rndbot do ...') gives no answer -
-# the bot replies to an in-game master - and crashed the world server
-# (std::bad_weak_ptr) on the prototype.
-_console_refused() { grep -qiE -e '^[[:space:]]*\.?rndbot[[:space:]]+(c|do|chat)([[:space:]]|$)' <<<"$1"; }
+# Commands that must not go through the console: playerbots' test tools,
+# which act outside the game's normal flow - force-loading and unloading
+# grids ('rndbot grid load|unload|cycle'), teleporting a bot onto a taxi
+# ('rndbot taxtest'), calling a packet handler directly ('rndbot zoneupd')
+# (Kamino 262). Bot chat commands ('rndbot c|do|chat') are no longer refused:
+# their crash was the console answering into a closed connection, fixed in
+# the core (mangos-classic 0003, Kamino 260) - from here they still get no
+# answer, the bot replies to an in-game master. The handlers that crashed on
+# their input check it now (playerbots 0037, Kamino 261).
+_console_refused() { grep -qiE -e '^[[:space:]]*\.?rndbot[[:space:]]+(grid[[:space:]]+(load|unload|cycle)|taxtest|zoneupd)([[:space:]]|$)' <<<"$1"; }
 
 # Commands that carry a password - 'account create NAME PASS', 'account set
 # password NAME PASS PASS' - are refused as arguments: an argument sits in the
@@ -172,7 +177,7 @@ cmd_save() {
 # _console_check <command> — the refusal every console command meets, from
 # arguments or stdin.
 _console_check() {
-    _console_refused "$1" && error_exit "Refused: '${1}'. A bot chat command from the console gets no answer and has crashed the world server. Send it in game, as the bot's master."
+    _console_refused "$1" && error_exit "Refused: '${1}'. A playerbots test tool (grid load/unload/cycle, taxtest, zoneupd) acts outside the game's normal flow; it is not run on a live server."
     return 0
 }
 
