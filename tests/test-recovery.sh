@@ -178,6 +178,30 @@ chk "  then stops the server, saved first"        'stopped_after && [[ "$out" ==
 chk "  and the guild settings are back"           'grep -qx "AiPlayerbot.DeleteRandomBotGuilds = 0" "$T/aiplayerbot.conf" && grep -qx "AiPlayerbot.RandomBotGuildCount = 7" "$T/aiplayerbot.conf"'
 chk "  not left-running"                          '[[ "$out" != *"still RUNNING"* ]]'
 
+hdr "--fresh-population interrupted, then interrupted again while it waits (Kamino 227)"
+# A terminal's Ctrl-C reaches the whole process group: the run gets its own
+# (setsid), and the second signal goes to all of it while the exit hook
+# waits for the deletion. The hook still finishes, and says so. TERM, as the
+# tests above: a background job starts with SIGINT ignored, which a script
+# cannot trap; the trap is the same for both.
+run set FRESH_STOP_WAIT 20
+scenario stopped; sqlmap 1
+printf 'AiPlayerbot.RandomBotGuildCount = 7\nAiPlayerbot.DeleteRandomBotGuilds = 0\n' > "$T/aiplayerbot.conf"
+export STUB_SQL_REPLY=0 STUB_SQL_MAP="$T/sqlmap"; : > "$T/ra.log"
+setsid "$ENG" roster apply --file "$T/fresh.json" --fresh-population --yes > "$T/fresh.out" 2>&1 &
+pid=$!
+for _ in $(seq 1 40); do grep -q "Waiting for 10 bot characters" "$T/fresh.out" && break; sleep 0.5; done
+n="$(wc -l < "$T/podman.log")"
+kill -TERM -- "-$pid"
+for _ in $(seq 1 20); do grep -q "waiting up to 20s" "$T/fresh.out" && break; sleep 0.5; done
+kill -TERM -- "-$pid" 2>/dev/null
+( sleep 4; sqlmap 0 ) & later=$!
+wait "$pid"; rc=$?; wait "$later"
+out="$(cat "$T/fresh.out")"; after="$(tail -n +"$((n + 1))" "$T/podman.log")"
+chk "the second interrupt does not end the wait"   '[[ $rc -ne 0 && "$out" == *"Ctrl-C is ignored until then"* && "$out" == *"deletion is over"* ]]'
+chk "  the server is stopped, saved first"        'stopped_after && grep -qx saveall "$T/ra.log"'
+chk "  and the guild settings are back"           'grep -qx "AiPlayerbot.DeleteRandomBotGuilds = 0" "$T/aiplayerbot.conf" && grep -qx "AiPlayerbot.RandomBotGuildCount = 7" "$T/aiplayerbot.conf"'
+
 hdr "--fresh-population interrupted, the server stopped before: the deletion outlasts FRESH_STOP_WAIT"
 run set FRESH_STOP_WAIT 8
 scenario stopped; sqlmap 1

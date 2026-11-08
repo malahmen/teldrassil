@@ -36,6 +36,11 @@ _at_exit() { EXIT_HOOKS+=("$1"); }
 # back (lib/target.sh); a failure there is reported, and the files are kept.
 _cleanup() {
     local i
+    # Ignored while they run: a second Ctrl-C reaches the whole process group
+    # and killed the hook running - a fresh population's wait for its
+    # deletion - before its last message (Kamino 227). An ignored signal stays
+    # ignored in the subshells and in the commands they start.
+    (( ${#EXIT_HOOKS[@]} )) && trap '' INT TERM
     for (( i = ${#EXIT_HOOKS[@]} - 1; i >= 0; i-- )); do
         ( "${EXIT_HOOKS[i]}" ) || warn "Could not finish '${EXIT_HOOKS[i]}' on the way out; see above."
     done

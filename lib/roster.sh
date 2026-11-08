@@ -205,13 +205,18 @@ _fresh_on_exit() {
 # the 'bot_delete' request is gone (playerbots removes it itself when it has
 # deleted the bots), and the count of characters on bot accounts did not fall
 # between two looks, FRESH_POLL seconds apart (a deletion still running
-# lowers it; new bots being made raise it). Anything that cannot be read is
+# lowers it; new bots being made raise it). The request is a true end
+# signal: playerbots reads it once, at the start
+# (RandomPlayerbotFactory::CreateRandomBots), and removes it in the
+# deletion's last step, with every random-bot row whose character is gone,
+# then logs "Random bot characters deleted" (read, Kamino 227). Read once, it
+# also means withdrawing it on the way out cannot stop a deletion part-way. Anything that cannot be read is
 # "not over"; it looks at least twice, however short the wait. Fails, leaving
 # the server running, if the wait runs out (or the stop fails).
 FRESH_POLL=3
 _fresh_settle_stop() {
     local deadline=$((SECONDS + FRESH_STOP_WAIT)) pending n prev="" looks=0
-    info "The world server was stopped before this command, and the fresh population started it: waiting up to ${FRESH_STOP_WAIT}s for the random-bot deletion to finish, then stopping it again."
+    info "The world server was stopped before this command, and the fresh population started it: waiting up to ${FRESH_STOP_WAIT}s for the random-bot deletion to finish, then stopping it again. (Ctrl-C is ignored until then.)"
     while :; do
         pending="$(_db_value "SELECT COUNT(*) FROM ${DB_CHARACTERS}.ai_playerbot_random_bots WHERE event='bot_delete';" 2>/dev/null || true)"
         n="$(_db_value "SELECT COUNT(*) FROM ${DB_CHARACTERS}.characters c JOIN ${DB_REALMD}.account a ON a.id=c.account WHERE a.username LIKE '${BOT_ACCOUNT_PREFIX}%';" 2>/dev/null || true)"
