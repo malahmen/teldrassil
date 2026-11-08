@@ -556,6 +556,26 @@ class Archetypes(unittest.TestCase):
                 t.load_roster(roster(keep_stacks=bad))
             self.assertIn("keep_stacks", str(e.exception))
 
+    def test_battlegrounds_are_written_and_checked(self):
+        changes = t.conf_changes(t.load_roster(roster(battlegrounds={})), "", "/c")
+        self.assertEqual(changes["AiPlayerbot.BgAutoJoin"], "enlisted")
+        self.assertEqual(changes["AiPlayerbot.BgSlots.Enlisted"], "10,10,15,15,40")
+        self.assertEqual(changes["AiPlayerbot.BgSlots.Others"], "10,10,15,0,40")
+        self.assertEqual(changes["AiPlayerbot.BgSlots.QueueTimeout"], "900")
+        self.assertEqual(changes["AiPlayerbot.RandomBotAutoJoinBG"], "1")
+        changes = t.conf_changes(t.load_roster(roster(battlegrounds={"auto_join": "none", "per_queue": 5, "total": 60,
+                                                                     "queue_timeout_minutes": 30, "log": False})), "", "/c")
+        self.assertEqual((changes["AiPlayerbot.BgAutoJoin"], changes["AiPlayerbot.BgSlots.PerQueue"], changes["AiPlayerbot.BgSlots.Total"],
+                          changes["AiPlayerbot.BgSlots.QueueTimeout"], changes["AiPlayerbot.BgSlots.Log"]), ("none", "5", "60", "1800", "0"))
+        self.assertNotIn("AiPlayerbot.BgAutoJoin", t.conf_changes(t.load_roster(roster()), "", "/c"))
+        for bad, msg in (({"auto_join": "pvpi"}, "auto_join"), ({"enlisted": [10, 10, 15]}, "enlisted is five"),
+                         ({"others": [20, 10, 15, 0, 40]}, "at most enlisted"), ({"per_queue": 41}, "per_queue"),
+                         ({"queue_timeout_minutes": 0}, "queue_timeout_minutes"), ({"log": "yes"}, "log is true"),
+                         ({"pvpi": [1]}, "unknown key")):
+            with self.assertRaises(t.RosterError) as e:
+                t.load_roster(roster(battlegrounds=bad))
+            self.assertIn(msg, str(e.exception))
+
     def test_rhk_is_written_and_checked(self):
         arch = copy.deepcopy(ARCHETYPES)
         arch["creeper"]["rhk"] = 1.2

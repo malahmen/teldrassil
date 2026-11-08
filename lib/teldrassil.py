@@ -294,7 +294,8 @@ def load_roster(data):
     """Validate a roster (parsed JSON) and return it normalised: IDs instead
     of words, defaults filled in. Raises RosterError listing every problem."""
     errors = []
-    out = {"guilds": [], "bots": [], "population": None, "llm": None, "archetypes": None, "keep_stacks": None}
+    out = {"guilds": [], "bots": [], "population": None, "llm": None, "archetypes": None, "keep_stacks": None,
+           "battlegrounds": None}
 
     # Archetypes (Kamino 211): named once, here; a bot names one. Each lists
     # its activities in order and how much stronger its side must be to
@@ -506,6 +507,40 @@ def load_roster(data):
             else:
                 ks[int(item)] = n
         out["keep_stacks"] = ks
+    # Battleground queueing, the owner's design (playerbots/0045, Kamino
+    # 242): who queues with no real player waiting, the caps per side and
+    # level band for bots that enlist (enlist-battlegrounds above 0) and for
+    # the rest, per queue, in all, and how long the rest wait.
+    if "battlegrounds" in data:
+        bg = data.get("battlegrounds") or {}
+        b = {}
+        def whole(v, lo, hi):
+            return isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi
+        aj = bg.get("auto_join", "enlisted")
+        if aj not in ("enlisted", "all", "none"):
+            errors.append(f"battlegrounds: auto_join is enlisted, all or none (got {aj!r})")
+        b["auto_join"] = aj
+        for key, default in (("enlisted", [10, 10, 15, 15, 40]), ("others", [10, 10, 15, 0, 40])):
+            v = bg.get(key, default)
+            if not isinstance(v, list) or len(v) != 5 or not all(whole(x, 0, 200) for x in v):
+                errors.append(f"battlegrounds: {key} is five whole numbers, 0-200 - per side for 10-19, 20-29, 30-39, 40 to the cap - 1, the cap (got {v!r})")
+                v = default
+            b[key] = v
+        if any(o > e for o, e in zip(b["others"], b["enlisted"])):
+            errors.append(f"battlegrounds: others is at most enlisted in each band (got {b['others']} against {b['enlisted']})")
+        for key, lo, hi in (("per_queue", 0, 40), ("total", 0, 1000), ("queue_timeout_minutes", 1, 120)):
+            v = bg.get(key, {"per_queue": 0, "total": 0, "queue_timeout_minutes": 15}[key])
+            if not whole(v, lo, hi):
+                errors.append(f"battlegrounds: {key} is a whole number, {lo}-{hi} (got {v!r})")
+            b[key] = v
+        lg = bg.get("log", True)
+        if not isinstance(lg, bool):
+            errors.append(f"battlegrounds: log is true or false (got {lg!r})")
+        b["log"] = lg
+        unknown = sorted(set(bg) - {"auto_join", "enlisted", "others", "per_queue", "total", "queue_timeout_minutes", "log"})
+        if unknown:
+            errors.append(f"battlegrounds: unknown key(s) {', '.join(unknown)}")
+        out["battlegrounds"] = b
 
     if "llm" in data:
         try:
@@ -632,6 +667,18 @@ def conf_changes(roster, conf_text, cards_in_server):
         want["AiPlayerbot.LLMDefaultPromptsFile"] = cards_in_server
     if roster.get("keep_stacks") is not None:
         want["AiPlayerbot.KeepStacks"] = ",".join(f"{i}:{n}" for i, n in sorted(roster["keep_stacks"].items()))
+    bg = roster.get("battlegrounds")
+    if bg is not None:
+        # The owner's rule works through upstream's auto-join switch: on, and
+        # BgAutoJoin says who (playerbots/0045).
+        want["AiPlayerbot.RandomBotAutoJoinBG"] = "1"
+        want["AiPlayerbot.BgAutoJoin"] = bg["auto_join"]
+        want["AiPlayerbot.BgSlots.Enlisted"] = ",".join(str(x) for x in bg["enlisted"])
+        want["AiPlayerbot.BgSlots.Others"] = ",".join(str(x) for x in bg["others"])
+        want["AiPlayerbot.BgSlots.PerQueue"] = str(bg["per_queue"])
+        want["AiPlayerbot.BgSlots.Total"] = str(bg["total"])
+        want["AiPlayerbot.BgSlots.QueueTimeout"] = str(bg["queue_timeout_minutes"] * 60)
+        want["AiPlayerbot.BgSlots.Log"] = "1" if bg["log"] else "0"
     if roster["archetypes"] is not None:
         want["AiPlayerbot.Archetypes"] = ",".join(sorted(roster["archetypes"]))
         for name, a in sorted(roster["archetypes"].items()):

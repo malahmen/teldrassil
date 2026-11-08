@@ -1,0 +1,581 @@
+diff --git a/playerbot/PlayerbotAIConfig.cpp b/playerbot/PlayerbotAIConfig.cpp
+index 4a8f5d9..9cf5cfa 100644
+--- a/playerbot/PlayerbotAIConfig.cpp
++++ b/playerbot/PlayerbotAIConfig.cpp
+@@ -707,6 +707,27 @@ bool PlayerbotAIConfig::Initialize()
+     // (owner, 2026-11-04; Kamino 254).
+     // Seconds between giving freed memory back to the system (Kamino 230).
+     memoryTrimInterval = config.GetIntDefault("AiPlayerbot.MemoryTrimInterval", 600);
++    // Battleground queueing, the owner's design (Kamino 242;
++    // values/BattlegroundSlots.h). "pvpi" is the old word for enlisted.
++    {
++        std::string const autoJoin = config.GetStringDefault("AiPlayerbot.BgAutoJoin", "enlisted");
++        bgAutoJoin = autoJoin == "none" ? 0 : autoJoin == "all" ? 2 : 1;
++        auto bands = [&](char const* key, char const* fallback, uint32* out)
++        {
++            std::vector<std::string> parts = split(config.GetStringDefault(key, fallback), ',');
++            std::vector<std::string> defaults = split(std::string(fallback), ',');
++            for (int i = 0; i < 5; ++i)
++                out[i] = uint32(std::min(200, std::max(0, atoi((i < (int)parts.size() ? parts[i] : defaults[i]).c_str()))));
++        };
++        bands("AiPlayerbot.BgSlots.Enlisted", "10,10,15,15,40", bgSlotsEnlisted);
++        bands("AiPlayerbot.BgSlots.Others", "10,10,15,0,40", bgSlotsOthers);
++        for (int i = 0; i < 5; ++i)
++            bgSlotsOthers[i] = std::min(bgSlotsOthers[i], bgSlotsEnlisted[i]);
++        bgSlotsPerQueue = std::min<uint32>(40, config.GetIntDefault("AiPlayerbot.BgSlots.PerQueue", 0));
++        bgSlotsTotal = std::min<uint32>(1000, config.GetIntDefault("AiPlayerbot.BgSlots.Total", 0));
++        bgSlotsQueueTimeout = std::min<uint32>(7200, std::max<uint32>(60, config.GetIntDefault("AiPlayerbot.BgSlots.QueueTimeout", 900)));
++        bgSlotsLog = config.GetBoolDefault("AiPlayerbot.BgSlots.Log", true);
++    }
+     keepStacks.clear();
+     for (const std::string& pair : split(config.GetStringDefault("AiPlayerbot.KeepStacks", ""), ','))
+     {
+diff --git a/playerbot/PlayerbotAIConfig.h b/playerbot/PlayerbotAIConfig.h
+index b31d9e6..ecf8a82 100644
+--- a/playerbot/PlayerbotAIConfig.h
++++ b/playerbot/PlayerbotAIConfig.h
+@@ -417,6 +417,21 @@ public:
+     std::map<uint32, uint32> keepStacks;
+     // kalimdor: seconds between giving freed memory back (0: never; Kamino 230).
+     uint32 memoryTrimInterval;
++    // kalimdor: battleground queueing, the owner's design (Kamino 242;
++    // values/BattlegroundSlots.h). Who queues with no real player waiting:
++    // 0 none, 1 bots that enlist (enlist-battlegrounds above 0), 2 all.
++    uint32 bgAutoJoin;
++    // Per side and band (10-19, 20-29, 30-39, 40 to the cap - 1, the cap):
++    // bots queued or inside - for enlisting bots, and for the others.
++    uint32 bgSlotsEnlisted[5];
++    uint32 bgSlotsOthers[5];
++    // Per side, battleground and bracket (0: the battleground's team size);
++    // all bots server-wide (0: no limit); seconds a bot that does not enlist
++    // waits in a queue; one log line per check and per join.
++    uint32 bgSlotsPerQueue;
++    uint32 bgSlotsTotal;
++    uint32 bgSlotsQueueTimeout;
++    bool bgSlotsLog;
+     uint32 llmEnabled, llmContextLength, llmBotToBotChatChance, llmGenerationTimeout, llmMaxSimultaniousGenerations, llmRpgAIChatChance;
+     bool llmGlobalContext;
+     ParsedUrl llmEndPointUrl;
+diff --git a/playerbot/strategy/actions/ActionContext.h b/playerbot/strategy/actions/ActionContext.h
+index 39e21a3..9f77ec6 100644
+--- a/playerbot/strategy/actions/ActionContext.h
++++ b/playerbot/strategy/actions/ActionContext.h
+@@ -9,6 +9,7 @@
+ #include "DropGrayQuestsAction.h"
+ #include "LookForGroupAction.h"
+ #include "MakeBandageAction.h"
++#include "BgQueueLeaveAction.h"
+ #include "EmoteAction.h"
+ #include "AddLootAction.h"
+ #include "LootAction.h"
+@@ -446,6 +447,7 @@ namespace ai
+             creators["drop gray quests"] = [](PlayerbotAI* ai) { return new DropGrayQuestsAction(ai); };
+             creators["look for group"] = [](PlayerbotAI* ai) { return new LookForGroupAction(ai); };
+             creators["make bandage"] = [](PlayerbotAI* ai) { return new MakeBandageAction(ai); };
++            creators["bg queue leave"] = [](PlayerbotAI* ai) { return new BgQueueLeaveAction(ai); };
+ 
+ #ifdef GenerateBotTests
+             creators["test"] = [](PlayerbotAI* ai) { return new TestAction(ai); };
+diff --git a/playerbot/strategy/actions/BattleGroundJoinAction.cpp b/playerbot/strategy/actions/BattleGroundJoinAction.cpp
+index fd3a257..42813bf 100644
+--- a/playerbot/strategy/actions/BattleGroundJoinAction.cpp
++++ b/playerbot/strategy/actions/BattleGroundJoinAction.cpp
+@@ -385,7 +385,13 @@ bool BGJoinAction::shouldJoinBg(BattleGroundQueueTypeId queueTypeId, BattleGroun
+ #endif
+     bool hasPlayers = (sRandomPlayerbotMgr.BgPlayers[queueTypeId][bracketId][0] + sRandomPlayerbotMgr.BgPlayers[queueTypeId][bracketId][1]) > 0;
+     bool hasBots = (sRandomPlayerbotMgr.BgBots[queueTypeId][bracketId][0] + sRandomPlayerbotMgr.BgBots[queueTypeId][bracketId][1]) >= bg->GetMinPlayersPerTeam();
+-    if (!sPlayerbotAIConfig.randomBotAutoJoinBG && !hasPlayers)
++    // kalimdor: with no real player waiting, only bots that auto-join - by
++    // default those that enlist (AiPlayerbot.BgAutoJoin); and within this
++    // battleground and bracket's cap per side, on the fill path too
++    // (values/BattlegroundSlots.h; Kamino 242).
++    if (!hasPlayers && !(sPlayerbotAIConfig.randomBotAutoJoinBG && (ai->IsRealPlayer() || BattlegroundSlots::AutoJoins(bot))))
++        return false;
++    if (!ai->IsRealPlayer() && !BattlegroundSlots::QueueHasRoom(bot, queueTypeId, bracketId, bg->GetMaxPlayersPerTeam()))
+         return false;
+ 
+     if (!hasPlayers && !noLag)
+@@ -544,12 +550,7 @@ bool BGJoinAction::isUseful()
+ 
+     // can't queue in BG
+     if (bot->InBattleGround())
+-    {
+-        // kalimdor: the 45-minute cool-down after a battleground runs from
+-        // here (values/BattlegroundSlots.h).
+-        BattlegroundSlots::SeenInside(bot);
+         return false;
+-    }
+ 
+     // do not try right after login
+     if ((time(0) - bot->GetInGameTime()) < 30)
+@@ -558,9 +559,8 @@ bool BGJoinAction::isUseful()
+     // check level
+     if (bot->GetLevel() < 10)
+         return false;
+-    // kalimdor: within the owner's caps per side and level band, archetypes
+-    // that enlist in battlegrounds first, the rest with a 45-minute cool-down
+-    // (values/BattlegroundSlots.h).
++    // kalimdor: within the owner's caps per side and level band, and the
++    // server-wide total (values/BattlegroundSlots.h; Kamino 242).
+     if (!ai->IsRealPlayer() && !BattlegroundSlots::MayQueue(bot))
+         return false;
+ 
+@@ -706,6 +706,11 @@ bool BGJoinAction::JoinQueue(uint32 type)
+ #endif
+    uint32 instanceId = 0; // 0 = First Available
+    uint8 joinAsGroup = bot->GetGroup() && bot->GetGroup()->IsLeader(bot->GetObjectGuid());
++   // kalimdor: a random bot queues as itself - a leader took its whole group
++   // in, members that do not enlist and that took no slot (a quest group's,
++   // Kamino 268); each member goes by its own rule (Kamino 242).
++   if (sRandomPlayerbotMgr.IsFreeBot(bot))
++       joinAsGroup = 0;
+    bool isPremade = false;
+    bool isArena = false;
+    bool isRated = false;
+@@ -843,6 +848,9 @@ bool BGJoinAction::JoinQueue(uint32 type)
+    }
+ #endif
+ 
++   // kalimdor: its slot taken now, not at the next 30 s count (Kamino 244).
++   if (!ai->IsRealPlayer())
++       BattlegroundSlots::Reserve(bot, queueTypeId, bracketId, _bgType.c_str());
+    ai->QueuePacket(packet);
+    return true;
+ }
+@@ -888,6 +896,15 @@ bool FreeBGJoinAction::shouldJoinBg(BattleGroundQueueTypeId queueTypeId, BattleG
+     if (!hasPlayers && !noLag && !(isArena && hasTeam))
+         return false;
+ 
++    // kalimdor: talking to a battlemaster is no way round the owner's rule -
++    // with no real player waiting only bots that auto-join (by default those
++    // that enlist), and within the queue's cap per side (Kamino 242). On the
++    // dev server bots that do not enlist joined this way with nobody online.
++    if (!ai->IsRealPlayer() && !hasPlayers && !BattlegroundSlots::AutoJoins(bot))
++        return false;
++    if (!ai->IsRealPlayer() && !BattlegroundSlots::QueueHasRoom(bot, queueTypeId, bracketId, bg->GetMaxPlayersPerTeam()))
++        return false;
++
+ #ifndef MANGOSBOT_ZERO
+     if (!hasPlayers && isArena && !hasTeam)
+         return false;
+diff --git a/playerbot/strategy/actions/BgQueueLeaveAction.cpp b/playerbot/strategy/actions/BgQueueLeaveAction.cpp
+new file mode 100644
+index 0000000..ee904ba
+--- /dev/null
++++ b/playerbot/strategy/actions/BgQueueLeaveAction.cpp
+@@ -0,0 +1,27 @@
++#include "playerbot/playerbot.h"
++#include "BgQueueLeaveAction.h"
++#include "playerbot/ServerFacade.h"
++#include "playerbot/strategy/values/BattlegroundSlots.h"
++#include "BattleGround/BattleGroundMgr.h"
++
++using namespace ai;
++
++bool BgQueueLeaveAction::Execute(Event& event)
++{
++    char const* reason = BattlegroundSlots::ShouldLeave(bot);
++    if (!reason)
++        return false;
++
++    int const queueType = AI_VALUE2(int, "manual int", "bg queue type");
++    BattleGroundTypeId const bgTypeId = sServerFacade.BgTemplateId(BattleGroundQueueTypeId(queueType));
++    time_t const waited = time(nullptr) - AI_VALUE2(time_t, "manual time", "bg queue since");
++
++    WorldPacket packet(CMSG_BATTLEFIELD_PORT, 20);
++    packet << uint32(GetBattleGrounMapIdByTypeId(bgTypeId)) << uint8(0);
++    bot->GetSession()->HandleBattlefieldPortOpcode(packet);
++
++    SET_AI_VALUE2(time_t, "manual time", "bg queue since", 0);
++    sLog.outString("BgSlots: Bot #%d %s:%d <%s> leaves its battleground queue after %d min: %s", bot->GetGUIDLow(), bot->GetTeam() == ALLIANCE ? "A" : "H",
++        bot->GetLevel(), bot->GetName(), int(waited / 60), reason);
++    return true;
++}
+diff --git a/playerbot/strategy/actions/BgQueueLeaveAction.h b/playerbot/strategy/actions/BgQueueLeaveAction.h
+new file mode 100644
+index 0000000..b92bfbd
+--- /dev/null
++++ b/playerbot/strategy/actions/BgQueueLeaveAction.h
+@@ -0,0 +1,16 @@
++#pragma once
++#include "playerbot/strategy/Action.h"
++
++namespace ai
++{
++    // kalimdor: leaves the battleground queue BattlegroundSlots::ShouldLeave
++    // names - the port packet with "leave queue", as a player's client sends
++    // it (upstream's "bg leave" refuses after a join: its "bg type" is
++    // cleared there). Kamino 242, 245.
++    class BgQueueLeaveAction : public Action
++    {
++    public:
++        BgQueueLeaveAction(PlayerbotAI* ai) : Action(ai, "bg queue leave") {}
++        virtual bool Execute(Event& event) override;
++    };
++}
+diff --git a/playerbot/strategy/generic/BattlegroundStrategy.cpp b/playerbot/strategy/generic/BattlegroundStrategy.cpp
+index 8d69373..7585793 100644
+--- a/playerbot/strategy/generic/BattlegroundStrategy.cpp
++++ b/playerbot/strategy/generic/BattlegroundStrategy.cpp
+@@ -13,6 +13,13 @@ void BGStrategy::InitNonCombatTriggers(std::list<TriggerNode*> &triggers)
+     triggers.push_back(new TriggerNode(
+         "bg invite active",
+         NextAction::array(0, new NextAction("bg status check", relevance), NULL)));
++
++    // kalimdor: a queue it should not wait in any more - its level left the
++    // bracket, or no player waits there, or it waited too long
++    // (values/BattlegroundSlots.h; Kamino 242, 245).
++    triggers.push_back(new TriggerNode(
++        "bg queue stale",
++        NextAction::array(0, new NextAction("bg queue leave", relevance), NULL)));
+ }
+ 
+ void BattlegroundStrategy::InitNonCombatTriggers(std::list<TriggerNode*> &triggers)
+diff --git a/playerbot/strategy/triggers/BgQueueStaleTrigger.cpp b/playerbot/strategy/triggers/BgQueueStaleTrigger.cpp
+new file mode 100644
+index 0000000..8a10972
+--- /dev/null
++++ b/playerbot/strategy/triggers/BgQueueStaleTrigger.cpp
+@@ -0,0 +1,10 @@
++#include "playerbot/playerbot.h"
++#include "BgQueueStaleTrigger.h"
++#include "playerbot/strategy/values/BattlegroundSlots.h"
++
++using namespace ai;
++
++bool BgQueueStaleTrigger::IsActive()
++{
++    return !ai->IsRealPlayer() && BattlegroundSlots::ShouldLeave(bot) != nullptr;
++}
+diff --git a/playerbot/strategy/triggers/BgQueueStaleTrigger.h b/playerbot/strategy/triggers/BgQueueStaleTrigger.h
+new file mode 100644
+index 0000000..187ce38
+--- /dev/null
++++ b/playerbot/strategy/triggers/BgQueueStaleTrigger.h
+@@ -0,0 +1,15 @@
++#pragma once
++#include "playerbot/strategy/Trigger.h"
++
++namespace ai
++{
++    // kalimdor: a queued bot should leave its battleground queue - its level
++    // left the bracket, or, not enlisting, no player waits there any more or
++    // it waited too long (values/BattlegroundSlots.h; Kamino 242, 245).
++    class BgQueueStaleTrigger : public Trigger
++    {
++    public:
++        BgQueueStaleTrigger(PlayerbotAI* ai) : Trigger(ai, "bg queue stale", 30) {}
++        virtual bool IsActive() override;
++    };
++}
+diff --git a/playerbot/strategy/triggers/TriggerContext.h b/playerbot/strategy/triggers/TriggerContext.h
+index 4b06d1f..710745d 100644
+--- a/playerbot/strategy/triggers/TriggerContext.h
++++ b/playerbot/strategy/triggers/TriggerContext.h
+@@ -9,6 +9,7 @@
+ #include "GrayQuestTrigger.h"
+ #include "GroupQuestPendingTrigger.h"
+ #include "MakeBandageTrigger.h"
++#include "BgQueueStaleTrigger.h"
+ #include "GenericTriggers.h"
+ #include "LootTriggers.h"
+ #include "GenericTriggers.h"
+@@ -100,6 +101,7 @@ namespace ai
+             creators["gray quest"] = [](PlayerbotAI* ai) { return new GrayQuestTrigger(ai); };
+             creators["group quest pending"] = [](PlayerbotAI* ai) { return new GroupQuestPendingTrigger(ai); };
+             creators["can make bandage"] = [](PlayerbotAI* ai) { return new MakeBandageTrigger(ai); };
++            creators["bg queue stale"] = [](PlayerbotAI* ai) { return new BgQueueStaleTrigger(ai); };
+             creators["enemy player near"] = [](PlayerbotAI* ai) { return new EnemyPlayerNear(ai); };
+ 
+             creators["combat start"] = [](PlayerbotAI* ai) { return new CombatStartTrigger(ai); };
+diff --git a/playerbot/strategy/values/BattlegroundSlots.cpp b/playerbot/strategy/values/BattlegroundSlots.cpp
+index 025cfbc..7471e74 100644
+--- a/playerbot/strategy/values/BattlegroundSlots.cpp
++++ b/playerbot/strategy/values/BattlegroundSlots.cpp
+@@ -1,29 +1,54 @@
+ #include "playerbot/playerbot.h"
+ #include "BattlegroundSlots.h"
+ #include "Archetypes.h"
++#include "playerbot/PlayerbotAIConfig.h"
+ #include "playerbot/RandomPlayerbotMgr.h"
++#include "playerbot/ServerFacade.h"
++#include "BattleGround/BattleGroundMgr.h"
+ #include "World/World.h"
+ 
+ #include <algorithm>
++#include <atomic>
++#include <map>
+ 
+ using namespace ai;
+ 
+ namespace
+ {
+-    uint32 taken[2][6] = {};
+-    uint32 enlistedWaiting[2][6] = {};
++    // Rebuilt by Count every 30 s, raised by Reserve at each join (map
++    // threads) in between.
++    std::atomic<uint32> taken[2][6];
++    std::atomic<uint32> total;
+ 
+     uint32 Cap(int band, bool enlists)
+     {
+-        switch (band)
+-        {
+-            case 1: return 10;
+-            case 2: return 10;
+-            case 3: return 15;
+-            case 4: return enlists ? 15 : 0;
+-            case 5: return 40;
+-            default: return 0;
+-        }
++        if (band < 1 || band > 5)
++            return 0;
++        return enlists ? sPlayerbotAIConfig.bgSlotsEnlisted[band - 1] : sPlayerbotAIConfig.bgSlotsOthers[band - 1];
++    }
++
++    int Side(Player* bot)
++    {
++        return bot->GetTeam() == ALLIANCE ? 0 : 1;
++    }
++
++    AiObjectContext* Context(Player* bot)
++    {
++        return bot->GetPlayerbotAI()->GetAiObjectContext();
++    }
++
++    // Read without inserting: [] on these nested maps inserts a missing key,
++    // and map threads read them at once.
++    uint32 Read(std::map<uint32, std::map<uint32, std::map<uint32, uint32>>> const& counts, uint32 queueType, uint32 bracket, uint32 side)
++    {
++        auto q = counts.find(queueType);
++        if (q == counts.end())
++            return 0;
++        auto b = q->second.find(bracket);
++        if (b == q->second.end())
++            return 0;
++        auto c = b->second.find(side);
++        return c == b->second.end() ? 0 : c->second;
+     }
+ }
+ 
+@@ -42,64 +67,105 @@ int BattlegroundSlots::Band(uint32_t level)
+     return 4;
+ }
+ 
++bool BattlegroundSlots::Enlists(Player* bot)
++{
++    const Archetype* archetype = Archetypes::Of(bot);
++    return Archetypes::Weight(archetype, "enlist-battlegrounds", bot->GetLevel()) > 0.0f;
++}
++
++bool BattlegroundSlots::AutoJoins(Player* bot)
++{
++    switch (sPlayerbotAIConfig.bgAutoJoin)
++    {
++        case 2: return true;
++        case 1: return Enlists(bot);
++        default: return false;
++    }
++}
++
+ void BattlegroundSlots::Count()
+ {
+-    uint32 newTaken[2][6] = {}, newWaiting[2][6] = {};
++    uint32 counted[2][6] = {};
++    uint32 all = 0;
+     for (auto const& [guid, bot] : sRandomPlayerbotMgr.GetAllBots())
+     {
+-        if (!bot || !bot->IsInWorld())
++        if (!bot || !bot->IsInWorld() || !(bot->InBattleGround() || bot->InBattleGroundQueue()))
+             continue;
+-
+-        int const side = bot->GetTeam() == ALLIANCE ? 0 : 1;
+-        int const band = Band(bot->GetLevel());
+-        if (bot->InBattleGround() || bot->InBattleGroundQueue())
+-            ++newTaken[side][band];
+-        else if (band && Enlists(bot))
+-            ++newWaiting[side][band];
++        ++counted[Side(bot)][Band(bot->GetLevel())];
++        ++all;
+     }
+ 
+     for (int side = 0; side < 2; ++side)
+         for (int band = 0; band < 6; ++band)
+-        {
+-            taken[side][band] = newTaken[side][band];
+-            enlistedWaiting[side][band] = newWaiting[side][band];
+-        }
++            taken[side][band] = counted[side][band];
++    total = all;
++
++    if (sPlayerbotAIConfig.bgSlotsLog)
++        sLog.outString("BgSlots: A %u/%u/%u/%u/%u H %u/%u/%u/%u/%u total %u", counted[0][1], counted[0][2], counted[0][3], counted[0][4], counted[0][5],
++            counted[1][1], counted[1][2], counted[1][3], counted[1][4], counted[1][5], all);
+ }
+ 
+-bool BattlegroundSlots::Enlists(Player* bot)
++bool BattlegroundSlots::MayQueue(Player* bot)
+ {
+-    const Archetype* archetype = Archetypes::Of(bot);
+-    return Archetypes::Weight(archetype, "enlist-battlegrounds", bot->GetLevel()) > 0.0f;
++    int const band = Band(bot->GetLevel());
++    uint32 const cap = Cap(band, Enlists(bot));
++    if (!cap || taken[Side(bot)][band] >= cap)
++        return false;
++    return !sPlayerbotAIConfig.bgSlotsTotal || total < sPlayerbotAIConfig.bgSlotsTotal;
+ }
+ 
+-void BattlegroundSlots::SeenInside(Player* bot)
++bool BattlegroundSlots::QueueHasRoom(Player* bot, uint32_t queueType, uint32_t bracket, uint32_t teamSize)
+ {
+-    if (PlayerbotAI* ai = bot->GetPlayerbotAI())
+-        ai->GetAiObjectContext()->GetValue<time_t>("manual time", "last battleground")->Set(time(nullptr));
++    // Upstream adds each join to BgBots at once, and the 30 s check rebuilds
++    // it.
++    uint32 const limit = sPlayerbotAIConfig.bgSlotsPerQueue ? sPlayerbotAIConfig.bgSlotsPerQueue : teamSize;
++    return Read(sRandomPlayerbotMgr.BgBots, queueType, bracket, Side(bot)) < limit;
+ }
+ 
+-bool BattlegroundSlots::MayQueue(Player* bot)
++void BattlegroundSlots::Reserve(Player* bot, uint32_t queueType, uint32_t bracket, char const* name)
+ {
+-    bool const enlists = Enlists(bot);
+-    int const band = Band(bot->GetLevel());
+-    uint32 const cap = Cap(band, enlists);
+-    if (!cap)
+-        return false;
++    ++taken[Side(bot)][Band(bot->GetLevel())];
++    ++total;
+ 
+-    if (!enlists)
+-    {
+-        time_t const last = bot->GetPlayerbotAI()->GetAiObjectContext()->GetValue<time_t>("manual time", "last battleground")->Get();
+-        if (last && time(nullptr) - last < Cooldown)
+-            return false;
+-    }
++    AiObjectContext* context = Context(bot);
++    context->GetValue<int>("manual int", "bg queue type")->Set(int(queueType));
++    context->GetValue<int>("manual int", "bg queue bracket")->Set(int(bracket));
++    context->GetValue<time_t>("manual time", "bg queue since")->Set(time(nullptr));
++
++    if (sPlayerbotAIConfig.bgSlotsLog)
++        sLog.outString("BgSlots: Bot #%d %s:%d <%s> queued %s (%s)", bot->GetGUIDLow(), Side(bot) ? "H" : "A", bot->GetLevel(), bot->GetName(), name,
++            Enlists(bot) ? "enlisted" : "for a player");
++}
++
++char const* BattlegroundSlots::ShouldLeave(Player* bot)
++{
++    if (!bot->InBattleGroundQueue() || bot->InBattleGround())
++        return nullptr;
++
++    AiObjectContext* context = Context(bot);
++    int const queueType = context->GetValue<int>("manual int", "bg queue type")->Get();
++    time_t const since = context->GetValue<time_t>("manual time", "bg queue since")->Get();
++    // A queue it did not join through Reserve (before this patch, or a
++    // command): left alone.
++    if (!since || queueType <= 0 || queueType >= MAX_BATTLEGROUND_QUEUE_TYPES)
++        return nullptr;
++
++    // 245: its level left the bracket it queued in.
++    BattleGroundTypeId const bgTypeId = sServerFacade.BgTemplateId(BattleGroundQueueTypeId(queueType));
++    int const bracket = context->GetValue<int>("manual int", "bg queue bracket")->Get();
++    if (int(sBattleGroundMgr.GetBattleGroundBracketIdFromLevel(bgTypeId, bot->GetLevel())) != bracket)
++        return "its level left the bracket";
+ 
+-    // Counted in the world thread (Count): its side and band.
+-    int const side = bot->GetTeam() == ALLIANCE ? 0 : 1;
+-    uint32 const inUse = taken[side][band];
+-    // An enlisting bot counted as waiting may be this one.
+-    uint32 const waiting = enlistedWaiting[side][band] - (enlists && enlistedWaiting[side][band] ? 1 : 0);
++    if (Enlists(bot))
++        return nullptr;
+ 
+-    if (enlists)
+-        return inUse < cap;
+-    return inUse + waiting < cap;
++    time_t const waited = time(nullptr) - since;
++    // Joined for a player: leaves once none waits there any more (after the
++    // next 30 s check has seen the queue).
++    if (!AutoJoins(bot) && waited > 60 && bracket >= 0 && bracket < MAX_BATTLEGROUND_BRACKETS &&
++        !Read(sRandomPlayerbotMgr.BgPlayers, queueType, bracket, 0) && !Read(sRandomPlayerbotMgr.BgPlayers, queueType, bracket, 1))
++        return "no player waits there any more";
++    if (waited > time_t(sPlayerbotAIConfig.bgSlotsQueueTimeout))
++        return "not invited in time";
++    return nullptr;
+ }
+diff --git a/playerbot/strategy/values/BattlegroundSlots.h b/playerbot/strategy/values/BattlegroundSlots.h
+index 5b48865..7aa58d3 100644
+--- a/playerbot/strategy/values/BattlegroundSlots.h
++++ b/playerbot/strategy/values/BattlegroundSlots.h
+@@ -2,18 +2,24 @@
+ 
+ #include <cstdint>
+ 
+-// kalimdor: how many bots may be in battlegrounds, and who goes (owner,
+-// 2026-11-03). Per side, counting bots queued or inside, by level band:
+-//   10-19: 10   20-29: 10   30-39: 15   40-59: 15, enlisting archetypes only
+-//   level cap: 40
+-// A bot whose archetype weighs enlist-battlegrounds above 0 takes a free slot
+-// first; any other bot only when the slots left outnumber the enlisting bots
+-// of its band and side still waiting, and then not again for 45 minutes
+-// after a battleground. enlist-battlegrounds is not a travel goal: every bot
+-// still levels and quests, also while it waits in the queue - enlisting bots
+-// just go more often. Upstream sent every
+-// bot: on the dev server 46 of 101 bots sat in battlegrounds, holding 181 of
+-// 429 finished quests unreturned.
++// kalimdor: battleground queueing, the owner's design (2026-11-03; Kamino
++// 242, with 244 and 245). Upstream sent every bot: on the dev server 46 of
++// 101 bots sat in battlegrounds, holding 181 of 429 finished quests
++// unreturned.
++// - Bots whose archetype weighs enlist-battlegrounds above 0 ("enlist"; it
++//   was pvpi) queue whenever they can and may wait as long as they like -
++//   they keep questing meanwhile, and their time in world still logs them
++//   out. The others queue only where a real player waits
++//   (AiPlayerbot.BgAutoJoin: enlisted, all, none), and leave when none waits
++//   there any more or after AiPlayerbot.BgSlots.QueueTimeout. No cool-down.
++// - Caps per side and level band (10-19, 20-29, 30-39, 40 to the cap - 1,
++//   the cap): AiPlayerbot.BgSlots.Enlisted (10,10,15,15,40) for enlisting
++//   bots, .Others (10,10,15,0,40) for the rest; .PerQueue per battleground
++//   and bracket (0: its team size), on the fill path too; .Total
++//   server-wide. A join reserves its slot at once - the counts are rebuilt
++//   only every 30 s, and bots overshot them in between (244).
++// - A queued bot whose level left its queue's bracket leaves it - the core
++//   keeps it there and lets it in over-levelled (245).
+ 
+ class Player;
+ 
+@@ -22,21 +28,23 @@ namespace ai
+     class BattlegroundSlots
+     {
+     public:
+-        static constexpr long Cooldown = 45 * 60;
+-
+         // Its archetype weighs enlist-battlegrounds above 0.
+         static bool Enlists(Player* bot);
+-        // The owner's level band: 1 10-19, 2 20-29, 3 30-39, 4 40-59, 5 the
+-        // cap; 0 below 10.
++        // It queues with no real player waiting (AiPlayerbot.BgAutoJoin).
++        static bool AutoJoins(Player* bot);
++        // The owner's level band: 1 10-19, 2 20-29, 3 30-39, 4 40 to the cap
++        // - 1, 5 the cap; 0 below 10.
+         static int Band(uint32_t level);
+-        // Counted in the world thread (RandomPlayerbotMgr's battleground
+-        // check), read by the bots: per side (0 Alliance, 1 Horde) and band,
+-        // bots queued or inside, and enlisting bots still out.
++        // Rebuilt in the world thread every 30 s (RandomPlayerbotMgr's
++        // battleground check): per side and band, bots queued or inside.
+         static void Count();
+-        // The bot may queue now.
++        // Its side and band have a slot, and the server-wide total.
+         static bool MayQueue(Player* bot);
+-        // To be called while the bot is in a battleground: the cool-down runs
+-        // from the last time this saw it there.
+-        static void SeenInside(Player* bot);
++        // This battleground and bracket have room for its side.
++        static bool QueueHasRoom(Player* bot, uint32_t queueType, uint32_t bracket, uint32_t teamSize);
++        // At the join: the slot taken now, and the queue noted.
++        static void Reserve(Player* bot, uint32_t queueType, uint32_t bracket, char const* name);
++        // Why a queued bot should leave its queue, or null.
++        static char const* ShouldLeave(Player* bot);
+     };
+ }
