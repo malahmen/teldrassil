@@ -112,6 +112,7 @@ chk "the plan's transaction is refused: started again" '[[ $rc -ne 0 && "$out" =
 scenario stopped; export STUB_SQL_REPLY="$STATE" STUB_SQL_FAIL="START TRANSACTION"
 run roster apply --file "$T/roster.json" --yes
 chk "  one that was stopped stays stopped"        '[[ $rc -ne 0 ]] && ! grep -q "^podman start $W" "$T/podman.log"'
+chk "  stored values of deleted characters are removed, server stopped" 'grep -qF "DELETE FROM classiccharacters.ai_playerbot_db_store WHERE guid NOT IN (SELECT guid FROM classiccharacters.characters); SELECT ROW_COUNT();" "$T/sql.in"'
 
 hdr "roster apply --fresh-population: the start fails"
 cat > "$T/fresh.json" <<'EOF'

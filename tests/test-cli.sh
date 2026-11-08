@@ -45,9 +45,9 @@ cp "$T/conf.saved" "$CONF"; run set DB_CHARACTERS classiccharacters
 
 hdr "console refusals (never reach the server)"
 : > "$T/podman.log"
-for c in "rndbot c Bob talents" "rndbot do Bob stats" ".rndbot c x y" "RNDBOT C x"; do
+for c in "rndbot grid load 0 1 2" "rndbot grid unload 0 1 2" ".rndbot grid cycle 0 1 2" "rndbot taxtest Bob 1 2" "RNDBOT ZONEUPD Bob"; do
     run console "$c"
-    chk "refused: $c" '[[ $rc -ne 0 && "$out" == *"Refused"* ]]'
+    chk "refused: $c" '[[ $rc -ne 0 && "$out" == *"Refused"* && "$out" == *"test tool"* ]]'
 done
 chk "nothing was sent anywhere" '[[ ! -s "$T/podman.log" ]]'
 for c in $'saveall\rrndbot c Bob talents' $'saveall\nrndbot do Bob stats' $'saveall\r\nsaveall'; do
@@ -57,6 +57,10 @@ done
 chk "nothing was sent anywhere"   '[[ ! -s "$T/podman.log" ]]'
 run console "rndbot upgrade Bob"
 chk "rndbot upgrade is not refused (stops at: server not running)" '[[ "$out" != *"Refused"* && "$out" == *"not running"* ]]'
+for c in "rndbot c Bob talents" "rndbot grid status 0 1" "rndbot taxtestx"; do
+    run console "$c"
+    chk "not refused: $c (stops at: server not running)" '[[ "$out" != *"Refused"* && "$out" == *"not running"* ]]'
+done
 
 hdr "guards"
 run create-account --name Bob --pass-file "$T/none"

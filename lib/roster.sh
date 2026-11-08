@@ -151,6 +151,28 @@ _fresh_population() {
     success "New population created; guild deletion off and random guilds back on (${FRESH_GUILDS:-20})."
 }
 
+# Bot values playerbots stores per character (ai_playerbot_db_store: archetype,
+# mood, strategies) outlive the character: playerbots' own deletion - a fresh
+# population, or a bot it retires - leaves them. meksha held 98 rows of 19
+# deleted characters after the 2026-10-31 fresh population (Kamino 266).
+# Not a join through an alias: MariaDB wants a current database for that
+# ("No database selected"), and these statements name theirs.
+_store_orphans_from() { printf 'FROM %s.ai_playerbot_db_store WHERE guid NOT IN (SELECT guid FROM %s.characters)' "$DB_CHARACTERS" "$DB_CHARACTERS"; }
+
+# _store_orphans — how many stored values have no character, or nothing when
+# it cannot be read.
+_store_orphans() {
+    local n; n="$(_db_value "SELECT COUNT(*) $(_store_orphans_from);" 2>/dev/null || true)"
+    [[ "$n" =~ ^[0-9]+$ ]] && printf '%s' "$n"
+}
+
+# _store_prune — remove them; with the server stopped (it writes the store).
+_store_prune() {
+    local n; n="$(_db_value "DELETE $(_store_orphans_from); SELECT ROW_COUNT();" 2>/dev/null || true)"
+    if [[ "$n" =~ ^[0-9]+$ ]] && (( n > 0 )); then success "Removed ${n} stored bot values of characters that no longer exist."; fi
+    return 0
+}
+
 # _bot_conf_value <key> — an AiPlayerbot.<key> setting as aiplayerbot.conf has it.
 _bot_conf_value() {
     grep -E "^AiPlayerbot\.${1}[[:space:]]*=" "$BOT_CONF" | tail -1 | cut -d= -f2 | tr -d '[:space:]' || true
@@ -232,6 +254,8 @@ _roster_cmd_apply() {
         _roster_state "$d/state.json"
         _roster_plan "$roster" "$d"
         (( R_FRESH )) && warn "With --fresh-population, every random bot would first be replaced."
+        n="$(_store_orphans)"
+        [[ -n "$n" && "$n" != 0 ]] && info "${n} stored bot values belong to characters that no longer exist; applying removes them."
         echo
         info "Applying stops the world server (everyone is disconnected for about a minute). Re-run with --yes."
         return 0
@@ -253,6 +277,7 @@ _roster_cmd_apply() {
 
     header "Stop, so the database can be written"
     _stop
+    _store_prune
     _roster_state "$d/state.json"
     header "Plan"
     _roster_plan "$roster" "$d" || error_exit "Nothing was changed."

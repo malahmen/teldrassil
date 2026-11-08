@@ -91,7 +91,7 @@ STUB_KUBE_PODS="" run --profile box stop
 chk "stop when no pod exists: nothing to do"              '[[ $rc -eq 0 && "$out" == *"not running"* ]] && ! grep -q "scale" "$T/calls.log"'
 run --profile box restore --file "$TEST_DIR/../README.md" --yes
 chk "restore refuses while the pod exists"                '[[ $rc -ne 0 && "$out" == *"Stop the world server first"* ]]'
-run --profile box console "rndbot c Bob x"
+run --profile box console "rndbot zoneupd Bob"
 chk "console refusals still hold"                         '[[ $rc -ne 0 && "$out" == *"Refused"* ]]'
 
 printf '\npass=%d fail=%d\n' "$pass" "$fail"
