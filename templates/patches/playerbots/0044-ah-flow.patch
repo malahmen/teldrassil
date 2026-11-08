@@ -1,0 +1,137 @@
+diff --git a/playerbot/strategy/actions/AhAction.cpp b/playerbot/strategy/actions/AhAction.cpp
+index 8fe795d..52c9351 100644
+--- a/playerbot/strategy/actions/AhAction.cpp
++++ b/playerbot/strategy/actions/AhAction.cpp
+@@ -6,6 +6,7 @@
+ #include "playerbot/strategy/values/BudgetValues.h"
+ #include "playerbot/strategy/values/ItemUsageValue.h"
+ #include "playerbot/strategy/values/AuctionGoods.h"
++#include "MailAction.h"
+ 
+ using namespace ai;
+ 
+@@ -28,6 +29,12 @@ bool AhAction::Execute(Event& event)
+ 
+         sRandomPlayerbotMgr.m_ahActionMutex.unlock();
+ 
++        // kalimdor: mail waiting - the mailbox by the auction house next, so
++        // what came back is taken and listed again now (Kamino 272).
++        if (AI_VALUE(bool, "can get mail"))
++            if (GameObject* mailbox = ai->GetGameObject(MailProcessor::FindMailbox(ai)))
++                SET_AI_VALUE(GuidPosition, "rpg target", GuidPosition(mailbox));
++
+         return doneAuction;
+     }
+ 
+@@ -39,7 +46,10 @@ bool AhAction::ExecuteCommand(Player* requester, std::string text, Unit* auction
+ {
+     uint32 time;
+ #ifdef MANGOSBOT_ZERO
+-    time = 8 * HOUR / MINUTE;
++    // kalimdor: 24 hours, the longest the client offers - an unsold item
++    // comes back by mail once a day, not three times, for the same deposit
++    // a day (owner, 2026-11-08; Kamino 272).
++    time = 24 * HOUR / MINUTE;
+ #else
+     time = 12 * HOUR / MINUTE;
+ #endif
+@@ -91,9 +101,12 @@ bool AhAction::ExecuteCommand(Player* requester, std::string text, Unit* auction
+                 // kalimdor: 10% cheaper for each time it came back unsold
+                 // (values/AuctionGoods.h; Kamino 271).
+                 pricePerItem = pricePerItem * AuctionGoods::PricePercent(ai, proto->ItemId) / 100;
+-                // kalimdor: a trader prices to sell (Kamino 271).
++                // kalimdor: a trader prices to sell (Kamino 271); the others
++                // under the lowest listing, as a player would (Kamino 272).
+                 if (AuctionGoods::IsTrader(bot))
+                     pricePerItem = AuctionGoods::TraderPrice(proto, pricePerItem);
++                else
++                    pricePerItem = AuctionGoods::MarketPrice(bot, proto, pricePerItem);
+                 if (!pricePerItem)
+                     pricePerItem = 1;
+                 pricePerItemCache[proto->ItemId] = pricePerItem;
+diff --git a/playerbot/strategy/actions/MailAction.cpp b/playerbot/strategy/actions/MailAction.cpp
+index 054bdc1..d819ddc 100644
+--- a/playerbot/strategy/actions/MailAction.cpp
++++ b/playerbot/strategy/actions/MailAction.cpp
+@@ -340,6 +340,12 @@ bool MailAction::Execute(Event& event)
+     if (mailList.empty())
+         return false;
+ 
++    // kalimdor: a bot takes the mail that expires soonest first - an
++    // expired auction's mail is deleted at 30 days with its items (Kamino
++    // 272).
++    if (event.getSource() == "rpg action")
++        std::stable_sort(mailList.begin(), mailList.end(), [](Mail* a, Mail* b) { return a->expire_time < b->expire_time; });
++
+     std::map<int, Mail*> filtered = filterList(mailList, filter);
+     for (std::map<int, Mail*>::iterator i = filtered.begin(); i != filtered.end(); ++i)
+     {
+diff --git a/playerbot/strategy/values/AuctionGoods.cpp b/playerbot/strategy/values/AuctionGoods.cpp
+index 7fe56f8..a9b4598 100644
+--- a/playerbot/strategy/values/AuctionGoods.cpp
++++ b/playerbot/strategy/values/AuctionGoods.cpp
+@@ -125,7 +125,8 @@ ItemUsage AuctionGoods::Route(PlayerbotAI* ai, ItemPrototype const* proto)
+     // Materials and recipes: the auction house, after Relists unsold the
+     // bank - never a vendor.
+     if (proto->Class == ITEM_CLASS_TRADE_GOODS || proto->Class == ITEM_CLASS_REAGENT || proto->Class == ITEM_CLASS_RECIPE)
+-        return worthListing && Unsold(ai, proto->ItemId) < Relists ? ItemUsage::ITEM_USAGE_AH : BankOrSell(ai, proto);
++        return worthListing && Unsold(ai, proto->ItemId) < Relists && sRandomPlayerbotMgr.GetAhPrices(proto->ItemId).size() < FloodListings ?
++            ItemUsage::ITEM_USAGE_AH : BankOrSell(ai, proto);
+ 
+     return ItemUsage::ITEM_USAGE_NONE;
+ }
+@@ -261,3 +262,21 @@ void AuctionGoods::BuyTripDone(PlayerbotAI* ai)
+ {
+     ai->GetAiObjectContext()->GetValue<time_t>("manual time", "ah buy next")->Set(time(nullptr) + BuyTripPause);
+ }
++
++uint32 AuctionGoods::MarketPrice(Player* bot, ItemPrototype const* proto, uint32 ownPrice)
++{
++    uint32 lowest = 0;
++    for (AuctionEntry const& auction : sRandomPlayerbotMgr.GetAhPrices(proto->ItemId))
++    {
++        if (auction.owner == bot->GetGUIDLow() || !auction.itemCount || !auction.buyout)
++            continue;
++        uint32 const perItem = auction.buyout / auction.itemCount;
++        if (perItem && (!lowest || perItem < lowest))
++            lowest = perItem;
++    }
++    if (!lowest || lowest > ownPrice)
++        return ownPrice;
++    uint32 const undercut = std::max<uint32>(1, lowest * urand(0, MarketUndercutPercent) / 100);
++    uint32 const price = lowest > undercut ? lowest - undercut : 1;
++    return std::max<uint32>(std::max<uint32>(price, proto->SellPrice), 1);
++}
+diff --git a/playerbot/strategy/values/AuctionGoods.h b/playerbot/strategy/values/AuctionGoods.h
+index c0c72fc..28578dc 100644
+--- a/playerbot/strategy/values/AuctionGoods.h
++++ b/playerbot/strategy/values/AuctionGoods.h
+@@ -16,8 +16,11 @@ namespace ai
+     // price least. A full bank (over 80%, upstream's deposit limit) makes
+     // room: a stack bound for it worth no more than the bank's least
+     // valuable goes to a vendor; worth more, that bank stack is withdrawn
+-    // and sold instead (valuables never), traders too. Traders price to
+-    // sell: under the lowest listing (TraderUndercutPercent), or
++    // and sold instead (valuables never), traders too. Every bot lists for
++    // 24 hours, under the lowest listing, not an item listed FloodListings
++    // times already, and takes its mail by the auction house (Kamino 272).
++    // Traders price to sell: under the lowest listing
++    // (TraderUndercutPercent), or
+     // TraderNoListingPercent of upstream's price; with a full bank and full
+     // bags they leave item mail in the mailbox. Bots buy what their crafting
+     // lacks - first aid's cloth, the only craft random bots do (Kamino 257):
+@@ -64,6 +67,14 @@ namespace ai
+         // valuable stack - or is that stack, with something better waiting.
+         static ItemUsage BankOrSell(PlayerbotAI* ai, ItemPrototype const* proto);
+ 
++        // An item listed this often already is not listed again (Kamino 272).
++        static constexpr size_t FloodListings = 5;
++        // Every bot's price: under the lowest listing by someone else, by
++        // up to MarketUndercutPercent, never above its own, never under the
++        // vendor price (Kamino 272).
++        static constexpr uint32 MarketUndercutPercent = 10;
++        static uint32 MarketPrice(Player* bot, ItemPrototype const* proto, uint32 ownPrice);
++
+         static constexpr uint32 TraderUndercutPercent = 5;
+         static constexpr uint32 TraderNoListingPercent = 75;
+         static constexpr time_t BuyTripPause = 30 * 60;
