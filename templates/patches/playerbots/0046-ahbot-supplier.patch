@@ -1,0 +1,145 @@
+diff --git a/ahbot/AhBot.cpp b/ahbot/AhBot.cpp
+index 9a5b47e..07c04dc 100644
+--- a/ahbot/AhBot.cpp
++++ b/ahbot/AhBot.cpp
+@@ -6,6 +6,8 @@
+ #include "Config/Config.h"
+ #include "Chat/Chat.h"
+ #include "AhBotConfig.h"
++#include "playerbot/strategy/values/AuctionGoods.h"
++#include "playerbot/RandomItemMgr.h"
+ #include "AuctionHouse/AuctionHouseMgr.h"
+ #include "Server/WorldSession.h"
+ #include "Entities/Player.h"
+@@ -312,10 +314,14 @@ int AhBot::Answer(int auction, Category* category, ItemBag* inAuctionItems)
+         if (!curPrice) curPrice = entry->startbid;
+         if (!curPrice) curPrice = entry->buyout;
+ 
+-        uint32 bidder = GetRandomBidder(auctionIds[auction]);
++        // kalimdor: as a supplier it buys as its own character (AhBot.GUID)
++        // or not at all - a random bot's name put players' goods in that
++        // bot's mailbox (Kamino 273).
++        uint32 bidder = sAhBotConfig.supplier ? uint32(sAhBotConfig.guid) : GetRandomBidder(auctionIds[auction]);
+         if (!bidder)
+         {
+-            sLog.outError( "No bidders for auction %d", auctionIds[auction]);
++            if (!sAhBotConfig.supplier)
++                sLog.outError( "No bidders for auction %d", auctionIds[auction]);
+             break;
+         }
+ 
+@@ -477,6 +483,19 @@ uint32 AhBot::GetSellTime(uint32 itemId, uint32 auctionHouse, Category*& categor
+     return result ? result : itemTime;
+ }
+ 
++// kalimdor: what the supplier lists - a material or recipe that drops 1% of
++// the time or less (kalimdor_item_rarity, sql/0002; AuctionGoods::
++// RareDropChance). Not by quality: blue shards come from disenchanting at
++// 17-22%; nor items no loot table holds - crafted, not dropped (dev server,
++// Kamino 273).
++bool AhBot::SupplierItem(ItemPrototype const* proto)
++{
++    if (proto->Class != ITEM_CLASS_TRADE_GOODS && proto->Class != ITEM_CLASS_REAGENT && proto->Class != ITEM_CLASS_RECIPE)
++        return false;
++    float const chance = sRandomItemMgr.GetItemRarity(proto->ItemId);
++    return chance > 0.0f && chance <= ai::AuctionGoods::RareDropChance;
++}
++
+ int AhBot::AddAuctions(int auction, Category* category, ItemBag* inAuctionItems)
+ {
+     std::vector<uint32>& inAuction = inAuctionItems->Get(category);
+@@ -488,6 +507,15 @@ int AhBot::AddAuctions(int auction, Category* category, ItemBag* inAuctionItems)
+     int added = 0;
+     int ladded = 0;
+     std::vector<uint32> available = availableItems.Get(category);
++    // kalimdor: as a supplier it picks among the hard-to-drop materials and
++    // recipes only - rejected after a pick among all, most tries missed and
++    // it listed 3 auctions in 40 minutes on the dev server (Kamino 273).
++    if (sAhBotConfig.supplier)
++        available.erase(std::remove_if(available.begin(), available.end(), [](uint32 itemId)
++        {
++            ItemPrototype const* proto = sObjectMgr.GetItemPrototype(itemId);
++            return !proto || !SupplierItem(proto);
++        }), available.end());
+     for (int32 i = 0; i <= maxAllowedAuctionCount && available.size() > 0 && inAuctionItems->GetCount(category) < maxAllowedAuctionCount; ++i)
+     {
+         uint32 index = urand(0, available.size() - 1);
+@@ -532,16 +560,31 @@ int AhBot::AddAuctions(int auction, Category* category, ItemBag* inAuctionItems)
+ 
+ int AhBot::AddAuction(int auction, Category* category, ItemPrototype const* proto)
+ {
+-    uint32 owner = GetRandomBidder(auctionIds[auction]);
+-    if (!owner)
++    // kalimdor: as a supplier, only hard-to-drop materials and recipes
++    // (SupplierItem), listed
++    // as the server (owner 0): unsold, the core deletes the item instead of
++    // mailing it; sold, it pays no one. In random bots' names, 89% of
++    // meksha's auctions were items made from nothing that came back to those
++    // bots by mail (2026-11-08; Kamino 273).
++    uint32 owner = 0;
++    if (sAhBotConfig.supplier)
+     {
+-        sLog.outError("No bidders for auction %d", auctionIds[auction]);
+-        return 0;
++        if (!SupplierItem(proto))
++            return 0;
+     }
++    else
++    {
++        owner = GetRandomBidder(auctionIds[auction]);
++        if (!owner)
++        {
++            sLog.outError("No bidders for auction %d", auctionIds[auction]);
++            return 0;
++        }
+ 
+-    std::string name;
+-    if (!sObjectMgr.GetPlayerNameByGUID(ObjectGuid(HIGHGUID_PLAYER, owner), name))
+-        return 0;
++        std::string name;
++        if (!sObjectMgr.GetPlayerNameByGUID(ObjectGuid(HIGHGUID_PLAYER, owner), name))
++            return 0;
++    }
+ 
+ 
+     uint32 price = category->GetPricingStrategy()->GetSellPrice(proto, auctionIds[auction]);
+diff --git a/ahbot/AhBot.h b/ahbot/AhBot.h
+index 9156c88..e021e6f 100644
+--- a/ahbot/AhBot.h
++++ b/ahbot/AhBot.h
+@@ -52,6 +52,8 @@ namespace ahbot
+ 
+     private:
+         int Answer(int auction, Category* category, ItemBag* inAuctionItems);
++        // kalimdor: what it lists as a supplier (Kamino 273).
++        static bool SupplierItem(ItemPrototype const* proto);
+         int AddAuctions(int auction, Category* category, ItemBag* inAuctionItems);
+         int AddAuction(int auction, Category* category, const ItemPrototype* proto);
+         void Expire(int auction);
+diff --git a/ahbot/AhBotConfig.cpp b/ahbot/AhBotConfig.cpp
+index f6c4bca..344b1fb 100644
+--- a/ahbot/AhBotConfig.cpp
++++ b/ahbot/AhBotConfig.cpp
+@@ -55,6 +55,9 @@ bool AhBotConfig::Initialize()
+     LoadSet<std::set<uint32> >(config.GetStringDefault("AhBot.IgnoreItemIds", "49283,52200,8494,6345,6891,2460,37164,34835"), ignoreItemIds);
+     LoadSet<std::set<uint32> >(config.GetStringDefault("AhBot.IgnoreVendorItemIds", "755,858,4592,4593,1710,3827,2455,3385"), ignoreVendorItemIds);
+     sendmail = config.GetBoolDefault("AhBot.SendMail", true);
++    // kalimdor: a supplier of hard-to-drop materials and recipes, listing
++    // as the server, buying only as its own character (Kamino 273).
++    supplier = config.GetBoolDefault("AhBot.Supplier", true);
+ 
+ 
+     return enabled;
+diff --git a/ahbot/AhBotConfig.h b/ahbot/AhBotConfig.h
+index 13ba5ff..e0c6799 100644
+--- a/ahbot/AhBotConfig.h
++++ b/ahbot/AhBotConfig.h
+@@ -29,6 +29,8 @@ public:
+     std::set<uint32> ignoreItemIds;
+     std::set<uint32> ignoreVendorItemIds;
+     bool sendmail;
++    // kalimdor: the AhBot as a supplier (owner, 2026-11-08; Kamino 273).
++    bool supplier;
+ 
+     float GetSellPriceMultiplier(std::string category)
+     {

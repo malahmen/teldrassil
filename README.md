@@ -424,7 +424,7 @@ battleground and bracket (0: its team size). `total`: all bots, server-wide
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries forty-five changes to playerbots (`templates/patches/playerbots/`)
+teldrassil carries forty-six changes to playerbots (`templates/patches/playerbots/`)
 and three to the core (`templates/patches/mangos-classic/`), applied before
 every build:
 
@@ -690,6 +690,11 @@ every build:
   per side and level band from the roster's `battlegrounds`; a join takes its
   slot at once, and a bot leaves a queue its level has left. (Kamino 242, 244,
   245, 2026-11-08.)
+- **playerbots 0046:** the AhBot as a supplier (`AhBot.Supplier`, on): when
+  it runs, it lists only materials and recipes that drop 1% of the time or
+  less, as the server - unsold items vanish instead of being mailed to a
+  random bot - and buys only as its own character (`AhBot.GUID`), if set.
+  (Kamino 273, 2026-11-09.)
 - **mangos-classic 0003:** the remote console answers only a client still
   connected. A command's answer comes later, from the world thread; when the
   client had hung up, it was written into the freed connection - every time,
