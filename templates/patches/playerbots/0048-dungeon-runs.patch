@@ -1,0 +1,911 @@
+diff --git a/playerbot/TravelMgr.cpp b/playerbot/TravelMgr.cpp
+index 6eff1d6..18c58b3 100644
+--- a/playerbot/TravelMgr.cpp
++++ b/playerbot/TravelMgr.cpp
+@@ -1,5 +1,6 @@
+ #include "playerbot/TravelMgr.h"
+ #include "playerbot/strategy/values/ZoneLevels.h"
++#include "playerbot/strategy/values/DungeonRun.h"
+ #include "Tools/Formulas.h"
+ #include <sstream>
+ #include <ctime>
+@@ -666,6 +667,12 @@ std::string GrindTravelDestination::GetTitle() const
+ 
+ bool BossTravelDestination::IsPossible(const PlayerTravelInfo& info) const
+ {
++    // kalimdor: a group on a dungeon run goes for the bosses of the dungeon
++    // it is in, whatever its gear, level or size (values/DungeonRun.h;
++    // Kamino 151) - IsActive keeps the living ones.
++    if (info.GetBoolValue("in dungeon run"))
++        return ClosestMapId(info.GetPosition()) == info.GetPosition().getMapId();
++
+     if (!info.GetBoolValue("can fight boss"))
+         return false;
+ 
+@@ -711,6 +718,11 @@ bool BossTravelDestination::IsActive(Player* bot, const PlayerTravelInfo& info)
+     PlayerbotAI* ai = bot->GetPlayerbotAI();
+     AiObjectContext* context = ai->GetAiObjectContext();
+ 
++    // kalimdor: on a dungeon run, a boss of its instance still alive - not
++    // upstream's sight and upgrade checks (values/DungeonRun.h; Kamino 151).
++    if (DungeonRun::Active(bot))
++        return IsPossible(info) && DungeonRun::IsAliveBoss(bot, GetEntry());
++
+     if (!IsPossible(info))
+         return false;
+ 
+diff --git a/playerbot/TravelMgr.h b/playerbot/TravelMgr.h
+index eebdce3..2408fdd 100644
+--- a/playerbot/TravelMgr.h
++++ b/playerbot/TravelMgr.h
+@@ -86,6 +86,7 @@ namespace ai
+ 			{"can fight equal", false},
+ 			{"can fight elite", false},
+ 			{"can fight boss", false},
++			{"in dungeon run", false},
+ 		};
+ 
+ 		std::unordered_map<std::string, uint8> uint8Values =
+diff --git a/playerbot/strategy/actions/ActionContext.h b/playerbot/strategy/actions/ActionContext.h
+index b6982de..84d22fc 100644
+--- a/playerbot/strategy/actions/ActionContext.h
++++ b/playerbot/strategy/actions/ActionContext.h
+@@ -10,6 +10,7 @@
+ #include "LookForGroupAction.h"
+ #include "MakeBandageAction.h"
+ #include "BgQueueLeaveAction.h"
++#include "DungeonRunAction.h"
+ #include "EmoteAction.h"
+ #include "AddLootAction.h"
+ #include "LootAction.h"
+@@ -450,6 +451,7 @@ namespace ai
+             creators["end group quest"] = [](PlayerbotAI* ai) { return new EndGroupQuestAction(ai); };
+             creators["make bandage"] = [](PlayerbotAI* ai) { return new MakeBandageAction(ai); };
+             creators["bg queue leave"] = [](PlayerbotAI* ai) { return new BgQueueLeaveAction(ai); };
++            creators["dungeon run"] = [](PlayerbotAI* ai) { return new DungeonRunAction(ai); };
+ 
+ #ifdef GenerateBotTests
+             creators["test"] = [](PlayerbotAI* ai) { return new TestAction(ai); };
+diff --git a/playerbot/strategy/actions/ChooseTravelTargetAction.cpp b/playerbot/strategy/actions/ChooseTravelTargetAction.cpp
+index 6331708..4502dd6 100644
+--- a/playerbot/strategy/actions/ChooseTravelTargetAction.cpp
++++ b/playerbot/strategy/actions/ChooseTravelTargetAction.cpp
+@@ -4,6 +4,7 @@
+ #include "playerbot/strategy/values/EnemyGuards.h"
+ #include "playerbot/strategy/values/QuestFlow.h"
+ #include "playerbot/strategy/values/Archetypes.h"
++#include "playerbot/strategy/values/DungeonRun.h"
+ #include "playerbot/LootObjectStack.h"
+ #include "ChooseTravelTargetAction.h"
+ #include "playerbot/PlayerbotAIConfig.h"
+@@ -831,6 +832,9 @@ bool RequestTravelTargetAction::isAllowed() const
+         else
+             return Archetypes::Roll(bot, Archetypes::ActivityOf(actionPurpose), 89);
+     case TravelDestinationPurpose::Boss:
++        // kalimdor: on a dungeon run, every time (Kamino 151).
++        if (DungeonRun::Active(bot))
++            return true;
+         return Archetypes::Roll(bot, Archetypes::ActivityOf(actionPurpose), 49);
+     case TravelDestinationPurpose::Explore:
+         return Archetypes::Roll(bot, Archetypes::ActivityOf(actionPurpose), 9);
+diff --git a/playerbot/strategy/actions/DungeonRunAction.cpp b/playerbot/strategy/actions/DungeonRunAction.cpp
+new file mode 100644
+index 0000000..b70d5d4
+--- /dev/null
++++ b/playerbot/strategy/actions/DungeonRunAction.cpp
+@@ -0,0 +1,76 @@
++#include "playerbot/playerbot.h"
++#include "DungeonRunAction.h"
++#include "playerbot/strategy/values/DungeonRun.h"
++#include "playerbot/TravelMgr.h"
++
++using namespace ai;
++
++bool DungeonRunAction::Execute(Event& event)
++{
++    Group* group = bot->GetGroup();
++    if (!group)
++        return false;
++
++    int const instance = int(bot->GetInstanceId());
++    MapEntry const* mapEntry = sMapStore.LookupEntry(bot->GetMapId());
++    char const* place = mapEntry ? mapEntry->name[0] : "a dungeon";
++    // A map with wings: the run's wing and its bosses only.
++    int const wing = AI_VALUE2(int, "manual int", "run instance") == instance ? AI_VALUE2(int, "manual int", "run wing") : int(DungeonRun::RunWing(bot));
++    if (char const* wingName = DungeonRun::WingName(wing))
++        place = wingName;
++    // Set first: the run's bosses are read in its wing.
++    if (AI_VALUE2(int, "manual int", "run instance") != instance)
++        SET_AI_VALUE2(int, "manual int", "run wing", wing);
++    uint32 const bosses = DungeonRun::Fights(DungeonRun::RunBosses(bot));
++    char const* team = bot->GetTeam() == ALLIANCE ? "A" : "H";
++
++    if (AI_VALUE2(int, "manual int", "run instance") != instance)
++    {
++        SET_AI_VALUE2(int, "manual int", "run instance", instance);
++        SET_AI_VALUE2(int, "manual int", "run wing", wing);
++        SET_AI_VALUE2(int, "manual int", "run wipes", 0);
++        SET_AI_VALUE2(bool, "manual bool", "run wiped", false);
++        // Its next destination is chosen now, among the bosses.
++        AI_VALUE(TravelTarget*, "travel target")->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
++        sLog.outString("Bot #%d %s:%d <%s>: starts a run in %s with %u - %u bosses, %u alive", bot->GetGUIDLow(), team, bot->GetLevel(),
++            bot->GetName(), place, group->GetMembersCount(), bosses, DungeonRun::Fights(DungeonRun::AliveBosses(bot)));
++        return true;
++    }
++
++    // A wipe: every member in the dungeon dead at once.
++    uint32 here = 0, dead = 0;
++    for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
++    {
++        Player* member = ref->getSource();
++        if (!member || member->GetMapId() != bot->GetMapId() || member->GetInstanceId() != bot->GetInstanceId())
++            continue;
++        ++here;
++        if (!member->IsAlive())
++            ++dead;
++    }
++    bool const wiped = here && dead == here;
++    int wipes = AI_VALUE2(int, "manual int", "run wipes");
++    if (wiped && !AI_VALUE2(bool, "manual bool", "run wiped"))
++    {
++        SET_AI_VALUE2(int, "manual int", "run wipes", ++wipes);
++        sLog.outString("Bot #%d %s:%d <%s>: wipe %d in %s (it gives up after %u)", bot->GetGUIDLow(), team, bot->GetLevel(), bot->GetName(),
++            wipes, place, bosses);
++    }
++    SET_AI_VALUE2(bool, "manual bool", "run wiped", wiped);
++
++    std::vector<DungeonRun::Boss> const alive = DungeonRun::AliveBosses(bot);
++    if (!alive.empty() && wipes <= int(bosses))
++        return false;
++
++    if (alive.empty())
++        sLog.outString("Bot #%d %s:%d <%s>: clears %s - all %u bosses dead, %d wipes", bot->GetGUIDLow(), team, bot->GetLevel(), bot->GetName(),
++            place, bosses, wipes);
++    else
++        sLog.outString("Bot #%d %s:%d <%s>: gives up %s after %d wipes - %u of %u bosses left", bot->GetGUIDLow(), team, bot->GetLevel(),
++            bot->GetName(), place, wipes, DungeonRun::Fights(alive), bosses);
++    SET_AI_VALUE2(int, "manual int", "run instance", 0);
++    SET_AI_VALUE2(int, "manual int", "run done instance", instance);
++    SET_AI_VALUE2(int, "manual int", "run done wing", wing);
++    AI_VALUE(TravelTarget*, "travel target")->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
++    return true;
++}
+diff --git a/playerbot/strategy/actions/DungeonRunAction.h b/playerbot/strategy/actions/DungeonRunAction.h
+new file mode 100644
+index 0000000..5cff923
+--- /dev/null
++++ b/playerbot/strategy/actions/DungeonRunAction.h
+@@ -0,0 +1,15 @@
++#pragma once
++#include "playerbot/strategy/Action.h"
++
++namespace ai
++{
++    // kalimdor: the leader's dungeon run - started on entering, wipes
++    // counted, ended once no boss lives or it has wiped more times than the
++    // dungeon has bosses (owner, 2026-11-10; values/DungeonRun.h; Kamino 151).
++    class DungeonRunAction : public Action
++    {
++    public:
++        DungeonRunAction(PlayerbotAI* ai) : Action(ai, "dungeon run") {}
++        virtual bool Execute(Event& event) override;
++    };
++}
+diff --git a/playerbot/strategy/actions/LeaveGroupAction.cpp b/playerbot/strategy/actions/LeaveGroupAction.cpp
+index 0b2405e..dcf3abd 100644
+--- a/playerbot/strategy/actions/LeaveGroupAction.cpp
++++ b/playerbot/strategy/actions/LeaveGroupAction.cpp
+@@ -2,6 +2,7 @@
+ #include "playerbot/playerbot.h"
+ #include "LeaveGroupAction.h"
+ #include "playerbot/strategy/values/GroupQuests.h"
++#include "playerbot/strategy/values/DungeonRun.h"
+ 
+ namespace ai
+ {
+@@ -74,8 +75,14 @@ namespace ai
+                 return false;
+         }
+         // kalimdor: in the group for a group quest it has not finished, it
+-        // stays - only too many deaths still send it away (Kamino 151).
+-        if (GroupQuests::Holds(bot) && AI_VALUE(uint32, "death count") <= 4)
++        // stays, however often it dies - a member's death is not a wipe;
++        // only a dungeon run counts wipes, and ends (owner, 2026-11-10;
++        // Kamino 151).
++        if (GroupQuests::Holds(bot))
++            return false;
++        // On a dungeon run, however many deaths - the run's wipe count ends
++        // it (owner, 2026-11-10; values/DungeonRun.h).
++        if (DungeonRun::Active(bot))
+             return false;
+ 
+         if (!sPlayerbotAIConfig.randomBotGroupNearby)
+diff --git a/playerbot/strategy/actions/LookForGroupAction.cpp b/playerbot/strategy/actions/LookForGroupAction.cpp
+index 405b907..9f8a83f 100644
+--- a/playerbot/strategy/actions/LookForGroupAction.cpp
++++ b/playerbot/strategy/actions/LookForGroupAction.cpp
+@@ -72,6 +72,26 @@ namespace
+     }
+ }
+ 
++// Repairs at a repairer in sight, if any, paying as usual: a group repairs
++// before it sets off - where groups form, by flight masters, repairers are
++// close - and never travels away to repair (owner, 2026-11-10).
++static void RepairNearby(Player* member)
++{
++    if (member->GetMoney() == 0)
++        return;
++    std::list<ObjectGuid> npcs = member->GetPlayerbotAI()->GetAiObjectContext()->GetValue<std::list<ObjectGuid>>("nearest npcs")->Get();
++    for (ObjectGuid const& guid : npcs)
++    {
++        Creature* npc = member->GetMap()->GetCreature(guid);
++        if (!npc || !npc->HasFlag(UNIT_NPC_FLAGS, UNIT_NPC_FLAG_REPAIR) || npc->IsEnemy(member))
++            continue;
++        if (uint32 const cost = member->DurabilityRepairAll(true, member->GetReputationPriceDiscount(npc)))
++            sLog.outString("Bot #%d %s:%d <%s>: repairs at %s before setting off (%u copper)", member->GetGUIDLow(),
++                member->GetTeam() == ALLIANCE ? "A" : "H", member->GetLevel(), member->GetName(), npc->GetName(), cost);
++        return;
++    }
++}
++
+ bool GoGroupQuestAction::Execute(Event& event)
+ {
+     Quest const* quest = GroupQuests::Ready(bot);
+@@ -85,6 +105,7 @@ bool GoGroupQuestAction::Execute(Event& event)
+         Player* member = ref->getSource();
+         if (!member || !member->GetPlayerbotAI() || member->GetPlayerbotAI()->IsRealPlayer())
+             continue;
++        RepairNearby(member);
+         SetGroupQuestFocus(member, quest->GetQuestId());
+         ++set;
+     }
+diff --git a/playerbot/strategy/actions/SayAction.cpp b/playerbot/strategy/actions/SayAction.cpp
+index 13de02d..191c435 100644
+--- a/playerbot/strategy/actions/SayAction.cpp
++++ b/playerbot/strategy/actions/SayAction.cpp
+@@ -1,6 +1,7 @@
+ 
+ #include "playerbot/playerbot.h"
+ #include "playerbot/strategy/values/GroupQuests.h"
++#include "playerbot/TravelMgr.h"
+ #include "SayAction.h"
+ #include "playerbot/PlayerbotTextMgr.h"
+ #include "Chat/ChannelMgr.h"
+@@ -959,6 +960,12 @@ bool ChatReplyAction::HandleLFGQuestsReply(Player* bot, ChatChannelSource chatCh
+                 // kalimdor: it joins for this quest - it stays while that is
+                 // unfinished (GroupQuests::Holds; Kamino 151).
+                 bot->GetPlayerbotAI()->GetAiObjectContext()->GetValue<int>("manual int", "lfg joined")->Set(int(questId));
++                // Whatever trip either was on - a repairer on another
++                // continent - ends: the group waits together (owner,
++                // 2026-11-10; no new upkeep trips while it holds, see
++                // TravelActionMultiplier).
++                bot->GetPlayerbotAI()->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get()->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
++                announcerAi->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get()->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
+                 sLog.outString("Bot #%d %s:%d <%s>: joins %s's group for %s (%u of %u, %s)", bot->GetGUIDLow(),
+                     bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), announcer->GetName(),
+                     quest->GetTitle().c_str(), GroupQuests::GroupSize(announcer), GroupQuests::WantedSize(quest), GroupQuests::RoleName(bot));
+diff --git a/playerbot/strategy/generic/TravelStrategy.cpp b/playerbot/strategy/generic/TravelStrategy.cpp
+index c8bde62..c1b393d 100644
+--- a/playerbot/strategy/generic/TravelStrategy.cpp
++++ b/playerbot/strategy/generic/TravelStrategy.cpp
+@@ -3,6 +3,8 @@
+ #include "TravelStrategy.h"
+ #include "playerbot/TravelMgr.h"
+ #include "playerbot/strategy/values/Archetypes.h"
++#include "playerbot/strategy/values/DungeonRun.h"
++#include "playerbot/strategy/values/GroupQuests.h"
+ 
+ #include <mutex>
+ 
+@@ -22,19 +24,39 @@ float TravelActionMultiplier::GetValue(Action* action)
+         if (!qualified->getQualifier().empty())
+             name += "::" + qualified->getQualifier();
+ 
++    // kalimdor: on a dungeon run the leader goes for the bosses (and a
++    // group quest it is set on), nothing else; the members follow it and
++    // request nothing (values/DungeonRun.h; Kamino 151).
++    if (name.find("request") == 0 && DungeonRun::Active(ai->GetBot()))
++    {
++        Player* bot = ai->GetBot();
++        if (!bot->GetGroup() || !bot->GetGroup()->IsLeader(bot->GetObjectGuid()))
++            return 0.0f;
++        if (name == "request travel target::" + std::to_string((uint32)TravelDestinationPurpose::Boss) ||
++            name == "request quest travel target" || name == "request quest travel target::turnin")
++            return 1.0f;
++        return 0.0f;
++    }
++
+     // kalimdor: a group set on its group quest goes for that quest only - its
+     // upkeep waits (selling, mail, the auction house, trainers...), repairs
+-    // too unless its gear is near breaking. On the dev server leaders of full
+-    // dungeon groups went from vendor to vendor, and members inside Ragefire
+-    // Chasm left for an auctioneer (Kamino 151).
++    // too: it repaired before setting off (GoGroupQuestAction) and repairs
++    // on the way if it passes a repairer (rpg), but never travels away to
++    // repair - a group waiting for it would break up (owner, 2026-11-10). On
++    // the dev server leaders of full dungeon groups went from vendor to
++    // vendor, members inside Ragefire Chasm left for an auctioneer, and a
++    // Razorfen Kraul leader crossed to Tanaris to repair (Kamino 151).
+     if (name.find("request") == 0 && AI_VALUE2(int, "manual int", "group quest focus") > 0)
+     {
+         if (name == "request quest travel target" || name == "request quest travel target::turnin")
+             return 1.0f;
+-        if (name == "request travel target::" + std::to_string((uint32)TravelDestinationPurpose::Repair) && AI_VALUE(uint8, "durability") < 30)
+-            return 1.0f;
+         return 0.0f;
+     }
++    // A group still forming for its group quest: no trips away to repair -
++    // a member gone repairing breaks it up while it waits (owner,
++    // 2026-11-10; dev: four members of forming groups went to repair).
++    if (name == "request travel target::" + std::to_string((uint32)TravelDestinationPurpose::Repair) && GroupQuests::Holds(bot))
++        return 0.0f;
+ 
+     if (hasTarget && name.find("request") == 0)
+     {
+@@ -197,6 +219,12 @@ void TravelStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
+         "group quest over",
+         NextAction::array(0, new NextAction("end group quest", 7.0f), NULL)));
+ 
++    // kalimdor: a group in a dungeon clears it, or gives up after more wipes
++    // than it has bosses (values/DungeonRun.h; Kamino 151).
++    triggers.push_back(new TriggerNode(
++        "dungeon run",
++        NextAction::array(0, new NextAction("dungeon run", 7.0f), NULL)));
++
+     // kalimdor: first aid levelled like a profession - bandages from the
+     // cloth in its bags, one a minute at most, a pause like eating
+     // (actions/MakeBandageAction.h; Kamino 257).
+diff --git a/playerbot/strategy/triggers/DungeonRunTrigger.cpp b/playerbot/strategy/triggers/DungeonRunTrigger.cpp
+new file mode 100644
+index 0000000..952e9d4
+--- /dev/null
++++ b/playerbot/strategy/triggers/DungeonRunTrigger.cpp
+@@ -0,0 +1,20 @@
++#include "playerbot/playerbot.h"
++#include "DungeonRunTrigger.h"
++#include "playerbot/strategy/values/DungeonRun.h"
++
++using namespace ai;
++
++bool DungeonRunTrigger::IsActive()
++{
++    if (ai->IsRealPlayer() || !bot->GetGroup() || !bot->GetGroup()->IsLeader(bot->GetObjectGuid()))
++        return false;
++    if (!bot->GetMap()->IsDungeon() || bot->GetMap()->IsRaid())
++        return false;
++    int const instance = int(bot->GetInstanceId());
++    if (AI_VALUE2(int, "manual int", "run instance") == instance)
++        return true;
++    // Done here: this instance, and on a map with wings this wing.
++    if (AI_VALUE2(int, "manual int", "run done instance") == instance && AI_VALUE2(int, "manual int", "run done wing") == int(DungeonRun::RunWing(bot)))
++        return false;
++    return !DungeonRun::BossesOf(bot->GetMapId()).empty();
++}
+diff --git a/playerbot/strategy/triggers/DungeonRunTrigger.h b/playerbot/strategy/triggers/DungeonRunTrigger.h
+new file mode 100644
+index 0000000..d23e815
+--- /dev/null
++++ b/playerbot/strategy/triggers/DungeonRunTrigger.h
+@@ -0,0 +1,15 @@
++#pragma once
++#include "playerbot/strategy/Trigger.h"
++
++namespace ai
++{
++    // kalimdor: the leader of a group of bots in a dungeon - its run to start,
++    // or to keep: wipes counted, its end decided (values/DungeonRun.h; Kamino
++    // 151).
++    class DungeonRunTrigger : public Trigger
++    {
++    public:
++        DungeonRunTrigger(PlayerbotAI* ai) : Trigger(ai, "dungeon run", 5) {}
++        virtual bool IsActive() override;
++    };
++}
+diff --git a/playerbot/strategy/triggers/TriggerContext.h b/playerbot/strategy/triggers/TriggerContext.h
+index ff872a2..bac004f 100644
+--- a/playerbot/strategy/triggers/TriggerContext.h
++++ b/playerbot/strategy/triggers/TriggerContext.h
+@@ -10,6 +10,7 @@
+ #include "GroupQuestPendingTrigger.h"
+ #include "MakeBandageTrigger.h"
+ #include "BgQueueStaleTrigger.h"
++#include "DungeonRunTrigger.h"
+ #include "GenericTriggers.h"
+ #include "LootTriggers.h"
+ #include "GenericTriggers.h"
+@@ -104,6 +105,7 @@ namespace ai
+             creators["group quest over"] = [](PlayerbotAI* ai) { return new GroupQuestOverTrigger(ai); };
+             creators["can make bandage"] = [](PlayerbotAI* ai) { return new MakeBandageTrigger(ai); };
+             creators["bg queue stale"] = [](PlayerbotAI* ai) { return new BgQueueStaleTrigger(ai); };
++            creators["dungeon run"] = [](PlayerbotAI* ai) { return new DungeonRunTrigger(ai); };
+             creators["enemy player near"] = [](PlayerbotAI* ai) { return new EnemyPlayerNear(ai); };
+ 
+             creators["combat start"] = [](PlayerbotAI* ai) { return new CombatStartTrigger(ai); };
+diff --git a/playerbot/strategy/values/DungeonRun.cpp b/playerbot/strategy/values/DungeonRun.cpp
+new file mode 100644
+index 0000000..bdfa340
+--- /dev/null
++++ b/playerbot/strategy/values/DungeonRun.cpp
+@@ -0,0 +1,284 @@
++#include "playerbot/playerbot.h"
++#include "DungeonRun.h"
++#include "playerbot/WorldPosition.h"
++#include "Maps/MapPersistentStateMgr.h"
++#include "Maps/SpawnGroup.h"
++#include "Maps/SpawnManager.h"
++#include "AI/EventAI/CreatureEventAIMgr.h"
++#include "Pools/PoolManager.h"
++#include "GameEvents/GameEventMgr.h"
++
++#include <map>
++#include <mutex>
++#include <set>
++
++using namespace ai;
++
++uint32_t DungeonRun::WingAt(uint32_t mapId, float x, float y, float z)
++{
++    switch (mapId)
++    {
++        case 229: // Blackrock Spire: the upper spire is above (Emberseer 97, Wyrmthalak 91).
++            return z >= 95.0f ? WING_UPPER_SPIRE : WING_LOWER_SPIRE;
++        case 429: // Dire Maul: East to the south, West to the north-west, North to the east.
++            if (y < -100.0f)
++                return WING_DM_EAST;
++            return (y > 100.0f && x < 300.0f) ? WING_DM_WEST : WING_DM_NORTH;
++        case 189: // Scarlet Monastery: Graveyard and Cathedral to the north, Library and Armory to the south.
++            if (y < 0.0f)
++                return x < 1000.0f ? WING_SM_LIBRARY : WING_SM_ARMORY;
++            return x < 1400.0f ? WING_SM_CATHEDRAL : WING_SM_GRAVEYARD;
++        case 329: // Stratholme: the Undead side east and south (the Service Entrance), the Live side the rest (the Main Gate).
++            return (x >= 3800.0f || y < -3580.0f) ? WING_STRAT_UNDEAD : WING_STRAT_LIVE;
++        case 349: // Maraudon: Orange to the east, Purple south of it, the Inner part (Earth Song Falls) the rest.
++            if (x >= 900.0f)
++                return WING_MARA_ORANGE;
++            return (x >= 600.0f && y < 0.0f) ? WING_MARA_PURPLE : WING_MARA_INNER;
++        default:
++            return WING_NONE;
++    }
++}
++
++uint32_t DungeonRun::RunWing(Player* leader)
++{
++    if (leader->GetMapId() == 229)
++        return leader->GetGroup() && leader->GetGroup()->GetMembersCount() > 5 ? WING_UPPER_SPIRE : WING_LOWER_SPIRE;
++    return WingAt(leader->GetMapId(), leader->GetPositionX(), leader->GetPositionY(), leader->GetPositionZ());
++}
++
++char const* DungeonRun::WingName(uint32_t wing)
++{
++    switch (wing)
++    {
++        case WING_LOWER_SPIRE: return "Lower Blackrock Spire";
++        case WING_UPPER_SPIRE: return "Upper Blackrock Spire";
++        case WING_DM_EAST: return "Dire Maul East";
++        case WING_DM_WEST: return "Dire Maul West";
++        case WING_DM_NORTH: return "Dire Maul North";
++        case WING_SM_GRAVEYARD: return "Scarlet Monastery Graveyard";
++        case WING_SM_LIBRARY: return "Scarlet Monastery Library";
++        case WING_SM_ARMORY: return "Scarlet Monastery Armory";
++        case WING_SM_CATHEDRAL: return "Scarlet Monastery Cathedral";
++        case WING_STRAT_LIVE: return "Stratholme Live";
++        case WING_STRAT_UNDEAD: return "Stratholme Undead";
++        case WING_MARA_ORANGE: return "Maraudon Orange";
++        case WING_MARA_PURPLE: return "Maraudon Purple";
++        case WING_MARA_INNER: return "Maraudon Inner";
++        default: return nullptr;
++    }
++}
++
++// The boss rule, corrected by name (owner, 2026-11-10; the boss list in
++// Kamino, dungeons-raids-bosses-2026-11-10.md). Trash it takes for bosses -
++// single-spawn elites with trash loot, prisoners, pets:
++static std::set<uint32> const namedTrash =
++{
++    657, 1732, 4418,         // Deadmines: Defias Pirate, Defias Squallshaper, Defias Wizard
++    3849, 3850, 3854, 10000, // Shadowfang Keep: Deathstalker Adamant, Sorcerer Ashcrombe (prisoners), Shadowfang Wolfguard, Arugal (the entrance scene)
++    4442, 4520,              // Razorfen Kraul: Razorfen Defender, Razorfen Geomancer
++    6392,                    // Gnomeregan: Holdout Medic
++    4297,                    // Scarlet Monastery Armory: Scarlet Conjuror
++    4850, 4851, 4853, 4863,  // Uldaman: Stonevault Cave Lurker, Rockchewer, Geomancer, Jadespine Basilisk
++    7274,                    // Zul'Farrak: Sandfury Executioner (carries the cage key)
++    5277, 5280, 5283, 5708,  // Sunken Temple: Nightmare Scalebane, Wyrmkin, Wanderer, Spawn of Hakkar
++    14308, 14349,            // Dire Maul: Ferra (Illyanna's pet), Pimgib (Lethtendris's imp)
++};
++// And bosses it misses - several spawns, or not hostile until engaged:
++static std::set<uint32> const namedBosses =
++{
++    1663, 1696,              // Stormwind Stockade: Dextren Ward, Targorr the Dread
++    7271,                    // Zul'Farrak: Witch Doctor Zum'rah
++    11486,                   // Dire Maul West: Prince Tortheldrin
++};
++
++std::vector<DungeonRun::Boss> const& DungeonRun::BossesOf(uint32_t mapId)
++{
++    static std::mutex lock;
++    static std::map<uint32_t, std::vector<Boss>> cache;
++    std::lock_guard<std::mutex> guard(lock);
++    auto found = cache.find(mapId);
++    if (found != cache.end())
++        return found->second;
++
++    std::vector<Boss>& bosses = cache[mapId];
++    MapEntry const* mapEntry = sMapStore.LookupEntry(mapId);
++    if (!mapEntry || !mapEntry->IsNonRaidDungeon())
++        return bosses;
++
++    // Spawns on this map, by entry: fixed ones, and points with a random
++    // creature (each of its creatures counted once).
++    std::map<uint32_t, std::vector<uint32_t>> spawns;
++    for (CreatureDataPair const* pair : WorldPosition().getCreaturesNear())
++    {
++        if (pair->second.mapid != mapId)
++            continue;
++        if (pair->second.id)
++            spawns[pair->second.id].push_back(pair->first);
++        else if (std::vector<uint32> const* entries = sObjectMgr.GetAllRandomCreatureEntries(pair->first))
++            for (uint32 entry : *entries)
++                spawns[entry].push_back(pair->first);
++    }
++
++    // A creature its script turns into one not hostile to players is an
++    // NPC in disguise, not a boss - the Scarshield Infiltrator, who becomes
++    // Vaelan as a player comes near (owner, 2026-11-10).
++    auto inDisguise = [](uint32 entry)
++    {
++        auto const& events = sEventAIMgr.GetCreatureEventEntryAIMap();
++        auto found = events ? events->find(entry) : CreatureEventAI_Event_Map::const_iterator();
++        if (!events || found == events->end())
++            return false;
++        for (CreatureEventAI_Event const& event : found->second)
++            for (CreatureEventAI_Action const& action : event.action)
++            {
++                if (action.type != ACTION_T_UPDATE_TEMPLATE)
++                    continue;
++                CreatureInfo const* into = ObjectMgr::GetCreatureTemplate(action.update_template.creatureId);
++                FactionTemplateEntry const* faction = into ? sFactionTemplateStore.LookupEntry(into->Faction) : nullptr;
++                if (faction && !faction->IsHostileToPlayers())
++                    return true;
++            }
++        return false;
++    };
++
++    auto isBoss = [&inDisguise](uint32 entry, size_t count)
++    {
++        CreatureInfo const* info = ObjectMgr::GetCreatureTemplate(entry);
++        if (namedBosses.count(entry))
++            return true;
++        return info && !namedTrash.count(entry) && !inDisguise(entry) && (info->Rank == CREATURE_ELITE_RARE || info->Rank == CREATURE_ELITE_RAREELITE || info->Rank == CREATURE_ELITE_WORLDBOSS ||
++            (info->Rank == CREATURE_ELITE_ELITE && count == 1));
++    };
++
++    auto wingOf = [mapId](uint32 guid)
++    {
++        CreatureData const* data = sObjectMgr.GetCreatureData(guid);
++        return data ? WingAt(mapId, data->posX, data->posY, data->posZ) : uint32_t(WING_NONE);
++    };
++
++    for (auto const& [entry, guids] : spawns)
++        if (isBoss(entry, guids.size()))
++            for (uint32_t guid : guids)
++                // Magistrate Barthilas stands at the Undead side's gate but
++                // drops its key, the Key to the City: the Live side's boss
++                // (owner, 2026-11-10).
++                bosses.push_back({ entry, guid, 0, entry == 10435 ? uint32_t(WING_STRAT_LIVE) : wingOf(guid) });
++
++    for (Boss& boss : bosses)
++        if (boss.guid)
++            boss.event = sGameEventMgr.GetGameEventId<Creature>(boss.guid);
++
++    // Spawn groups on this map: a creature the group places at most once.
++    if (auto container = sObjectMgr.GetSpawnGroupContainer())
++        for (auto const& [id, group] : container->spawnGroupMap)
++        {
++            if (group.Type != SPAWN_GROUP_CREATURE || group.DbGuids.empty())
++                continue;
++            CreatureData const* first = sObjectMgr.GetCreatureData(group.DbGuids.front().DbGuid);
++            if (!first || first->mapid != mapId)
++                continue;
++            for (SpawnGroupRandomEntry const& random : group.RandomEntries)
++                if (random.MaxCount == 1 && spawns.find(random.Entry) == spawns.end() && isBoss(random.Entry, 1))
++                    bosses.push_back({ random.Entry, 0, id, wingOf(group.DbGuids.front().DbGuid) });
++        }
++    return bosses;
++}
++
++Player* DungeonRun::Leader(Player* bot)
++{
++    Group* group = bot->GetGroup();
++    if (!group || !bot->GetMap()->IsDungeon() || bot->GetMap()->IsRaid())
++        return nullptr;
++    Player* leader = sObjectMgr.GetPlayer(group->GetLeaderGuid());
++    if (!leader || !leader->GetPlayerbotAI() || leader->GetMapId() != bot->GetMapId() || leader->GetInstanceId() != bot->GetInstanceId())
++        return nullptr;
++    return leader;
++}
++
++bool DungeonRun::Active(Player* bot)
++{
++    Player* leader = Leader(bot);
++    if (!leader)
++        return false;
++    AiObjectContext* context = leader->GetPlayerbotAI()->GetAiObjectContext();
++    return context->GetValue<int>("manual int", "run instance")->Get() == int(leader->GetInstanceId());
++}
++
++std::vector<DungeonRun::Boss> DungeonRun::RunBosses(Player* bot)
++{
++    std::vector<Boss> bosses;
++    Map* map = bot->GetMap();
++    MapPersistentState* state = map->GetPersistentState();
++    uint32_t wing = WING_NONE;
++    if (Player* leader = Leader(bot))
++        wing = uint32_t(leader->GetPlayerbotAI()->GetAiObjectContext()->GetValue<int>("manual int", "run wing")->Get());
++    for (Boss boss : BossesOf(bot->GetMapId()))
++    {
++        if (wing && boss.wing != wing)
++            continue;
++        // A spawn group's boss: the point this instance chose for it, if
++        // known yet.
++        if (boss.group)
++            if (SpawnGroup* group = map->GetSpawnManager().GetSpawnGroup(boss.group))
++                for (SpawnGroupDbGuids const& point : group->GetGroupEntry().DbGuids)
++                    if (group->GetGuidEntry(point.DbGuid) == boss.entry)
++                        boss.guid = point.DbGuid;
++        // A pooled spawn this instance did not choose is not there.
++        if (boss.guid && !boss.group && state && sPoolMgr.IsPartOfAPool<Creature>(boss.guid) && !state->IsSpawnedPoolObject<Creature>(boss.guid))
++            continue;
++        // An event's spawn while it is off (or a spawn it removes, while on).
++        if ((boss.event > 0 && !sGameEventMgr.IsActiveEvent(boss.event)) || (boss.event < 0 && sGameEventMgr.IsActiveEvent(-boss.event)))
++            continue;
++        if (!namedBosses.count(boss.entry) && !GuidPosition(bot).IsHostileTo(GuidPosition(HIGHGUID_UNIT, boss.entry), bot->GetInstanceId()))
++            continue;
++        bosses.push_back(boss);
++    }
++    return bosses;
++}
++
++std::vector<DungeonRun::Boss> DungeonRun::AliveBosses(Player* bot)
++{
++    std::vector<Boss> alive;
++    MapPersistentState* state = bot->GetMap()->GetPersistentState();
++    time_t const now = time(nullptr);
++    for (Boss const& boss : RunBosses(bot))
++        if (!boss.guid || !state || state->GetCreatureRespawnTime(boss.guid) <= now)
++            alive.push_back(boss);
++    return alive;
++}
++
++bool DungeonRun::IsAliveBoss(Player* bot, uint32_t entry)
++{
++    for (Boss const& boss : AliveBosses(bot))
++        if (boss.entry == entry)
++            return true;
++    return false;
++}
++
++uint32_t DungeonRun::Fights(std::vector<Boss> const& bosses)
++{
++    std::set<uint64_t> fights;
++    std::map<uint16, std::set<uint32_t>> pools;
++    for (Boss const& boss : bosses)
++    {
++        if (boss.guid)
++            if (uint16 pool = sPoolMgr.IsPartOfAPool<Creature>(boss.guid))
++            {
++                pools[pool].insert(boss.guid);
++                continue;
++            }
++        fights.insert(boss.guid ? uint64_t(boss.guid) : (uint64_t(1) << 32) | boss.entry);
++    }
++    uint32_t count = uint32_t(fights.size());
++    for (auto const& [pool, guids] : pools)
++    {
++        uint32_t const limit = sPoolMgr.GetPoolTemplate(pool).MaxLimit;
++        count += limit ? std::min<uint32_t>(limit, guids.size()) : uint32_t(guids.size());
++    }
++    return count;
++}
++
++bool InDungeonRunValue::Calculate()
++{
++    return DungeonRun::Active(bot);
++}
+diff --git a/playerbot/strategy/values/DungeonRun.h b/playerbot/strategy/values/DungeonRun.h
+new file mode 100644
+index 0000000..cd1ddaa
+--- /dev/null
++++ b/playerbot/strategy/values/DungeonRun.h
+@@ -0,0 +1,82 @@
++#pragma once
++
++#include <cstdint>
++#include <vector>
++
++// kalimdor: a group of bots inside a dungeon is on a run (owner, 2026-11-10;
++// Kamino 151, step 1b): it quits only once it has killed all the dungeon's
++// bosses - whatever brought it there, a quest or a boss - or when it has
++// wiped more times than the dungeon has bosses. Meanwhile its leader goes
++// from boss to boss, its errands wait and its members stay.
++// The bosses: the dungeon's unique elites (one spawn on its map) and its
++// rares and world bosses - upstream's own measure of a boss (TravelValues.cpp)
++// - hostile to the group. Spawns count from creature rows, from points with a
++// random creature (creature_spawn_entry) and from spawn groups (at most one
++// of it in a group) - Lady Anacondra and Mutanus are placed by spawn groups
++// only (owner, 2026-11-10). A boss is dead while its instance holds a respawn
++// time for it (MapPersistentState), which also holds where its part of the
++// map is not loaded.
++// Wings: Blackrock Spire, Dire Maul, Scarlet Monastery, Stratholme and
++// Maraudon hold independent wings in one map (owner, 2026-11-10) - a run counts its own wing's bosses only. Dire Maul's
++// wing is where its leader stands as the run starts (each entrance is in its
++// wing), and Scarlet Monastery's, Stratholme's and Maraudon's the same -
++// Maraudon's Inner part, reached through either wing, starts its own run
++// once the wing's run ends; Blackrock Spire's one entrance is in the lower spire, so a group
++// over 5 is an upper spire run (its 10-player quests), else lower.
++
++#include "playerbot/strategy/Value.h"
++
++class Player;
++
++namespace ai
++{
++    // "in dungeon run": the bot's group is on a run in its instance - read
++    // into PlayerTravelInfo, for travel's boss destinations.
++    class InDungeonRunValue : public BoolCalculatedValue
++    {
++    public:
++        InDungeonRunValue(PlayerbotAI* ai) : BoolCalculatedValue(ai, "in dungeon run", 2) {}
++        virtual bool Calculate() override;
++    };
++
++    class DungeonRun
++    {
++    public:
++        // guid: its spawn point; group: the spawn group that places it
++        // (guid 0 - the point is the instance's choice), or 0.
++        // event: the game event it spawns in (> 0) or is gone in (< 0), or
++        // 0 - the Scourge Invasion's instance bosses spawn in its event only.
++        struct Boss { uint32_t entry; uint32_t guid; uint32_t group; uint32_t wing; int16_t event = 0; };
++
++        enum Wing : uint32_t { WING_NONE = 0, WING_LOWER_SPIRE, WING_UPPER_SPIRE, WING_DM_EAST, WING_DM_WEST, WING_DM_NORTH,
++            WING_SM_GRAVEYARD, WING_SM_LIBRARY, WING_SM_ARMORY, WING_SM_CATHEDRAL,
++            WING_STRAT_LIVE, WING_STRAT_UNDEAD, WING_MARA_ORANGE, WING_MARA_PURPLE, WING_MARA_INNER };
++        // The wing a position on the map is in, WING_NONE where the map has
++        // none. The bounds are from the bosses' and entrances' positions.
++        static uint32_t WingAt(uint32_t mapId, float x, float y, float z);
++        // The wing a run the leader starts now is in.
++        static uint32_t RunWing(Player* leader);
++        static char const* WingName(uint32_t wing);
++
++        // The dungeon's bosses (cached per map); none outside a 5-player
++        // dungeon.
++        static std::vector<Boss> const& BossesOf(uint32_t mapId);
++        // The leader's run in this instance, or the bot's leader's.
++        static Player* Leader(Player* bot);
++        static bool Active(Player* bot);
++        // The run's bosses in the bot's instance: in its run's wing, if the
++        // map has wings; hostile to it - friendly NPCs (prisoners, an event's
++        // cast before it starts) are not fights; there - a pooled spawn this
++        // instance did not choose is not.
++        static std::vector<Boss> RunBosses(Player* bot);
++        // Those still alive.
++        static std::vector<Boss> AliveBosses(Player* bot);
++        static bool IsAliveBoss(Player* bot, uint32_t entry);
++        // How many fights: a point that places one of several bosses at
++        // random is listed once per boss but is one fight, and a pool of
++        // spawns is as many fights as it spawns at once - the Scarlet
++        // Monastery Graveyard's rares: six points, one of three rares each,
++        // one point in a pool of one per instance (owner, 2026-11-10).
++        static uint32_t Fights(std::vector<Boss> const& bosses);
++    };
++}
+diff --git a/playerbot/strategy/values/GroupQuests.cpp b/playerbot/strategy/values/GroupQuests.cpp
+index 14c1d72..4b2802d 100644
+--- a/playerbot/strategy/values/GroupQuests.cpp
++++ b/playerbot/strategy/values/GroupQuests.cpp
+@@ -1,6 +1,7 @@
+ #include "playerbot/playerbot.h"
+ #include "GroupQuests.h"
+ #include "QuestFlow.h"
++#include "DungeonRun.h"
+ #include "Maps/Map.h"
+ 
+ #include <algorithm>
+@@ -70,8 +71,10 @@ uint32_t GroupQuests::WantedSize(Quest const* quest)
+                     InstanceTemplate const* instance = ObjectMgr::GetInstanceTemplate(area->mapid);
+                     return instance && instance->maxPlayers ? instance->maxPlayers : 40;
+                 }
++                // A dungeon's raid quest is for 10 - the upper spire's, the
++                // one dungeon wing for 10 (owner, 2026-11-10).
+                 if (map->IsNonRaidDungeon())
+-                    return 5;
++                    return quest->GetType() == QUEST_TYPE_RAID ? 10 : 5;
+             }
+ 
+     switch (quest->GetType())
+@@ -166,24 +169,40 @@ Quest const* GroupQuests::Ready(Player* bot)
+     return group->GetMembersCount() >= WantedSize(quest) ? quest : nullptr;
+ }
+ 
++// Whose log tells the group quest's state: the group's leader's - it chose
++// the quest; a member helping need not have it (dev, 2026-11-10: three
++// members joined for one quest, the leader set off on another, and they
++// found it over at once, not in their logs).
++static QuestStatus FocusStatus(Player* bot, uint32 questId)
++{
++    if (Group* group = bot->GetGroup())
++        if (Player* leader = sObjectMgr.GetPlayer(group->GetLeaderGuid()))
++            if (leader != bot && leader->GetGroup() == group && leader->GetQuestStatus(questId) == QUEST_STATUS_INCOMPLETE)
++                return QUEST_STATUS_INCOMPLETE;
++    return bot->GetQuestStatus(questId);
++}
++
+ bool GroupQuests::FocusOver(Player* bot)
+ {
+     AiObjectContext* context = bot->GetPlayerbotAI()->GetAiObjectContext();
+     int const questId = context->GetValue<int>("manual int", "group quest focus")->Get();
+     if (questId <= 0)
+         return false;
+-    return !bot->GetGroup() || bot->GetQuestStatus(uint32(questId)) != QUEST_STATUS_INCOMPLETE;
++    return !bot->GetGroup() || FocusStatus(bot, uint32(questId)) != QUEST_STATUS_INCOMPLETE;
+ }
+ 
+ bool GroupQuests::Holds(Player* bot)
+ {
+     if (!bot->GetGroup())
+         return false;
++    // On a dungeon run it stays until the run ends (values/DungeonRun.h).
++    if (DungeonRun::Active(bot))
++        return true;
+     AiObjectContext* context = bot->GetPlayerbotAI()->GetAiObjectContext();
+     for (char const* key : { "group quest focus", "lfg joined", "lfg quest" })
+     {
+         int const questId = context->GetValue<int>("manual int", key)->Get();
+-        if (questId > 0 && bot->GetQuestStatus(uint32(questId)) == QUEST_STATUS_INCOMPLETE)
++        if (questId > 0 && FocusStatus(bot, uint32(questId)) == QUEST_STATUS_INCOMPLETE)
+             return true;
+     }
+     return false;
+diff --git a/playerbot/strategy/values/TravelValues.cpp b/playerbot/strategy/values/TravelValues.cpp
+index 9668e64..3414354 100644
+--- a/playerbot/strategy/values/TravelValues.cpp
++++ b/playerbot/strategy/values/TravelValues.cpp
+@@ -1,6 +1,7 @@
+ #include "playerbot/playerbot.h"
+ #include "TravelValues.h"
+ #include "AuctionGoods.h"
++#include "DungeonRun.h"
+ #include "QuestValues.h"
+ #include "SharedValueContext.h"
+ #include "BudgetValues.h"
+@@ -299,6 +300,9 @@ bool NeedTravelPurposeValue::Calculate()
+ 
+         return false;
+     case TravelDestinationPurpose::Boss:
++        // kalimdor: on a dungeon run, while a boss lives (Kamino 151).
++        if (DungeonRun::Active(bot))
++            return !DungeonRun::AliveBosses(bot).empty();
+         return AI_VALUE(bool, "can fight boss");
+     case TravelDestinationPurpose::Mail:
+         return AI_VALUE(bool, "can get mail") && AI_VALUE(bool, "should get mail");
+diff --git a/playerbot/strategy/values/ValueContext.h b/playerbot/strategy/values/ValueContext.h
+index 805ab96..c3aae6c 100644
+--- a/playerbot/strategy/values/ValueContext.h
++++ b/playerbot/strategy/values/ValueContext.h
+@@ -101,6 +101,7 @@
+ #include "DeadValues.h"
+ #include "playerbot/strategy/druid/DruidValues.h"
+ #include "TravelValues.h"
++#include "DungeonRun.h"
+ #include "LootValues.h"
+ #include "GlyphValues.h"
+ #include "StuckValues.h"
+@@ -472,6 +473,7 @@ namespace ai
+             //Travel
+             creators["focus travel target"] = [](PlayerbotAI* ai) { return new FocusTravelTargetValue(ai); };
+             creators["has focus travel target"] = [](PlayerbotAI* ai) { return new HasFocusTravelTargetValue(ai); };
++            creators["in dungeon run"] = [](PlayerbotAI* ai) { return new InDungeonRunValue(ai); };
+ 
+             creators["travel target"] = [](PlayerbotAI* ai) { return new TravelTargetValue(ai); };
+             creators["leader travel target"] = [](PlayerbotAI* ai) { return new LeaderTravelTargetValue(ai); };

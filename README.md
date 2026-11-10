@@ -424,7 +424,7 @@ battleground and bracket (0: its team size). `total`: all bots, server-wide
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries forty-seven changes to playerbots (`templates/patches/playerbots/`)
+teldrassil carries forty-eight changes to playerbots (`templates/patches/playerbots/`)
 and three to the core (`templates/patches/mangos-classic/`), applied before
 every build:
 
@@ -695,6 +695,15 @@ every build:
   less, as the server - unsold items vanish instead of being mailed to a
   random bot - and buys only as its own character (`AhBot.GUID`), if set.
   (Kamino 273, 2026-11-09.)
+- **playerbots 0048:** a group in a dungeon clears it or gives up - it
+  leaves only once all the dungeon's bosses are dead, or after more wipes
+  than it has bosses; its leader goes boss to boss. The bosses are counted
+  with care: trash, prisoners, pets and disguised NPCs out, pools and event
+  spawns only when present, each wing of Blackrock Spire, Dire Maul, Scarlet
+  Monastery, Stratholme and Maraudon its own dungeon. Groups hold together on
+  the way: no repair trips while a group quest holds (they repair as they set
+  off), no leaving over a member's own deaths, members follow the leader's
+  quest. (Kamino 151, 2026-11-10.)
 - **playerbots 0047:** a full group goes for its group quest - the quest as
   every member's travel focus, their errands and upkeep held, members
   staying with it, into the dungeon by its entrance; and a 5-player group
