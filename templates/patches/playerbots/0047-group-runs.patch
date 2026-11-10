@@ -1,0 +1,401 @@
+diff --git a/playerbot/TravelMgr.cpp b/playerbot/TravelMgr.cpp
+index ba6f5fd..6eff1d6 100644
+--- a/playerbot/TravelMgr.cpp
++++ b/playerbot/TravelMgr.cpp
+@@ -168,6 +168,13 @@ bool QuestRelationTravelDestination::IsActive(Player* bot, const PlayerTravelInf
+ 
+     if (GetRelation() == 0)
+     {
++        // kalimdor: the focused quest is already in its log - its giver has
++        // nothing left for it. Group leaders set on their group quest went back
++        // to that quest's giver again and again instead of its objective
++        // ("group or ... can accept quest npc" held for the group; Kamino 151).
++        if (forceThisQuest && bot->GetQuestStatus(GetQuestId()) != QUEST_STATUS_NONE)
++            return false;
++
+         if (!bot->GetMap()->IsContinent() && (GetClosestPoint(bot)->getMapId() != bot->GetMapId())) //This gives issues for bot->CanTakeQuest so stop here.
+             return false;
+ 
+@@ -415,6 +422,19 @@ bool QuestObjectiveTravelDestination::IsActive(Player* bot, const PlayerTravelIn
+                 if (target.GetEntry() == GetEntry() && target.IsCreature() && ai->GetCreature(target) && ai->GetCreature(target)->IsAlive())
+                     return true;
+ 
++            // kalimdor: inside a dungeon a boss is out of sight behind its
++            // corridors though the bot is "in" the destination's area - only
++            // one seen dead is gone; otherwise it goes and finds it. A group
++            // in Ragefire Chasm for Taragaman had no destination once inside
++            // (Kamino 151).
++            if (bot->GetMap()->IsDungeon())
++            {
++                for (auto& target : targets)
++                    if (target.GetEntry() == GetEntry() && target.IsCreature() && ai->GetCreature(target))
++                        return false;
++                return true;
++            }
++
+             return false;
+         }
+     }
+diff --git a/playerbot/strategy/actions/ActionContext.h b/playerbot/strategy/actions/ActionContext.h
+index 9f77ec6..b6982de 100644
+--- a/playerbot/strategy/actions/ActionContext.h
++++ b/playerbot/strategy/actions/ActionContext.h
+@@ -446,6 +446,8 @@ namespace ai
+             creators["rethink quest target"] = [](PlayerbotAI* ai) { return new RethinkQuestTargetAction(ai); };
+             creators["drop gray quests"] = [](PlayerbotAI* ai) { return new DropGrayQuestsAction(ai); };
+             creators["look for group"] = [](PlayerbotAI* ai) { return new LookForGroupAction(ai); };
++            creators["go group quest"] = [](PlayerbotAI* ai) { return new GoGroupQuestAction(ai); };
++            creators["end group quest"] = [](PlayerbotAI* ai) { return new EndGroupQuestAction(ai); };
+             creators["make bandage"] = [](PlayerbotAI* ai) { return new MakeBandageAction(ai); };
+             creators["bg queue leave"] = [](PlayerbotAI* ai) { return new BgQueueLeaveAction(ai); };
+ 
+diff --git a/playerbot/strategy/actions/ChooseTravelTargetAction.cpp b/playerbot/strategy/actions/ChooseTravelTargetAction.cpp
+index 76cd343..6331708 100644
+--- a/playerbot/strategy/actions/ChooseTravelTargetAction.cpp
++++ b/playerbot/strategy/actions/ChooseTravelTargetAction.cpp
+@@ -1413,7 +1413,10 @@ bool RequestQuestTravelTargetAction::Execute(Event& event)
+     // finished quests. While the bot has quests of its zone that still give
+     // XP, only those are fetched - it does not leave them behind.
+     bool const turnInOnly = getQualifier() == "turnin";
+-    bool const localOnly = !turnInOnly && QuestFlow::HasLocalQuests(bot);
++    // kalimdor: not for a group set on its group quest - a dungeon quest is
++    // the dungeon's zone's, never the one the group stands in: it was never
++    // fetched, and the focus left the leader no destination (Kamino 151).
++    bool const localOnly = !turnInOnly && AI_VALUE2(int, "manual int", "group quest focus") <= 0 && QuestFlow::HasLocalQuests(bot);
+     float const logRange = 200000.0f;
+ 
+     std::vector<std::tuple<uint32, int32, float>> destinationFetches;
+diff --git a/playerbot/strategy/actions/LeaveGroupAction.cpp b/playerbot/strategy/actions/LeaveGroupAction.cpp
+index 8cab4eb..0b2405e 100644
+--- a/playerbot/strategy/actions/LeaveGroupAction.cpp
++++ b/playerbot/strategy/actions/LeaveGroupAction.cpp
+@@ -1,6 +1,7 @@
+ 
+ #include "playerbot/playerbot.h"
+ #include "LeaveGroupAction.h"
++#include "playerbot/strategy/values/GroupQuests.h"
+ 
+ namespace ai
+ {
+@@ -72,6 +73,10 @@ namespace ai
+             if (!ai->IsSafe(member))
+                 return false;
+         }
++        // kalimdor: in the group for a group quest it has not finished, it
++        // stays - only too many deaths still send it away (Kamino 151).
++        if (GroupQuests::Holds(bot) && AI_VALUE(uint32, "death count") <= 4)
++            return false;
+ 
+         if (!sPlayerbotAIConfig.randomBotGroupNearby)
+             return true;
+diff --git a/playerbot/strategy/actions/LookForGroupAction.cpp b/playerbot/strategy/actions/LookForGroupAction.cpp
+index 82298f6..405b907 100644
+--- a/playerbot/strategy/actions/LookForGroupAction.cpp
++++ b/playerbot/strategy/actions/LookForGroupAction.cpp
+@@ -1,6 +1,7 @@
+ #include "playerbot/playerbot.h"
+ #include "LookForGroupAction.h"
+ #include "playerbot/strategy/values/GroupQuests.h"
++#include "playerbot/TravelMgr.h"
+ 
+ using namespace ai;
+ 
+@@ -54,3 +55,57 @@ bool LookForGroupAction::Execute(Event& event)
+         bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), quest->GetTitle().c_str(), have, wanted);
+     return true;
+ }
++
++namespace
++{
++    // The quest as the bot's only travel focus, or none (0); its current
++    // destination dropped, so the next one is chosen now.
++    void SetGroupQuestFocus(Player* member, uint32 questId)
++    {
++        AiObjectContext* context = member->GetPlayerbotAI()->GetAiObjectContext();
++        std::set<uint32> focus;
++        if (questId)
++            focus.insert(questId);
++        context->GetValue<std::set<uint32>>("focus travel target")->Set(focus);
++        context->GetValue<int>("manual int", "group quest focus")->Set(int(questId));
++        context->GetValue<TravelTarget*>("travel target")->Get()->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
++    }
++}
++
++bool GoGroupQuestAction::Execute(Event& event)
++{
++    Quest const* quest = GroupQuests::Ready(bot);
++    Group* group = bot->GetGroup();
++    if (!quest || !group)
++        return false;
++
++    uint32 set = 0;
++    for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
++    {
++        Player* member = ref->getSource();
++        if (!member || !member->GetPlayerbotAI() || member->GetPlayerbotAI()->IsRealPlayer())
++            continue;
++        SetGroupQuestFocus(member, quest->GetQuestId());
++        ++set;
++    }
++    // A member leaving later starts a new search, not the old clock's end.
++    SET_AI_VALUE2(time_t, "manual time", "lfg since", time(nullptr));
++
++    sLog.outString("Bot #%d %s:%d <%s>: leads its group to %s (%u of %u members)", bot->GetGUIDLow(),
++        bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), quest->GetTitle().c_str(),
++        group->GetMembersCount(), GroupQuests::WantedSize(quest));
++    return set > 0;
++}
++
++bool EndGroupQuestAction::Execute(Event& event)
++{
++    int const questId = AI_VALUE2(int, "manual int", "group quest focus");
++    if (questId <= 0)
++        return false;
++    Quest const* quest = sObjectMgr.GetQuestTemplate(uint32(questId));
++    sLog.outString("Bot #%d %s:%d <%s>: %s is over for it (%s)", bot->GetGUIDLow(), bot->GetTeam() == ALLIANCE ? "A" : "H",
++        bot->GetLevel(), bot->GetName(), quest ? quest->GetTitle().c_str() : "a group quest",
++        !bot->GetGroup() ? "no group" : bot->GetQuestStatus(uint32(questId)) == QUEST_STATUS_COMPLETE ? "done" : "no longer in its log");
++    SetGroupQuestFocus(bot, 0);
++    return true;
++}
+diff --git a/playerbot/strategy/actions/LookForGroupAction.h b/playerbot/strategy/actions/LookForGroupAction.h
+index f102898..f8e11fe 100644
+--- a/playerbot/strategy/actions/LookForGroupAction.h
++++ b/playerbot/strategy/actions/LookForGroupAction.h
+@@ -12,4 +12,22 @@ namespace ai
+         LookForGroupAction(PlayerbotAI* ai) : Action(ai, "look for group") {}
+         virtual bool Execute(Event& event) override;
+     };
++
++    // kalimdor: the leader sets its full group on its group quest - the quest
++    // as every member's focus, their current errands dropped
++    // (values/GroupQuests.h; Kamino 151).
++    class GoGroupQuestAction : public Action
++    {
++    public:
++        GoGroupQuestAction(PlayerbotAI* ai) : Action(ai, "go group quest") {}
++        virtual bool Execute(Event& event) override;
++    };
++
++    // kalimdor: the group quest is over for this bot - its focus cleared.
++    class EndGroupQuestAction : public Action
++    {
++    public:
++        EndGroupQuestAction(PlayerbotAI* ai) : Action(ai, "end group quest") {}
++        virtual bool Execute(Event& event) override;
++    };
+ }
+diff --git a/playerbot/strategy/actions/SayAction.cpp b/playerbot/strategy/actions/SayAction.cpp
+index afe4a23..13de02d 100644
+--- a/playerbot/strategy/actions/SayAction.cpp
++++ b/playerbot/strategy/actions/SayAction.cpp
+@@ -942,7 +942,12 @@ bool ChatReplyAction::HandleLFGQuestsReply(Player* bot, ChatChannelSource chatCh
+                 (!group || group->IsLeader(announcer->GetObjectGuid())) && GroupQuests::GroupSize(announcer) < GroupQuests::WantedSize(quest) &&
+                 GroupQuests::RoleFits(announcer, bot, GroupQuests::WantedSize(quest)))
+             {
+-                if (group && !group->IsRaidGroup() && GroupQuests::GroupSize(announcer) > 4)
++                // kalimdor: a raid only for a quest that needs more than 5 -
++                // a 5-player dungeon group made a raid at its fifth member
++                // could neither travel for its quest (a raid only for raid
++                // quests, QuestObjectiveTravelDestination::IsPossible) nor
++                // enter its dungeon (Kamino 151).
++                if (group && !group->IsRaidGroup() && GroupQuests::WantedSize(quest) > 5 && GroupQuests::GroupSize(announcer) > 4)
+                     group->ConvertToRaid();
+                 auto invited = announcerAi->GetAiObjectContext()->GetValue<std::string>("manual string", "lfg invited");
+                 invited->Set(invited->Get() + std::to_string(bot->GetGUIDLow()) + ",");
+@@ -951,6 +956,9 @@ bool ChatReplyAction::HandleLFGQuestsReply(Player* bot, ChatChannelSource chatCh
+                 p << uint32(0);
+                 announcer->GetSession()->HandleGroupInviteOpcode(p);
+                 announcerAi->GetAiObjectContext()->GetValue<bool>("manual bool", "lfg grouped")->Set(true);
++                // kalimdor: it joins for this quest - it stays while that is
++                // unfinished (GroupQuests::Holds; Kamino 151).
++                bot->GetPlayerbotAI()->GetAiObjectContext()->GetValue<int>("manual int", "lfg joined")->Set(int(questId));
+                 sLog.outString("Bot #%d %s:%d <%s>: joins %s's group for %s (%u of %u, %s)", bot->GetGUIDLow(),
+                     bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), announcer->GetName(),
+                     quest->GetTitle().c_str(), GroupQuests::GroupSize(announcer), GroupQuests::WantedSize(quest), GroupQuests::RoleName(bot));
+diff --git a/playerbot/strategy/generic/TravelStrategy.cpp b/playerbot/strategy/generic/TravelStrategy.cpp
+index 83ee376..c8bde62 100644
+--- a/playerbot/strategy/generic/TravelStrategy.cpp
++++ b/playerbot/strategy/generic/TravelStrategy.cpp
+@@ -22,6 +22,20 @@ float TravelActionMultiplier::GetValue(Action* action)
+         if (!qualified->getQualifier().empty())
+             name += "::" + qualified->getQualifier();
+ 
++    // kalimdor: a group set on its group quest goes for that quest only - its
++    // upkeep waits (selling, mail, the auction house, trainers...), repairs
++    // too unless its gear is near breaking. On the dev server leaders of full
++    // dungeon groups went from vendor to vendor, and members inside Ragefire
++    // Chasm left for an auctioneer (Kamino 151).
++    if (name.find("request") == 0 && AI_VALUE2(int, "manual int", "group quest focus") > 0)
++    {
++        if (name == "request quest travel target" || name == "request quest travel target::turnin")
++            return 1.0f;
++        if (name == "request travel target::" + std::to_string((uint32)TravelDestinationPurpose::Repair) && AI_VALUE(uint8, "durability") < 30)
++            return 1.0f;
++        return 0.0f;
++    }
++
+     if (hasTarget && name.find("request") == 0)
+     {
+         if (name.find("guild meeting") != std::string::npos)
+@@ -174,6 +188,15 @@ void TravelStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
+         "group quest pending",
+         NextAction::array(0, new NextAction("look for group", 6.63f), NULL)));
+ 
++    // kalimdor: a full group goes for its group quest, all of it, until the
++    // quest is done or the group gone (values/GroupQuests.h; Kamino 151).
++    triggers.push_back(new TriggerNode(
++        "group quest ready",
++        NextAction::array(0, new NextAction("go group quest", 7.0f), NULL)));
++    triggers.push_back(new TriggerNode(
++        "group quest over",
++        NextAction::array(0, new NextAction("end group quest", 7.0f), NULL)));
++
+     // kalimdor: first aid levelled like a profession - bandages from the
+     // cloth in its bags, one a minute at most, a pause like eating
+     // (actions/MakeBandageAction.h; Kamino 257).
+diff --git a/playerbot/strategy/triggers/GroupQuestPendingTrigger.cpp b/playerbot/strategy/triggers/GroupQuestPendingTrigger.cpp
+index 61419bb..8b1fb12 100644
+--- a/playerbot/strategy/triggers/GroupQuestPendingTrigger.cpp
++++ b/playerbot/strategy/triggers/GroupQuestPendingTrigger.cpp
+@@ -14,3 +14,16 @@ bool GroupQuestPendingTrigger::IsActive()
+ 
+     return GroupQuests::Pending(bot) != nullptr;
+ }
++
++bool GroupQuestReadyTrigger::IsActive()
++{
++    if (ai->IsRealPlayer())
++        return false;
++    Quest const* quest = GroupQuests::Ready(bot);
++    return quest && AI_VALUE2(int, "manual int", "group quest focus") != int(quest->GetQuestId());
++}
++
++bool GroupQuestOverTrigger::IsActive()
++{
++    return !ai->IsRealPlayer() && GroupQuests::FocusOver(bot);
++}
+diff --git a/playerbot/strategy/triggers/GroupQuestPendingTrigger.h b/playerbot/strategy/triggers/GroupQuestPendingTrigger.h
+index 3b1880f..448f370 100644
+--- a/playerbot/strategy/triggers/GroupQuestPendingTrigger.h
++++ b/playerbot/strategy/triggers/GroupQuestPendingTrigger.h
+@@ -11,4 +11,21 @@ namespace ai
+         GroupQuestPendingTrigger(PlayerbotAI* ai) : Trigger(ai, "group quest pending", 60) {}
+         virtual bool IsActive() override;
+     };
++
++    // kalimdor: the leader's group is full for its group quest and not yet
++    // set on it (values/GroupQuests.h; Kamino 151).
++    class GroupQuestReadyTrigger : public Trigger
++    {
++    public:
++        GroupQuestReadyTrigger(PlayerbotAI* ai) : Trigger(ai, "group quest ready", 10) {}
++        virtual bool IsActive() override;
++    };
++
++    // kalimdor: the group quest it was set on is done, or the group is gone.
++    class GroupQuestOverTrigger : public Trigger
++    {
++    public:
++        GroupQuestOverTrigger(PlayerbotAI* ai) : Trigger(ai, "group quest over", 10) {}
++        virtual bool IsActive() override;
++    };
+ }
+diff --git a/playerbot/strategy/triggers/TriggerContext.h b/playerbot/strategy/triggers/TriggerContext.h
+index 710745d..ff872a2 100644
+--- a/playerbot/strategy/triggers/TriggerContext.h
++++ b/playerbot/strategy/triggers/TriggerContext.h
+@@ -100,6 +100,8 @@ namespace ai
+             creators["quest turn in due"] = [](PlayerbotAI* ai) { return new QuestTurnInDueTrigger(ai); };
+             creators["gray quest"] = [](PlayerbotAI* ai) { return new GrayQuestTrigger(ai); };
+             creators["group quest pending"] = [](PlayerbotAI* ai) { return new GroupQuestPendingTrigger(ai); };
++            creators["group quest ready"] = [](PlayerbotAI* ai) { return new GroupQuestReadyTrigger(ai); };
++            creators["group quest over"] = [](PlayerbotAI* ai) { return new GroupQuestOverTrigger(ai); };
+             creators["can make bandage"] = [](PlayerbotAI* ai) { return new MakeBandageTrigger(ai); };
+             creators["bg queue stale"] = [](PlayerbotAI* ai) { return new BgQueueStaleTrigger(ai); };
+             creators["enemy player near"] = [](PlayerbotAI* ai) { return new EnemyPlayerNear(ai); };
+diff --git a/playerbot/strategy/values/GroupQuests.cpp b/playerbot/strategy/values/GroupQuests.cpp
+index 6c4822c..14c1d72 100644
+--- a/playerbot/strategy/values/GroupQuests.cpp
++++ b/playerbot/strategy/values/GroupQuests.cpp
+@@ -151,6 +151,44 @@ bool GroupQuests::RoleFits(Player* announcer, Player* candidate, uint32_t wanted
+     return wanted - total >= stillNeeded;
+ }
+ 
++Quest const* GroupQuests::Ready(Player* bot)
++{
++    Group* group = bot->GetGroup();
++    if (!group || !group->IsLeader(bot->GetObjectGuid()) || bot->InBattleGround())
++        return nullptr;
++
++    int const questId = bot->GetPlayerbotAI()->GetAiObjectContext()->GetValue<int>("manual int", "lfg quest")->Get();
++    Quest const* quest = questId > 0 ? sObjectMgr.GetQuestTemplate(uint32(questId)) : nullptr;
++    if (!IsGroupQuest(quest) || bot->GetQuestStatus(quest->GetQuestId()) != QUEST_STATUS_INCOMPLETE || QuestFlow::IsGrey(bot, quest))
++        return nullptr;
++
++    // Members, not invitations still open.
++    return group->GetMembersCount() >= WantedSize(quest) ? quest : nullptr;
++}
++
++bool GroupQuests::FocusOver(Player* bot)
++{
++    AiObjectContext* context = bot->GetPlayerbotAI()->GetAiObjectContext();
++    int const questId = context->GetValue<int>("manual int", "group quest focus")->Get();
++    if (questId <= 0)
++        return false;
++    return !bot->GetGroup() || bot->GetQuestStatus(uint32(questId)) != QUEST_STATUS_INCOMPLETE;
++}
++
++bool GroupQuests::Holds(Player* bot)
++{
++    if (!bot->GetGroup())
++        return false;
++    AiObjectContext* context = bot->GetPlayerbotAI()->GetAiObjectContext();
++    for (char const* key : { "group quest focus", "lfg joined", "lfg quest" })
++    {
++        int const questId = context->GetValue<int>("manual int", key)->Get();
++        if (questId > 0 && bot->GetQuestStatus(uint32(questId)) == QUEST_STATUS_INCOMPLETE)
++            return true;
++    }
++    return false;
++}
++
+ Quest const* GroupQuests::Pending(Player* bot)
+ {
+     if (bot->InBattleGround() || bot->GetMap()->IsDungeon())
+diff --git a/playerbot/strategy/values/GroupQuests.h b/playerbot/strategy/values/GroupQuests.h
+index 4b2d7a4..fbeaeb9 100644
+--- a/playerbot/strategy/values/GroupQuests.h
++++ b/playerbot/strategy/values/GroupQuests.h
+@@ -21,6 +21,11 @@
+ // tank, 1 healer; 10 - exactly 2 and 2; 20 - 2-3 tanks, 4-5 healers; 40 -
+ // 3-4 tanks, 10-12 healers. A bot joins only if its role still fits and the
+ // slots left can still hold the minimum tanks and healers.
++// Once the group is full its leader takes the quest as the group's focus -
++// it and every member travel for that quest only, into the dungeon by its
++// entrance - until the quest is done or the group is gone (Kamino 151, step
++// 1): on the dev server full groups went on with their own errands, other
++// quests' givers, and fell apart without ever setting out.
+ 
+ class Player;
+ class Quest;
+@@ -50,5 +55,19 @@ namespace ai
+         // The group quest it should look for a group for, or none: alone or
+         // leading, unfinished, not grey, the group not yet big enough.
+         static Quest const* Pending(Player* bot);
++        // The group quest its full group should go for now, or none: the
++        // leader's, unfinished, not grey, as many members as it needs.
++        static Quest const* Ready(Player* bot);
++        // Its focus is a group quest that is over for it: done (or gone from
++        // its log), or the group is gone.
++        static bool FocusOver(Player* bot);
++        // It is in its group for a group quest it has not finished - it
++        // joined for it, or leads the group that formed for it, or the group
++        // is set on it. Such a bot does not leave for upstream's "far away"
++        // reasons - more than 4 levels from the leader (helpers are any
++        // level), no XP or honor for 15 minutes (the way to a dungeon), a SOLO
++        // grouper type: on the dev server dungeon groups fell apart on their
++        // way there (Kamino 151).
++        static bool Holds(Player* bot);
+     };
+ }
