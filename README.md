@@ -424,7 +424,7 @@ battleground and bracket (0: its team size). `total`: all bots, server-wide
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries forty-six changes to playerbots (`templates/patches/playerbots/`)
+teldrassil carries forty-seven changes to playerbots (`templates/patches/playerbots/`)
 and three to the core (`templates/patches/mangos-classic/`), applied before
 every build:
 
@@ -695,6 +695,11 @@ every build:
   less, as the server - unsold items vanish instead of being mailed to a
   random bot - and buys only as its own character (`AhBot.GUID`), if set.
   (Kamino 273, 2026-11-09.)
+- **playerbots 0047:** a full group goes for its group quest - the quest as
+  every member's travel focus, their errands and upkeep held, members
+  staying with it, into the dungeon by its entrance; and a 5-player group
+  is no longer made a raid. Groups now reach their dungeons; finishing a
+  dungeon quest is the next step. (Kamino 151, 2026-11-11.)
 - **mangos-classic 0003:** the remote console answers only a client still
   connected. A command's answer comes later, from the world thread; when the
   client had hung up, it was written into the freed connection - every time,
