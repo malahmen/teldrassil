@@ -699,7 +699,7 @@ every build:
   every member's travel focus, their errands and upkeep held, members
   staying with it, into the dungeon by its entrance; and a 5-player group
   is no longer made a raid. Groups now reach their dungeons; finishing a
-  dungeon quest is the next step. (Kamino 151, 2026-11-11.)
+  dungeon quest is the next step. (Kamino 151, 2026-11-10.)
 - **mangos-classic 0003:** the remote console answers only a client still
   connected. A command's answer comes later, from the world thread; when the
   client had hung up, it was written into the freed connection - every time,
