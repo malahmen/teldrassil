@@ -576,6 +576,37 @@ class Archetypes(unittest.TestCase):
                 t.load_roster(roster(battlegrounds=bad))
             self.assertIn(msg, str(e.exception))
 
+    def test_specs_are_weighted_and_checked(self):
+        # Three warrior specs: arms (tree 1), fury (tree 2), prot (tree 3).
+        conf = ("AiPlayerbot.PremadeSpecName.1.0 = arms\n"
+                "AiPlayerbot.PremadeSpecLink.1.0.60 = 303050213520105001-0505300502\n"
+                "AiPlayerbot.PremadeSpecName.1.1 = fury\n"
+                "AiPlayerbot.PremadeSpecLink.1.1.60 = 30305001302-05050005525010051\n"
+                "AiPlayerbot.PremadeSpecName.1.2 = prot\n"
+                "AiPlayerbot.PremadeSpecLink.1.2.60 = 05005001-05-55250110530101051\n"
+                # A druid's feral spec tanks only with Primal Fury (its 12th feral talent); resto heals.
+                "AiPlayerbot.PremadeSpecName.11.0 = cat\n"
+                "AiPlayerbot.PremadeSpecLink.11.0.60 = 5-555555555550-\n"
+                "AiPlayerbot.PremadeSpecName.11.1 = bear\n"
+                "AiPlayerbot.PremadeSpecLink.11.1.60 = 5-555555555552-\n"
+                "AiPlayerbot.PremadeSpecName.11.2 = resto\n"
+                "AiPlayerbot.PremadeSpecLink.11.2.60 = 5--5555555555\n")
+        # Warrior: one in three a tank - the two damage specs keep 100 each.
+        changes = t.conf_changes(t.load_roster(roster(specs={"tank": {"warrior": 100 / 3}})), conf, "/c")
+        self.assertEqual(changes["AiPlayerbot.PremadeSpecProb.1.2"], "100")
+        self.assertNotIn("AiPlayerbot.PremadeSpecProb.1.0", changes)
+        # Druid: 25% tank, 50% healer, the cat (100) the other 25%.
+        changes = t.conf_changes(t.load_roster(roster(specs={"tank": {"druid": 25}, "healer": {"druid": 50},
+                                                                "reroll": 20261111})), conf, "/c")
+        self.assertEqual((changes["AiPlayerbot.PremadeSpecProb.11.1"], changes["AiPlayerbot.PremadeSpecProb.11.2"]), ("100", "200"))
+        self.assertEqual((changes["AiPlayerbot.SpecReroll"], changes["AiPlayerbot.SpecRerollClasses"]), ("20261111", "11"))
+        for bad, msg in (({"tank": {"rogue": 2}}, "no tank spec"), ({"healer": {"warrior": 10}}, "no healer spec"),
+                         ({"tank": {"warrior": 101}}, "0-100"), ({"tank": {"druid": 60}, "healer": {"druid": 60}}, "over 100%"),
+                         ({"reroll": "2026-11-11"}, "YYYYMMDD"), ({"tanks": {}}, "unknown key")):
+            with self.assertRaises(t.RosterError) as e:
+                t.load_roster(roster(specs=bad))
+            self.assertIn(msg, str(e.exception))
+
     def test_rhk_is_written_and_checked(self):
         arch = copy.deepcopy(ARCHETYPES)
         arch["creeper"]["rhk"] = 1.2
