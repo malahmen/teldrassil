@@ -392,6 +392,32 @@ inside, for the level bands 10-19, 20-29, 30-39, 40 to the cap - 1, and the
 cap; `others` at most `enlisted` in each. `per_queue`: per side in one
 battleground and bracket (0: its team size). `total`: all bots, server-wide
 (0: no limit). `log`: a `BgSlots:` line per check, join and leave.
+
+`specs` (top level of the roster) - the share of a class's random bots
+that pick a tank spec and a healing spec, in percent (Kamino 151): groups
+for dungeon quests broke up for want of both.
+
+```json
+"specs": {
+    "tank": {"warrior": 95, "paladin": 5, "druid": 10},
+    "healer": {"priest": 85, "shaman": 50, "paladin": 60, "druid": 60},
+    "reroll": 20261111
+}
+```
+
+A spec's role is its talents', as playerbots reads them: the tree with the
+most points - a warrior's or paladin's protection, a druid's feral with
+Primal Fury (bear form) tank; a priest's discipline or holy, a shaman's or
+druid's restoration, a paladin's holy heal; everything else deals damage.
+teldrassil reads the class's premade specs in `aiplayerbot.conf` and sets
+their `PremadeSpecProb`: each role gets its share, a spec keeps its weight
+within its role, and the damage specs keep theirs. A bot picks its spec
+once and keeps it, so the change reaches new or re-randomised bots - and,
+with `reroll` (a date, YYYYMMDD), every random bot of the classes named:
+at its next login it resets its talents and picks again, once for that
+date (`AiPlayerbot.SpecReroll`, `SpecRerollClasses`; a new date, another
+re-roll). The example is the owner's test setting (2026-11-11): about one
+bot in five a tank, one in five a healer, at this population.
   And `gray_quests`: `drop` (the default), `keep` or `at_cap` - whether a
   quest that gives no XP any more is dropped from the bot's log and refused,
   kept, or kept and taken only at the level cap (log space permitting). It also has `pvp`:

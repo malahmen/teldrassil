@@ -295,7 +295,7 @@ def load_roster(data):
     of words, defaults filled in. Raises RosterError listing every problem."""
     errors = []
     out = {"guilds": [], "bots": [], "population": None, "llm": None, "archetypes": None, "keep_stacks": None,
-           "battlegrounds": None}
+           "battlegrounds": None, "specs": None}
 
     # Archetypes (Kamino 211): named once, here; a bot names one. Each lists
     # its activities in order and how much stronger its side must be to
@@ -542,6 +542,34 @@ def load_roster(data):
             errors.append(f"battlegrounds: unknown key(s) {', '.join(unknown)}")
         out["battlegrounds"] = b
 
+    # Specs (Kamino 151, owner 2026-11-10): the share of a class's random
+    # bots that pick a tank spec and a healing spec, in percent - groups for
+    # dungeon quests broke up for want of both; the rest keep their weights.
+    if "specs" in data:
+        sp = data.get("specs") or {}
+        o = {"tank": {}, "healer": {}}
+        for role in ("tank", "healer"):
+            for cls, pct in (sp.get(role) or {}).items():
+                if cls not in ROLE_TREES[role]:
+                    errors.append(f"specs: {role}: {cls!r} has no {role} spec (one of {', '.join(sorted(ROLE_TREES[role]))})")
+                elif isinstance(pct, bool) or not isinstance(pct, (int, float)) or not 0 <= pct <= 100:
+                    errors.append(f"specs: {role}: {cls}: a percentage, 0-100 (got {pct!r})")
+                else:
+                    o[role][cls] = pct
+        for cls in set(o["tank"]) & set(o["healer"]):
+            if o["tank"][cls] + o["healer"][cls] > 100:
+                errors.append(f"specs: {cls}: tank and healer add up to over 100%")
+        if "reroll" in sp:
+            n = sp["reroll"]
+            if isinstance(n, bool) or not isinstance(n, int) or not 20000101 <= n <= 29991231:
+                errors.append(f"specs: reroll is a date, YYYYMMDD (got {n!r})")
+            else:
+                o["reroll"] = n
+        unknown = sorted(set(sp) - {"tank", "healer", "reroll"})
+        if unknown:
+            errors.append(f"specs: unknown key(s) {', '.join(unknown)}")
+        out["specs"] = o
+
     if "llm" in data:
         try:
             llm = dict(data["llm"])
@@ -679,11 +707,82 @@ def conf_changes(roster, conf_text, cards_in_server):
         want["AiPlayerbot.BgSlots.Total"] = str(bg["total"])
         want["AiPlayerbot.BgSlots.QueueTimeout"] = str(bg["queue_timeout_minutes"] * 60)
         want["AiPlayerbot.BgSlots.Log"] = "1" if bg["log"] else "0"
+    specs = roster.get("specs")
+    if specs:
+        classes = sorted({CLASS_IDS[c] for role in ("tank", "healer") for c in specs[role]})
+        for cls in classes:
+            name = next(n for n, i in CLASS_IDS.items() if i == cls)
+            want.update(spec_weights(conf_text, cls, specs["tank"].get(name), specs["healer"].get(name)))
+        if "reroll" in specs:
+            want["AiPlayerbot.SpecReroll"] = str(specs["reroll"])
+            want["AiPlayerbot.SpecRerollClasses"] = ",".join(str(c) for c in classes)
     if roster["archetypes"] is not None:
         want["AiPlayerbot.Archetypes"] = ",".join(sorted(roster["archetypes"]))
         for name, a in sorted(roster["archetypes"].items()):
             want[f"AiPlayerbot.Archetype.{name}"] = archetype_conf(a)
     return {k: v for k, v in want.items() if conf_get(conf_text, k) != v}
+
+
+# Roles by spec, as playerbots reads them (AiFactory::GetPlayerSpecTab - the
+# tree with the most points - and GetPlayerRoles): the tree of a class's tank
+# and healing specs; a druid's feral spec tanks only with Primal Fury (bear,
+# not cat). Every other spec deals damage.
+CLASS_IDS = {"warrior": 1, "paladin": 2, "priest": 5, "shaman": 7, "druid": 11}
+ROLE_TREES = {"tank": {"warrior": 2, "paladin": 1, "druid": 1},
+              "healer": {"paladin": 0, "priest": (0, 1), "shaman": 2, "druid": 2}}
+
+
+def spec_role(cls, link):
+    """tank, healer or damage - a premade spec by its final talents."""
+    trees = (link.split("-") + ["", "", ""])[:3]
+    sums = [sum(int(c) for c in t if c.isdigit()) for t in trees]
+    if not sum(sums):
+        return "damage"
+    tree = max(range(3), key=lambda i: sums[i])
+    name = next((n for n, i in CLASS_IDS.items() if i == cls), None)
+    for role in ("tank", "healer"):
+        want = ROLE_TREES[role].get(name)
+        if want is not None and tree in (want if isinstance(want, tuple) else (want,)):
+            if cls == 11 and role == "tank" and not (len(trees[1]) > 11 and trees[1][11] != "0"):   # Primal Fury
+                return "damage"
+            return role
+    return "damage"
+
+
+def class_specs(conf_text, cls):
+    """{spec number: (weight, role)} for a class's premade specs in the conf -
+    weight its PremadeSpecProb (100 unset), role by its final talents."""
+    specs = {}
+    for m in re.finditer(rf"^AiPlayerbot\.PremadeSpecName\.{cls}\.(\d+)\s*=", conf_text, re.M):
+        sp = int(m.group(1))
+        prob = conf_get(conf_text, f"AiPlayerbot.PremadeSpecProb.{cls}.{sp}")
+        links = [(int(l.group(1)), l.group(2).split("#")[0].strip())
+                 for l in re.finditer(rf"^AiPlayerbot\.PremadeSpecLink\.{cls}\.{sp}\.(\d+)\s*=\s*(.*)$", conf_text, re.M)]
+        specs[sp] = (int(prob) if prob and prob.strip().isdigit() else 100, spec_role(cls, max(links)[1] if links else ""))
+    return specs
+
+
+def spec_weights(conf_text, cls, tank_pct, healer_pct):
+    """PremadeSpecProb settings giving the class's tank and healing specs
+    their share (percent; None keeps a role's weights as they are): within
+    a role each spec keeps its weight relative to the others; the damage
+    specs keep theirs, and set the scale."""
+    specs = class_specs(conf_text, cls)
+    total = {r: sum(w for w, role in specs.values() if role == r) for r in ("tank", "healer", "damage")}
+    share = {"tank": tank_pct, "healer": healer_pct}
+    for r in ("tank", "healer"):
+        if share[r] is None:
+            share[r] = 100.0 * total[r] / max(1, sum(total.values()))
+    damage_pct = 100.0 - share["tank"] - share["healer"]
+    whole = total["damage"] / (damage_pct / 100.0) if damage_pct > 0 and total["damage"] else 1000.0
+    out = {}
+    for r in ("tank", "healer"):
+        if not total[r] or (r == "tank" and tank_pct is None) or (r == "healer" and healer_pct is None):
+            continue
+        for sp, (w, role) in sorted(specs.items()):
+            if role == r:
+                out[f"AiPlayerbot.PremadeSpecProb.{cls}.{sp}"] = str(max(1, round(whole * share[r] / 100.0 * w / total[r])))
+    return out
 
 
 def archetype_conf(a):
