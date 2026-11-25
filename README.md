@@ -119,6 +119,7 @@ It runs from its checkout:
 | `lib/provision.sh` | `install`, `source`, `build-image`, `build`, `extract`, `db-init`, `configure`, `create`, `remove` |
 | `templates/Containerfile` | the build, tools and server image |
 | `templates/patches/playerbots/`, `templates/patches/mangos-classic/` | teldrassil's changes to playerbots and to the core, applied before every build |
+| `templates/sql/` | kalimdor's world-database additions, applied by `start` (once per content) |
 | `lib/teldrassil.py` | the helper |
 | `examples/roster.example.json` | a roster to start from |
 
@@ -457,9 +458,21 @@ exactly (checked: the stack on kalimdor's untouched import gives kalimdor
 `7b8b5a3`, both trees). Sources that are kalimdor itself (`PROVENANCE.md` at
 their root - `SOURCE_REPO`, or `SOURCE_DIR` on a kalimdor clone) commit their
 changes: nothing is applied to them or taken off, so a kalimdor branch ahead
-of the stack builds as it is (Kamino 290). kalimdor's world-database
-additions (its `sql/`: travel nodes, item rarity, dungeon routes, stats
-tables) are not patches and come with kalimdor's image only.
+of the stack builds as it is (Kamino 290).
+
+kalimdor's world-database additions - its `sql/`: travel nodes, item rarity,
+the dungeon routes, the stats tables, which those changes read - are not
+patches. teldrassil carries them in `templates/sql/` (kalimdor's files at the
+same commit as the stack); a kalimdor tree brings its own `sql/`, and those
+are used instead. `start` (and `restart`; not `restart --graceful`, where
+mangosd starts again by itself) applies them to `DB_WORLD` before the world
+server starts, each once per content - recorded by its hash in
+`<DB_REALMD>.teldrassil_applied`, as `apply-sql` records - so an unchanged
+file is skipped and a new or changed one runs; each can run again and adds
+nothing twice. One that fails is said and skipped, and the server starts
+without it. A `restore` forgets what ran on the databases it restores, so they
+run again. Only for a server teldrassil built and runs here: in a cluster or
+on `SSH_HOST` the server's image applies its own (Kamino 298).
 
 - **0001:** stored strategies are written as `nc+`/`co+` rows that *add to*
   a bot's defaults - upstream, any stored row replaces them - and bots with
