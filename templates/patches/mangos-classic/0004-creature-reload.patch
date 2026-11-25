@@ -1,0 +1,37 @@
+diff --git a/src/game/Entities/Creature.cpp b/src/game/Entities/Creature.cpp
+index a10fdbb..fc240c1 100644
+--- a/src/game/Entities/Creature.cpp
++++ b/src/game/Entities/Creature.cpp
+@@ -1621,9 +1621,15 @@ bool Creature::LoadFromDB(uint32 dbGuid, Map* map, uint32 newGuid, uint32 forced
+     }
+ 
+     // Creature can be loaded already in map if grid has been unloaded while creature walk to another grid
++    // kalimdor: dead too - a second object of the same spawn shares its guid,
++    // and as either left the world the map's guid store lost the other: alive,
++    // fighting, targetable by no one, not even a GM's .die (a Deviate Shambler
++    // that died across a grid line from its spawn, its home grid unloaded and
++    // loaded again; the Wailing Caverns, dev, 2026-11-21). The dead one
++    // respawns at its spawn point itself.
+     {
+         Creature* existing = map->GetCreature(dbGuid);
+-        if (existing && existing->IsAlive())
++        if (existing)
+             return false;
+     }
+ 
+diff --git a/src/mangosd/mangosd.conf.dist.in b/src/mangosd/mangosd.conf.dist.in
+index 03f4bfa..8bc3e88 100644
+--- a/src/mangosd/mangosd.conf.dist.in
++++ b/src/mangosd/mangosd.conf.dist.in
+@@ -253,7 +253,10 @@ Compression = 1
+ PlayerLimit = 100
+ SaveRespawnTimeImmediately = 1
+ MaxOverspeedPings = 2
+-GridUnload = 1
++# kalimdor: grids kept loaded - a grid loaded again made a second copy of a
++# creature that had died outside it (Entities/Creature.cpp LoadFromDB; dev,
++# 2026-11-21).
++GridUnload = 0
+ LoadAllGridsOnMaps = ""
+ Autoload.Active = 1
+ GridCleanUpDelay = 300000

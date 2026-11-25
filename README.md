@@ -36,7 +36,7 @@ which. Only `db-init --yes`, run by hand, replaces them.
 | --- | --- |
 | `source` | checks out cmangos-classic, playerbots and classic-db at pinned commits (`MANGOS_REF`, `PLAYERBOTS_REF`, `CLASSICDB_REF`; `source --update` moves to new pins) - or, with `SOURCE_REPO` set, clones one repository holding all three (and `zlib/`), such as kalimdor, at `SOURCE_REF` |
 | `build-image` | the one image for building, tools and running (Ubuntu 24.04) |
-| `build` | applies teldrassil's patches (`templates/patches/playerbots/` and `templates/patches/mangos-classic/`; already-applied ones are recognised, in a subfolder too), then compiles with playerbots and the extractors. Sources with their own `zlib/` build with no network at all; otherwise zlib is fetched from GitHub |
+| `build` | applies teldrassil's patches (`templates/patches/playerbots/` and `templates/patches/mangos-classic/`; already-applied ones are recognised, in a subfolder too; none to a kalimdor tree, which commits its own), then compiles with playerbots and the extractors. Sources with their own `zlib/` build with no network at all; otherwise zlib is fetched from GitHub |
 | `extract` | dbc, maps, vmaps and mmaps from the 1.12.1 client (~20 minutes on many cores, ~2.4 GB) |
 | `db-init --yes` | a MariaDB container on 127.0.0.1 only, the four databases from classic-db with playerbots' tables (replacing any that exist, after dumping them to `~/.config/teldrassil/dumps/before-db-init-*.sql.gz`; if the dump fails, nothing is replaced), the realm's name and address, a console account for teldrassil; it removes cmangos' default accounts |
 | `configure` | `mangosd.conf`, `realmd.conf`, `aiplayerbot.conf` and `ahbot.conf` from their templates: the database, ports, the remote console on 127.0.0.1, the bot count. An existing file is kept unless `--force`, since `roster apply` edits them |
@@ -450,9 +450,16 @@ bot in five a tank, one in five a healer, at this population.
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries forty-eight changes to playerbots (`templates/patches/playerbots/`)
-and three to the core (`templates/patches/mangos-classic/`), applied before
-every build:
+teldrassil carries fifty-two changes to playerbots (`templates/patches/playerbots/`)
+and four to the core (`templates/patches/mangos-classic/`), applied in order
+before every build to the pinned upstreams - together they make kalimdor's tree
+exactly (checked: the stack on kalimdor's untouched import gives kalimdor
+`7b8b5a3`, both trees). Sources that are kalimdor itself (`PROVENANCE.md` at
+their root - `SOURCE_REPO`, or `SOURCE_DIR` on a kalimdor clone) commit their
+changes: nothing is applied to them or taken off, so a kalimdor branch ahead
+of the stack builds as it is (Kamino 290). kalimdor's world-database
+additions (its `sql/`: travel nodes, item rarity, dungeon routes, stats
+tables) are not patches and come with kalimdor's image only.
 
 - **0001:** stored strategies are written as `nc+`/`co+` rows that *add to*
   a bot's defaults - upstream, any stored row replaces them - and bots with
@@ -721,6 +728,27 @@ every build:
   less, as the server - unsold items vanish instead of being mailed to a
   random bot - and buys only as its own character (`AhBot.GUID`), if set.
   (Kamino 273, 2026-11-09.)
+- **playerbots 0052:** a group queue - one matcher, every 5 seconds on the
+  world thread, joins and merges bots for group quests by faction, the bigger
+  group first, with no invites; real players' groups are never touched.
+  (kalimdor #53, Kamino 151, 2026-11-24.)
+- **playerbots 0051:** help from above the level switched off, as a
+  diagnostic: chat and looking for a group as before 0049's rule. (kalimdor
+  #52, 2026-11-24.)
+- **playerbots 0050:** group trips set at most every 30 seconds; the vendor
+  walked to within 80 yards. (kalimdor #51, 2026-11-24.)
+- **playerbots 0049:** dungeon runs walked by hand-set routes - pulls,
+  holds, tank and ranged spots, chain pulls, the Wailing Caverns escort,
+  revives, stuck checks, boss kills and loot recorded, test groups
+  (`rndbot testrun`); the rules are kalimdor's `docs/dungeon-run-rules.md`.
+  The routes are kalimdor's `sql/0003-dungeon-routes.sql`: from the pinned
+  upstreams, without it, a group has no route to walk. (kalimdor #49 and its
+  build fix #50, Kamino 151, 2026-11-23.)
+- **mangos-classic 0004:** a creature is not loaded again while a dead copy
+  of it is still in the world, and grids are kept loaded (`GridUnload = 0`).
+  Kamino 289 has narrowed the first and undone the second on a kalimdor
+  branch; a later core patch follows it when it merges. (kalimdor #49,
+  2026-11-21.)
 - **playerbots 0048:** a group in a dungeon clears it or gives up - it
   leaves only once all the dungeon's bosses are dead, or after more wipes
   than it has bosses; its leader goes boss to boss. The bosses are counted

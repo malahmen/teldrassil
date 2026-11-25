@@ -1,0 +1,86 @@
+diff --git a/playerbot/strategy/actions/DungeonRunAction.cpp b/playerbot/strategy/actions/DungeonRunAction.cpp
+index 46b7600..d7755a1 100644
+--- a/playerbot/strategy/actions/DungeonRunAction.cpp
++++ b/playerbot/strategy/actions/DungeonRunAction.cpp
+@@ -1219,6 +1219,10 @@ bool GoToGatheringAction::Execute(Event& event)
+         }
+         if (!since || now - since >= 4 * DungeonRun::GoingInTime)
+             SET_AI_VALUE2(time_t, "manual time", "going in since", now);
++        // A new trip every DungeonRun::TripGap at most (each frees the last).
++        if (now - AI_VALUE2(time_t, "manual time", "trip set since") < DungeonRun::TripGap)
++            return false;
++        SET_AI_VALUE2(time_t, "manual time", "trip set since", now);
+         TravelTarget* target = AI_VALUE(TravelTarget*, "travel target");
+         TemporaryTravelDestination* destination = new TemporaryTravelDestination(point);
+         target->SetTarget(destination, destination->GetPosition());
+@@ -1286,8 +1290,13 @@ bool GoToGatheringAction::Execute(Event& event)
+                 SET_AI_VALUE2(time_t, "manual time", "stock since", now);
+             bool const due = DungeonRun::NeedsStock(bot) && now - (since ? since : now) < DungeonRun::StockTime &&
+                 DungeonRun::StockVendor(bot, vendor, entry);
+-            Creature* npc = due ? GetClosestCreatureWithEntry(bot, entry, 30.0f) : nullptr;
+-            if (!due || (npc && bot->GetDistance(npc) <= INTERACTION_DISTANCE))
++            // In sight within 80 yards, rises and floors included: walked to.
++            // At its spot without it: the stop ends - one sought on another
++            // floor of Thunder Bluff was travelled to again on every update
++            // (the cluster, 2026-11-24).
++            Creature* npc = due ? GetClosestCreatureWithEntry(bot, entry, 80.0f) : nullptr;
++            bool const lost = due && !npc && vendor.getMapId() == bot->GetMapId() && vendor.distance(WorldPosition(bot)) <= 40.0f;
++            if (!due || lost || (npc && bot->GetDistance(npc) <= INTERACTION_DISTANCE))
+             {
+                 if (npc)
+                 {
+@@ -1301,6 +1310,9 @@ bool GoToGatheringAction::Execute(Event& event)
+                     sLog.outString("Bot #%d %s:%d <%s>: stocks up at %s before its dungeon (%d copper)", bot->GetGUIDLow(), team, bot->GetLevel(),
+                         bot->GetName(), npc->GetName(), int(bot->GetMoney()) - int(money));
+                 }
++                else if (lost)
++                    sLog.outString("Bot #%d %s:%d <%s>: its vendor not found at its spot - on to its group unstocked", bot->GetGUIDLow(), team,
++                        bot->GetLevel(), bot->GetName());
+                 else if (since && now - since >= DungeonRun::StockTime)
+                     sLog.outString("Bot #%d %s:%d <%s>: no vendor reached in %d minutes - on to its group unstocked", bot->GetGUIDLow(), team,
+                         bot->GetLevel(), bot->GetName(), int(DungeonRun::StockTime / 60));
+@@ -1317,9 +1329,16 @@ bool GoToGatheringAction::Execute(Event& event)
+             else
+             {
+                 TravelTarget* target = AI_VALUE(TravelTarget*, "travel target");
+-                TemporaryTravelDestination* to = target->IsForced() && target->IsActive() ? dynamic_cast<TemporaryTravelDestination*>(target->GetDestination()) : nullptr;
++                // Already on its way there, whatever its trip's status - and
++                // a new trip once a minute at most: one restarted on every
++                // update freed its trip hundreds of times, and the cluster's
++                // world server crashed every few minutes (2026-11-24).
++                TemporaryTravelDestination* to = target->IsActive() ? dynamic_cast<TemporaryTravelDestination*>(target->GetDestination()) : nullptr;
+                 if (to && to->GetPosition() && to->GetPosition()->distance(vendor) <= 1.0f)
+                     return false;
++                if (now - AI_VALUE2(time_t, "manual time", "trip set since") < DungeonRun::TripGap)
++                    return false;
++                SET_AI_VALUE2(time_t, "manual time", "trip set since", now);
+                 TemporaryTravelDestination* destination = new TemporaryTravelDestination(vendor);
+                 target->SetTarget(destination, destination->GetPosition());
+                 target->SetStatus(TravelStatus::TRAVEL_STATUS_TRAVEL);
+@@ -1340,6 +1359,12 @@ bool GoToGatheringAction::Execute(Event& event)
+     TemporaryTravelDestination* to = target->IsForced() && target->IsActive() ? dynamic_cast<TemporaryTravelDestination*>(target->GetDestination()) : nullptr;
+     if (to && to->GetPosition() && to->GetPosition()->distance(point) <= 1.0f)
+         return false;
++    // A new trip every DungeonRun::TripGap at most: each frees the last, and
++    // one set again on every update - its trip ended short of the point -
++    // crashed the cluster's world server (2026-11-24).
++    if (time(nullptr) - AI_VALUE2(time_t, "manual time", "trip set since") < DungeonRun::TripGap)
++        return false;
++    SET_AI_VALUE2(time_t, "manual time", "trip set since", time(nullptr));
+     TemporaryTravelDestination* destination = new TemporaryTravelDestination(point);
+     target->SetTarget(destination, destination->GetPosition());
+     target->SetStatus(TravelStatus::TRAVEL_STATUS_TRAVEL);
+diff --git a/playerbot/strategy/values/DungeonRun.h b/playerbot/strategy/values/DungeonRun.h
+index e6fffac..22ccddd 100644
+--- a/playerbot/strategy/values/DungeonRun.h
++++ b/playerbot/strategy/values/DungeonRun.h
+@@ -292,6 +292,9 @@ namespace ai
+         // the nearest vendor selling them within StockRange first - sells its
+         // trash, buys food and drink - then on. StockTime at most.
+         static constexpr float StockRange = 600.0f;
++        // A bot's group trips - its gathering point, the way in, a vendor -
++        // set again this long apart at most (each frees the one before).
++        static constexpr time_t TripGap = 30;
+         static constexpr time_t StockTime = 10 * 60;
+         static constexpr uint32 StockCount = 10;  // fewer to eat or drink: short
+         static constexpr uint32 StockFreeSlots = 8; // fewer free: short of room

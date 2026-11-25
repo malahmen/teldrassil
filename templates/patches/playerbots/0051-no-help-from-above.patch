@@ -1,0 +1,65 @@
+diff --git a/playerbot/strategy/actions/LookForGroupAction.cpp b/playerbot/strategy/actions/LookForGroupAction.cpp
+index a62fafd..54c27a5 100644
+--- a/playerbot/strategy/actions/LookForGroupAction.cpp
++++ b/playerbot/strategy/actions/LookForGroupAction.cpp
+@@ -54,12 +54,7 @@ bool LookForGroupAction::Execute(Event& event)
+         return true;
+     }
+ 
+-    // Again as help opens to bots above its level (GroupQuests::HelpAfter):
+-    // they answer this post (owner, 2026-11-23).
+-    time_t const searching = now - AI_VALUE2(time_t, "manual time", "lfg since");
+-    time_t const posted = AI_VALUE2(time_t, "manual time", "lfg posted");
+-    bool const helpOpens = searching >= GroupQuests::HelpAfter && posted - AI_VALUE2(time_t, "manual time", "lfg since") < GroupQuests::HelpAfter;
+-    if (now - posted < GroupQuests::RepostTime && !helpOpens)
++    if (now - AI_VALUE2(time_t, "manual time", "lfg posted") < GroupQuests::RepostTime)
+         return false;
+ 
+     // "LFG" first: that is what bots answer (ChatReplyAction::ChatReplyDo).
+diff --git a/playerbot/strategy/actions/SayAction.cpp b/playerbot/strategy/actions/SayAction.cpp
+index 96f9602..3c53447 100644
+--- a/playerbot/strategy/actions/SayAction.cpp
++++ b/playerbot/strategy/actions/SayAction.cpp
+@@ -925,13 +925,7 @@ bool ChatReplyAction::HandleLFGQuestsReply(Player* bot, ChatChannelSource chatCh
+     // without, to help: the roles groups lack most (dev, 2026-11-10: 28 of
+     // 37 groups that broke up had no tank). It stays with the group by its
+     // leader's quest (GroupQuests::Holds; owner, 2026-11-10; Kamino 151).
+-    // A group searching HelpAfter already: any free bot, up to HelpLevelGap
+-    // above its quest, joins to help too - few bots of a dungeon's level are
+-    // free, groups gave up at 3 of 5 for hours (owner, 2026-11-23).
+-    bool const roleHelp = PlayerbotAI::IsTank(bot, false) || PlayerbotAI::IsHeal(bot, false);
+-    if (!bot->GetGroup() && !bot->GetGroupInvite() &&
+-        bot->GetPlayerbotAI()->GetAiObjectContext()->GetValue<int>("manual int", "lfg quest")->Get() <= 0 &&
+-        bot->GetPlayerbotAI()->GetAiObjectContext()->GetValue<int>("manual int", "group quest focus")->Get() <= 0)
++    if (!bot->GetGroup() && !bot->GetGroupInvite() && (PlayerbotAI::IsTank(bot, false) || PlayerbotAI::IsHeal(bot, false)))
+     {
+         Player* announcer = sObjectMgr.GetPlayer(name.c_str());
+         PlayerbotAI* announcerAi = announcer ? announcer->GetPlayerbotAI() : nullptr;
+@@ -941,13 +935,9 @@ bool ChatReplyAction::HandleLFGQuestsReply(Player* bot, ChatChannelSource chatCh
+             uint32 const questId = uint32(announcerAi->GetAiObjectContext()->GetValue<int>("manual int", "lfg quest")->Get());
+             Quest const* quest = questId ? sObjectMgr.GetQuestTemplate(questId) : nullptr;
+             Group* group = announcer->GetGroup();
+-            time_t const lfgSince = announcerAi->GetAiObjectContext()->GetValue<time_t>("manual time", "lfg since")->Get();
+-            bool const late = lfgSince && time(nullptr) - lfgSince >= GroupQuests::HelpAfter;
+-            int32 const above = int32(bot->GetLevel()) - int32(quest->GetQuestLevel());
+-            bool const levelFits = (roleHelp && std::abs(above) <= 5) || (late && above > 0 && above <= GroupQuests::HelpLevelGap);
+             if (quest && bot->GetQuestStatus(questId) == QUEST_STATUS_NONE && GroupQuests::IsGroupQuest(quest) &&
+                 msg.find("[" + quest->GetTitle() + "]") != std::string::npos &&
+-                levelFits && bot->GetLevel() >= quest->GetMinLevel() &&
++                std::abs(int32(bot->GetLevel()) - int32(quest->GetQuestLevel())) <= 5 && bot->GetLevel() >= quest->GetMinLevel() &&
+                 GroupQuests::CanEnter(bot, quest) &&
+                 (!group || group->IsLeader(announcer->GetObjectGuid())) && GroupQuests::GroupSize(announcer) < GroupQuests::WantedSize(quest) &&
+                 GroupQuests::RoleFits(announcer, bot, GroupQuests::WantedSize(quest)))
+@@ -964,10 +954,9 @@ bool ChatReplyAction::HandleLFGQuestsReply(Player* bot, ChatChannelSource chatCh
+                 bot->GetPlayerbotAI()->GetAiObjectContext()->GetValue<int>("manual int", "lfg joined")->Set(int(questId));
+                 bot->GetPlayerbotAI()->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get()->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
+                 announcerAi->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get()->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
+-                sLog.outString("Bot #%d %s:%d <%s>: joins %s's group for %s to help%s (%u of %u, %s)", bot->GetGUIDLow(),
++                sLog.outString("Bot #%d %s:%d <%s>: joins %s's group for %s to help (%u of %u, %s)", bot->GetGUIDLow(),
+                     bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), announcer->GetName(),
+-                    quest->GetTitle().c_str(), above > 5 ? ", above its level" : "", GroupQuests::GroupSize(announcer),
+-                    GroupQuests::WantedSize(quest), GroupQuests::RoleName(bot));
++                    quest->GetTitle().c_str(), GroupQuests::GroupSize(announcer), GroupQuests::WantedSize(quest), GroupQuests::RoleName(bot));
+                 return true;
+             }
+         }
