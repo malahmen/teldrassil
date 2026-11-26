@@ -140,34 +140,55 @@ hdr "rootful docker: the build image's containers run as the user (Kamino 225)"
 # holds what the hunks touching it expect to find (CRLF kept), so 'build' gets
 # past _patch. Patches stack - a later one changes lines an earlier one wrote,
 # or a file it created - so each patch's hunks get their own region of the
-# file, in patch order, and a file an earlier patch creates is not made up at
-# all: that patch carries its whole content.
+# file, in patch order - a hunk at line 1 at the file's start, one ending at
+# the file's end (fewer than 3 lines of context after it) at its end - and a
+# file an earlier patch creates is not made up at all: that patch carries its
+# whole content.
 for tree in playerbots mangos-classic; do
 python3 -I - "$W/src/$tree" "${TEST_DIR}/../templates/patches/$tree"/*.patch <<'PY'
 import os, sys
 root = sys.argv[1]
-created, head, body = set(), {}, {}
+created, head, body, tail = set(), {}, {}, {}
+def place(cur, at_start, hunk):
+    # A hunk at line 1 has to match the file's start; one with fewer than
+    # 3 lines of context after its last change, the file's end (a later
+    # patch's hunks in the same file put after it, git apply refused it).
+    if not hunk:
+        return
+    trailing = 0
+    for kind, _ in reversed(hunk):
+        if kind != " ":
+            break
+        trailing += 1
+    where = head if at_start else tail if trailing < 3 else body
+    where.setdefault(cur, []).extend(text for kind, text in hunk if kind in (" ", "-"))
 for p in sys.argv[2:]:
-    cur, region, pending_new = None, None, False
+    cur, hunk, at_start, pending_new = None, None, False, False
     for line in open(p, newline=""):
+        if line.startswith(("--- ", "+++ ", "diff ", "@@")) and hunk is not None:
+            place(cur, at_start, hunk); hunk = None
         if line.startswith("--- /dev/null"):
-            pending_new, cur, region = True, None, None
+            pending_new, cur = True, None
         elif line.startswith("+++ b/") and pending_new:
             created.add(line[6:].strip()); pending_new = False
         elif line.startswith("--- a/"):
-            path = line[6:].strip(); region = None
+            path = line[6:].strip()
             cur = None if path in created else os.path.join(root, path)
-        elif line.startswith(("+++ ", "diff ")):
-            region = None
         elif line.startswith("@@") and cur:
-            # A hunk at line 1 has to match the file's start.
-            region = (head if line.startswith("@@ -1,") else body).setdefault(cur, [])
-        elif region is not None and line[:1] in (" ", "-"):
-            region.append(line[1:])
-for cur in set(head) | set(body):
+            hunk, at_start = [], line.startswith("@@ -1,")
+        elif hunk is not None and line[:1] in (" ", "-", "+"):
+            hunk.append((line[:1], line[1:]))
+        elif hunk and line.startswith("\\"):
+            # "No newline at end of file": the line before it ends the file
+            # without one - as the file has it, for a line it had already.
+            kind, text = hunk[-1]
+            hunk[-1] = (kind, text.rstrip("\r\n") if kind in (" ", "-") else text)
+    if hunk is not None:
+        place(cur, at_start, hunk)
+for cur in set(head) | set(body) | set(tail):
     os.makedirs(os.path.dirname(cur), exist_ok=True)
     with open(cur, "w", newline="") as f:
-        f.write("".join(head.get(cur, []) + body.get(cur, [])))
+        f.write("".join(head.get(cur, []) + body.get(cur, []) + tail.get(cur, [])))
 PY
 done
 mkdir -p "$W/install/bin/tools" "$T/client/Data"; : > "$W/install/bin/tools/ExtractResources.sh"
