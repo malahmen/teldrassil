@@ -40,6 +40,61 @@ cmd_rename_character() {
 # <realmd>.teldrassil_applied, so re-running an unchanged file does nothing.
 # -----------------------------------------------------------------------------
 
+# The record apply-sql and _world_sql keep: a file's content hash per database.
+_applied_table() {
+    printf '%s\n' "CREATE TABLE IF NOT EXISTS ${DB_REALMD}.teldrassil_applied (
+        sha256 CHAR(64) NOT NULL, file VARCHAR(255) NOT NULL, db VARCHAR(64) NOT NULL,
+        applied_at DATETIME NOT NULL, PRIMARY KEY (sha256, db));" | _db_raw
+}
+_sql_was_applied() {   # <sha256> <db>
+    [[ "$(_db_value "SELECT COUNT(*) FROM ${DB_REALMD}.teldrassil_applied WHERE sha256='${1}' AND db=$(_sql_str "$2");")" != "0" ]]
+}
+_sql_record() {        # <sha256> <file name> <db>
+    printf '%s\n' "REPLACE INTO ${DB_REALMD}.teldrassil_applied (sha256, file, db, applied_at) VALUES ('${1}', $(_sql_str "$2"), $(_sql_str "$3"), NOW());" | _db_raw
+}
+# _sql_forget <db>... — a restored database holds what its dump held, not what
+# was applied since: its files run again. No record yet is not an error.
+_sql_forget() {
+    local d list=""
+    for d in "$@"; do list+="$(_sql_str "$d"),"; done
+    [[ -n "$list" ]] || return 0
+    printf '%s\n' "DELETE FROM ${DB_REALMD}.teldrassil_applied WHERE db IN (${list%,});" | _db_raw >/dev/null 2>&1 || true
+}
+
+# -----------------------------------------------------------------------------
+# _world_sql — kalimdor's own world-database additions, which its playerbots
+# changes read: travel nodes, item rarity, the dungeon routes, the stats
+# tables. A kalimdor tree brings them in its sql/; on the upstream path
+# teldrassil carries them in templates/sql/ (kalimdor's files, at the same
+# commit as the patches). Run before the world server starts, each once per
+# content: an unchanged file is skipped, a new or changed one runs. Each can
+# run again and adds nothing twice. One that fails is said and skipped - the
+# server starts without it. Only for a server this teldrassil built and runs
+# here: in a cluster or on SSH_HOST the server's image is someone else's and
+# applies its own (kalimdor's deploy/kalimdor.sh).
+# -----------------------------------------------------------------------------
+
+_world_sql() {
+    local dir f hash name
+    _paths
+    _is_kube && return 0
+    [[ -z "$SSH_HOST" && -x "${INSTALL}/bin/mangosd" ]] || return 0
+    if _commits_changes; then dir="${SOURCE_DIR}/sql"; else dir="${SCRIPT_DIR}/templates/sql"; fi
+    compgen -G "${dir}/*.sql" >/dev/null || return 0
+    _applied_table || { warn "World database: no record of applied files; kalimdor's sql/ was not applied."; return 0; }
+    for f in "$dir"/*.sql; do
+        hash="$(sha256sum -- "$f" | cut -d' ' -f1)"; name="$(basename -- "$f")"
+        _sql_was_applied "$hash" "$DB_WORLD" && continue
+        if { printf 'USE `%s`;\n' "$DB_WORLD"; cat -- "$f"; printf '\n'; } | _db_raw >/dev/null; then
+            _sql_record "$hash" "$name" "$DB_WORLD"
+            success "World database: ${name} applied."
+        else
+            warn "World database: ${name} failed; the server starts without it."
+        fi
+    done
+    return 0
+}
+
 cmd_apply_sql() {
     local file="" db="" force=0 record=1 hash name
     while [[ $# -gt 0 ]]; do case "$1" in
@@ -54,16 +109,14 @@ cmd_apply_sql() {
     [[ "$db" =~ ^[A-Za-z0-9_]+$ ]] || error_exit "--db: a database name (letters, digits, underscore)."
     _require_db
     hash="$(sha256sum -- "$file" | cut -d' ' -f1)"; name="$(basename -- "$file")"
-    printf '%s\n' "CREATE TABLE IF NOT EXISTS ${DB_REALMD}.teldrassil_applied (
-        sha256 CHAR(64) NOT NULL, file VARCHAR(255) NOT NULL, db VARCHAR(64) NOT NULL,
-        applied_at DATETIME NOT NULL, PRIMARY KEY (sha256, db));" | _db_raw
-    if (( ! force )) && [[ "$(_db_value "SELECT COUNT(*) FROM ${DB_REALMD}.teldrassil_applied WHERE sha256='${hash}' AND db=$(_sql_str "$db");")" != "0" ]]; then
+    _applied_table
+    if (( ! force )) && _sql_was_applied "$hash" "$db"; then
         info "${name} (this exact content) was already applied to ${db}; nothing to do. --force runs it again."
         return 0
     fi
     { printf 'USE `%s`;\n' "$db"; cat -- "$file"; printf '\n'; } | _db_raw >/dev/null
     if (( record )); then
-        printf '%s\n' "REPLACE INTO ${DB_REALMD}.teldrassil_applied (sha256, file, db, applied_at) VALUES ('${hash}', $(_sql_str "$name"), $(_sql_str "$db"), NOW());" | _db_raw
+        _sql_record "$hash" "$name" "$db"
     fi
     success "${name} applied to ${db}."
     _server_running && warn "The world server is running: what it holds in memory (characters, guilds) may overwrite this, and world data takes a restart to load."
@@ -195,10 +248,13 @@ cmd_restore() {
         [[ -n "$db" ]] || error_exit "This dump names no database (a --tables dump): give --db NAME."
         info "Restoring into ${db}..."
         { printf 'USE `%s`;\n' "$db"; _cat_dump; } | _db_raw >/dev/null
+        _sql_forget "$db"
     else
         [[ -z "$db" ]] || warn "The dump names its databases (${names% }); --db is ignored."
         info "Restoring ${names% }..."
         _cat_dump | _db_raw >/dev/null
+        # shellcheck disable=SC2086  # names: database names, one word each
+        _sql_forget $names
     fi
     success "Restored. Start the server with 'start'."
 }

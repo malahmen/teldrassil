@@ -1,0 +1,533 @@
+diff --git a/playerbot/RandomPlayerbotMgr.cpp b/playerbot/RandomPlayerbotMgr.cpp
+index 3f0e96b..0c2a5f0 100644
+--- a/playerbot/RandomPlayerbotMgr.cpp
++++ b/playerbot/RandomPlayerbotMgr.cpp
+@@ -683,6 +683,19 @@ void RandomPlayerbotMgr::LogPlayerLocation()
+ 
+ void RandomPlayerbotMgr::UpdateAIInternal(uint32 elapsed, bool minimal)
+ {
++    // kalimdor: the group queue's matcher, here on the world's own update -
++    // no map, no bot is updating meanwhile (GroupQuests::Match; owner,
++    // 2026-11-24).
++    {
++        static time_t nextMatch = 0;
++        time_t const now = time(nullptr);
++        if (now >= nextMatch)
++        {
++            nextMatch = now + GroupQuests::MatchEvery;
++            GroupQuests::Match();
++        }
++    }
++
+ #ifdef MEMORY_MONITOR
+     sMemoryMonitor.LogCount(sConfig.GetStringDefault("LogsDir") + "/" + "memory.csv");
+     sMemoryMonitor.SampleDiagnostics();
+diff --git a/playerbot/strategy/actions/LookForGroupAction.cpp b/playerbot/strategy/actions/LookForGroupAction.cpp
+index 54c27a5..092a964 100644
+--- a/playerbot/strategy/actions/LookForGroupAction.cpp
++++ b/playerbot/strategy/actions/LookForGroupAction.cpp
+@@ -44,6 +44,7 @@ bool LookForGroupAction::Execute(Event& event)
+         sLog.outString("Bot #%d %s:%d <%s>: no group for %s (%u of %u) - %s, again in %d minutes", bot->GetGUIDLow(),
+             bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), quest->GetTitle().c_str(), have, wanted,
+             breakUp ? "the group breaks up" : "gives up for now", int(GroupQuests::RetryTime / 60));
++        GroupQuests::Withdraw(bot);
+         if (breakUp)
+             group->Disband();
+ 
+@@ -54,10 +55,13 @@ bool LookForGroupAction::Execute(Event& event)
+         return true;
+     }
+ 
++    // In the queue: the matcher fills its group (GroupQuests::Match). Its
++    // posts are only what a player would see.
++    GroupQuests::Ask(bot, quest);
+     if (now - AI_VALUE2(time_t, "manual time", "lfg posted") < GroupQuests::RepostTime)
+         return false;
+ 
+-    // "LFG" first: that is what bots answer (ChatReplyAction::ChatReplyDo).
++    // "LFG" first: what players look for in chat; bots answer it in words.
+     std::string const msg = "LFG " + ai->GetChatHelper()->formatQuest(quest) + " - " + std::to_string(wanted - have) + " more";
+     ai->SayToGeneral(msg);
+     ai->SayToLFG(msg);
+diff --git a/playerbot/strategy/actions/SayAction.cpp b/playerbot/strategy/actions/SayAction.cpp
+index 3c53447..c542de3 100644
+--- a/playerbot/strategy/actions/SayAction.cpp
++++ b/playerbot/strategy/actions/SayAction.cpp
+@@ -896,15 +896,6 @@ bool ChatReplyAction::HandleWTBItemsReply(Player* bot, ChatChannelSource chatCha
+ /*
+ * @return true if message contained quest ids
+ */
+-// kalimdor: closer bots first - for the first minutes of a search only bots
+-// near the one looking may join it; after that, any on its continent
+-// (owner, 2026-11-11; Kamino 151).
+-static bool NearEnough(Player* announcer, PlayerbotAI* announcerAi, Player* bot)
+-{
+-    time_t const since = announcerAi->GetAiObjectContext()->GetValue<time_t>("manual time", "lfg since")->Get();
+-    return !since || time(nullptr) - since >= 5 * MINUTE || bot->GetDistance(announcer) <= 1500.0f;
+-}
+-
+ bool ChatReplyAction::HandleLFGQuestsReply(Player* bot, ChatChannelSource chatChannelSource, std::string msg, std::string name)
+ {
+     auto messageQuestIds = bot->GetPlayerbotAI()->GetChatHelper()->ExtractAllQuestIds(msg);
+@@ -920,47 +911,9 @@ bool ChatReplyAction::HandleLFGQuestsReply(Player* bot, ChatChannelSource chatCh
+             messageQuestIds.insert(botQuestId);
+     }
+ 
+-    // kalimdor: a tank or a healer, in no group, joins a group looking for
+-    // its quest's group if the quest is of its level - with the quest or
+-    // without, to help: the roles groups lack most (dev, 2026-11-10: 28 of
+-    // 37 groups that broke up had no tank). It stays with the group by its
+-    // leader's quest (GroupQuests::Holds; owner, 2026-11-10; Kamino 151).
+-    if (!bot->GetGroup() && !bot->GetGroupInvite() && (PlayerbotAI::IsTank(bot, false) || PlayerbotAI::IsHeal(bot, false)))
+-    {
+-        Player* announcer = sObjectMgr.GetPlayer(name.c_str());
+-        PlayerbotAI* announcerAi = announcer ? announcer->GetPlayerbotAI() : nullptr;
+-        if (announcerAi && announcer != bot && !announcerAi->IsRealPlayer() && announcer->GetMapId() == bot->GetMapId() &&
+-            announcer->GetTeam() == bot->GetTeam() && !announcer->InBattleGround() && NearEnough(announcer, announcerAi, bot))
+-        {
+-            uint32 const questId = uint32(announcerAi->GetAiObjectContext()->GetValue<int>("manual int", "lfg quest")->Get());
+-            Quest const* quest = questId ? sObjectMgr.GetQuestTemplate(questId) : nullptr;
+-            Group* group = announcer->GetGroup();
+-            if (quest && bot->GetQuestStatus(questId) == QUEST_STATUS_NONE && GroupQuests::IsGroupQuest(quest) &&
+-                msg.find("[" + quest->GetTitle() + "]") != std::string::npos &&
+-                std::abs(int32(bot->GetLevel()) - int32(quest->GetQuestLevel())) <= 5 && bot->GetLevel() >= quest->GetMinLevel() &&
+-                GroupQuests::CanEnter(bot, quest) &&
+-                (!group || group->IsLeader(announcer->GetObjectGuid())) && GroupQuests::GroupSize(announcer) < GroupQuests::WantedSize(quest) &&
+-                GroupQuests::RoleFits(announcer, bot, GroupQuests::WantedSize(quest)))
+-            {
+-                if (group && !group->IsRaidGroup() && GroupQuests::WantedSize(quest) > 5 && GroupQuests::GroupSize(announcer) > 4)
+-                    group->ConvertToRaid();
+-                auto invited = announcerAi->GetAiObjectContext()->GetValue<std::string>("manual string", "lfg invited");
+-                invited->Set(invited->Get() + std::to_string(bot->GetGUIDLow()) + ",");
+-                WorldPacket p;
+-                p << bot->GetName();
+-                p << uint32(0);
+-                announcer->GetSession()->HandleGroupInviteOpcode(p);
+-                announcerAi->GetAiObjectContext()->GetValue<bool>("manual bool", "lfg grouped")->Set(true);
+-                bot->GetPlayerbotAI()->GetAiObjectContext()->GetValue<int>("manual int", "lfg joined")->Set(int(questId));
+-                bot->GetPlayerbotAI()->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get()->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
+-                announcerAi->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get()->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
+-                sLog.outString("Bot #%d %s:%d <%s>: joins %s's group for %s to help (%u of %u, %s)", bot->GetGUIDLow(),
+-                    bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), announcer->GetName(),
+-                    quest->GetTitle().c_str(), GroupQuests::GroupSize(announcer), GroupQuests::WantedSize(quest), GroupQuests::RoleName(bot));
+-                return true;
+-            }
+-        }
+-    }
++    // kalimdor: joining a group for a group quest is the queue's - its matcher
++    // places bots (GroupQuests::Match); a reply here is only words (owner,
++    // 2026-11-24: invites from chat, by many bots at once, crashed the server).
+ 
+     if (messageQuestIds.empty())
+     {
+@@ -976,108 +929,6 @@ bool ChatReplyAction::HandleLFGQuestsReply(Player* bot, ChatChannelSource chatCh
+         }
+     }
+ 
+-    // kalimdor: a bot with the same unfinished group quest, in no group,
+-    // joins the one looking - any level, higher ones help - if it is a bot
+-    // on the same map (its AI runs in this thread) whose group is not full
+-    // yet (values/GroupQuests.h; owner, 2026-11-06; Kamino 268).
+-    if (!matchingQuestIds.empty() && !bot->GetGroupInvite())
+-    {
+-        Player* announcer = sObjectMgr.GetPlayer(name.c_str());
+-        // kalimdor: groups for the same quest merge - one still forming for
+-        // a quest leaves it for a bigger group forming for it (the older
+-        // search on a tie); its old group follows the same way. On the dev
+-        // server 13 leaders searched for Blueleaf Tubers in two hours, each
+-        // group broke up at 3 of 5 (owner, 2026-11-10; Kamino 151).
+-        if (Group* own = bot->GetGroup())
+-        {
+-            PlayerbotAI* announcerAi = announcer ? announcer->GetPlayerbotAI() : nullptr;
+-            AiObjectContext* context = bot->GetPlayerbotAI()->GetAiObjectContext();
+-            int const joined = context->GetValue<int>("manual int", "lfg joined")->Get();
+-            int const searched = context->GetValue<int>("manual int", "lfg quest")->Get();
+-            int const forQuest = joined > 0 ? joined : searched;
+-            int const announced = announcerAi ? announcerAi->GetAiObjectContext()->GetValue<int>("manual int", "lfg quest")->Get() : 0;
+-            bool merge = announcerAi && announcer->GetGroup() != own && forQuest > 0 && forQuest == announced &&
+-                context->GetValue<int>("manual int", "group quest focus")->Get() <= 0;
+-            // Only to a group it can join - else it would be left in none.
+-            if (merge)
+-            {
+-                Quest const* quest = sObjectMgr.GetQuestTemplate(uint32(forQuest));
+-                Group* theirGroup = announcer->GetGroup();
+-                merge = quest && !announcerAi->IsRealPlayer() && announcer->GetMapId() == bot->GetMapId() && announcer->GetTeam() == bot->GetTeam() &&
+-                    NearEnough(announcer, announcerAi, bot) &&
+-                    !announcer->InBattleGround() && bot->GetQuestStatus(uint32(forQuest)) == QUEST_STATUS_INCOMPLETE &&
+-                    GroupQuests::CanEnter(bot, quest) &&
+-                    (!theirGroup || theirGroup->IsLeader(announcer->GetObjectGuid())) &&
+-                    GroupQuests::GroupSize(announcer) < GroupQuests::WantedSize(quest) &&
+-                    GroupQuests::RoleFits(announcer, bot, GroupQuests::WantedSize(quest));
+-            }
+-            for (GroupReference* ref = own->GetFirstMember(); merge && ref; ref = ref->next())
+-                if (Player* member = ref->getSource())
+-                    if (!member->GetPlayerbotAI() || member->GetPlayerbotAI()->IsRealPlayer())
+-                        merge = false;
+-            if (merge)
+-            {
+-                uint32 const theirs = GroupQuests::GroupSize(announcer), ours = own->GetMembersCount();
+-                time_t const theirSince = announcerAi->GetAiObjectContext()->GetValue<time_t>("manual time", "lfg since")->Get();
+-                Player* ownLeader = sObjectMgr.GetPlayer(own->GetLeaderGuid());
+-                time_t const ourSince = ownLeader && ownLeader->GetPlayerbotAI() ?
+-                    ownLeader->GetPlayerbotAI()->GetAiObjectContext()->GetValue<time_t>("manual time", "lfg since")->Get() : 0;
+-                merge = theirs > ours || (theirs == ours && theirSince && ourSince && theirSince < ourSince);
+-            }
+-            if (merge)
+-            {
+-                sLog.outString("Bot #%d %s:%d <%s>: leaves its group of %u for %s's, bigger, for the same quest", bot->GetGUIDLow(),
+-                    bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), own->GetMembersCount(), announcer->GetName());
+-                WorldPacket p;
+-                p << uint32(PARTY_OP_LEAVE) << std::string(bot->GetName()) << uint32(0);
+-                bot->GetSession()->HandleGroupDisbandOpcode(p);
+-                context->GetValue<int>("manual int", "lfg joined")->Set(0);
+-                context->GetValue<int>("manual int", "lfg quest")->Set(0);
+-                context->GetValue<time_t>("manual time", "lfg since")->Set(0);
+-            }
+-        }
+-        PlayerbotAI* announcerAi = announcer ? announcer->GetPlayerbotAI() : nullptr;
+-        if (!bot->GetGroup() && announcerAi && announcer != bot && !announcerAi->IsRealPlayer() && announcer->GetMapId() == bot->GetMapId() &&
+-            announcer->GetTeam() == bot->GetTeam() && !announcer->InBattleGround() && NearEnough(announcer, announcerAi, bot))
+-        {
+-            uint32 const questId = uint32(announcerAi->GetAiObjectContext()->GetValue<int>("manual int", "lfg quest")->Get());
+-            Quest const* quest = questId && matchingQuestIds.count(questId) ? sObjectMgr.GetQuestTemplate(questId) : nullptr;
+-            Group* group = announcer->GetGroup();
+-            if (quest && GroupQuests::IsGroupQuest(quest) && bot->GetQuestStatus(questId) == QUEST_STATUS_INCOMPLETE &&
+-                GroupQuests::CanEnter(bot, quest) &&
+-                (!group || group->IsLeader(announcer->GetObjectGuid())) && GroupQuests::GroupSize(announcer) < GroupQuests::WantedSize(quest) &&
+-                GroupQuests::RoleFits(announcer, bot, GroupQuests::WantedSize(quest)))
+-            {
+-                // kalimdor: a raid only for a quest that needs more than 5 -
+-                // a 5-player dungeon group made a raid at its fifth member
+-                // could neither travel for its quest (a raid only for raid
+-                // quests, QuestObjectiveTravelDestination::IsPossible) nor
+-                // enter its dungeon (Kamino 151).
+-                if (group && !group->IsRaidGroup() && GroupQuests::WantedSize(quest) > 5 && GroupQuests::GroupSize(announcer) > 4)
+-                    group->ConvertToRaid();
+-                auto invited = announcerAi->GetAiObjectContext()->GetValue<std::string>("manual string", "lfg invited");
+-                invited->Set(invited->Get() + std::to_string(bot->GetGUIDLow()) + ",");
+-                WorldPacket p;
+-                p << bot->GetName();
+-                p << uint32(0);
+-                announcer->GetSession()->HandleGroupInviteOpcode(p);
+-                announcerAi->GetAiObjectContext()->GetValue<bool>("manual bool", "lfg grouped")->Set(true);
+-                // kalimdor: it joins for this quest - it stays while that is
+-                // unfinished (GroupQuests::Holds; Kamino 151).
+-                bot->GetPlayerbotAI()->GetAiObjectContext()->GetValue<int>("manual int", "lfg joined")->Set(int(questId));
+-                // Whatever trip either was on - a repairer on another
+-                // continent - ends: the group waits together (owner,
+-                // 2026-11-10; no new upkeep trips while it holds, see
+-                // TravelActionMultiplier).
+-                bot->GetPlayerbotAI()->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get()->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
+-                announcerAi->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get()->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
+-                sLog.outString("Bot #%d %s:%d <%s>: joins %s's group for %s (%u of %u, %s)", bot->GetGUIDLow(),
+-                    bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), announcer->GetName(),
+-                    quest->GetTitle().c_str(), GroupQuests::GroupSize(announcer), GroupQuests::WantedSize(quest), GroupQuests::RoleName(bot));
+-            }
+-        }
+-    }
+-
+     if (!matchingQuestIds.empty())
+     {
+         std::map<std::string, std::string> placeholders;
+diff --git a/playerbot/strategy/values/GroupQuests.cpp b/playerbot/strategy/values/GroupQuests.cpp
+index 15b382a..45dcdbc 100644
+--- a/playerbot/strategy/values/GroupQuests.cpp
++++ b/playerbot/strategy/values/GroupQuests.cpp
+@@ -3,6 +3,13 @@
+ #include "QuestFlow.h"
+ #include "DungeonRun.h"
+ #include "Maps/Map.h"
++#include "Groups/Group.h"
++#include "playerbot/RandomPlayerbotMgr.h"
++#include "playerbot/TravelMgr.h"
++
++#include <map>
++#include <mutex>
++#include <vector>
+ 
+ #include <algorithm>
+ #include <set>
+@@ -49,6 +56,251 @@ namespace
+     }
+ }
+ 
++// The queue: who asks, for which quest; the matcher reads it on the world's
++// update (GroupQuests::Match).
++namespace
++{
++    std::mutex queueLock;
++    std::map<uint64, uint32> asking; // leader's guid -> quest
++
++    AiObjectContext* ContextOf(Player* player) { return player->GetPlayerbotAI()->GetAiObjectContext(); }
++
++    // A bot the matcher may move: in the world, alive, a bot's own AI.
++    bool Movable(Player* player)
++    {
++        return player && player->IsInWorld() && player->IsAlive() && !player->IsBeingTeleported() && !player->InBattleGround() &&
++            player->GetPlayerbotAI() && !player->GetPlayerbotAI()->IsRealPlayer();
++    }
++
++    // Its group's members, or itself alone.
++    std::vector<Player*> MembersOf(Player* leader)
++    {
++        std::vector<Player*> members;
++        if (Group* group = leader->GetGroup())
++        {
++            for (auto const& slot : group->GetMemberSlots())
++                if (Player* member = sObjectMgr.GetPlayer(slot.guid))
++                    members.push_back(member);
++        }
++        else
++            members.push_back(leader);
++        return members;
++    }
++
++    // These joiners all fit the leader's group by role at once.
++    bool FitAll(Player* leader, std::vector<Player*> const& joiners, uint32 wanted)
++    {
++        Limits const limits = LimitsFor(wanted);
++        uint32 counts[3] = { 0, 0, 0 };
++        uint32 total = 0;
++        for (Player* member : MembersOf(leader))
++        {
++            ++counts[RoleOf(member)];
++            ++total;
++        }
++        for (Player* joiner : joiners)
++        {
++            ++counts[RoleOf(joiner)];
++            ++total;
++        }
++        if (total > wanted || counts[Tank] > limits.maxTanks || counts[Healer] > limits.maxHealers)
++            return false;
++        uint32 const stillNeeded = (counts[Tank] < limits.minTanks ? limits.minTanks - counts[Tank] : 0) +
++            (counts[Healer] < limits.minHealers ? limits.minHealers - counts[Healer] : 0);
++        return wanted - total >= stillNeeded;
++    }
++
++    // The leader's group, made if it leads none yet.
++    Group* GroupFor(Player* leader)
++    {
++        if (Group* group = leader->GetGroup())
++            return group;
++        Group* group = new Group();
++        if (!group->Create(leader->GetObjectGuid(), leader->GetName()))
++        {
++            delete group;
++            return nullptr;
++        }
++        sObjectMgr.AddGroup(group);
++        return group;
++    }
++
++    // A place in the leader's group for the quest: it joins, holds the group
++    // for it (GroupQuests::Holds), and both drop whatever trip they were on.
++    bool Join(Player* leader, Player* bot, Quest const* quest, uint32 wanted, char const* how)
++    {
++        Group* group = GroupFor(leader);
++        if (!group)
++            return false;
++        if (!group->IsRaidGroup() && wanted > 5 && group->GetMembersCount() >= 5)
++            group->ConvertToRaid();
++        if (bot->GetGroup())
++            bot->RemoveFromGroup();
++        if (!group->AddMember(bot->GetObjectGuid(), bot->GetName()))
++            return false;
++        ContextOf(bot)->GetValue<int>("manual int", "lfg joined")->Set(int(quest->GetQuestId()));
++        ContextOf(bot)->GetValue<int>("manual int", "lfg quest")->Set(0);
++        ContextOf(bot)->GetValue<time_t>("manual time", "lfg since")->Set(0);
++        ContextOf(bot)->GetValue<TravelTarget*>("travel target")->Get()->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
++        ContextOf(leader)->GetValue<bool>("manual bool", "lfg grouped")->Set(true);
++        ContextOf(leader)->GetValue<TravelTarget*>("travel target")->Get()->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
++        sLog.outString("Bot #%d %s:%d <%s>: joins %s's group for %s%s (%u of %u, %s)", bot->GetGUIDLow(),
++            bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), leader->GetName(), quest->GetTitle().c_str(), how,
++            group->GetMembersCount(), wanted, GroupQuests::RoleName(bot));
++        return true;
++    }
++
++    // Close enough to the leader: its continent, and in its first 5 minutes
++    // within NearRange.
++    bool Near(Player* leader, Player* other)
++    {
++        if (leader->GetMapId() != other->GetMapId() || leader->GetInstanceId() != other->GetInstanceId())
++            return false;
++        time_t const since = ContextOf(leader)->GetValue<time_t>("manual time", "lfg since")->Get();
++        return !since || time(nullptr) - since >= 5 * MINUTE || leader->GetDistance(other) <= GroupQuests::NearRange;
++    }
++}
++
++void GroupQuests::Ask(Player* leader, Quest const* quest)
++{
++    std::lock_guard<std::mutex> guard(queueLock);
++    asking[leader->GetObjectGuid().GetRawValue()] = quest->GetQuestId();
++}
++
++void GroupQuests::Withdraw(Player* leader)
++{
++    std::lock_guard<std::mutex> guard(queueLock);
++    asking.erase(leader->GetObjectGuid().GetRawValue());
++}
++
++void GroupQuests::Match()
++{
++    std::map<uint64, uint32> asks;
++    {
++        std::lock_guard<std::mutex> guard(queueLock);
++        asks = asking;
++    }
++    struct Request { Player* leader; Quest const* quest; uint32 wanted; time_t since; };
++    std::map<std::pair<uint32, uint32>, std::vector<Request>> byQuest; // (team, quest)
++    std::vector<uint64> gone;
++    for (auto const& [raw, questId] : asks)
++    {
++        Player* leader = sObjectMgr.GetPlayer(ObjectGuid(raw));
++        Quest const* quest = sObjectMgr.GetQuestTemplate(questId);
++        bool ok = Movable(leader) && quest && ContextOf(leader)->GetValue<int>("manual int", "lfg quest")->Get() == int(questId) &&
++            ContextOf(leader)->GetValue<int>("manual int", "group quest focus")->Get() <= 0;
++        if (ok)
++            if (Group* group = leader->GetGroup())
++            {
++                ok = group->IsLeader(leader->GetObjectGuid());
++                for (Player* member : MembersOf(leader))
++                    if (!member->GetPlayerbotAI() || member->GetPlayerbotAI()->IsRealPlayer())
++                        ok = false; // a real player's group is its own
++            }
++        if (ok && GroupSize(leader) >= WantedSize(quest))
++            ok = false;
++        if (!ok)
++        {
++            gone.push_back(raw);
++            continue;
++        }
++        byQuest[{ uint32(leader->GetTeam()), questId }].push_back({ leader, quest, WantedSize(quest),
++            ContextOf(leader)->GetValue<time_t>("manual time", "lfg since")->Get() });
++    }
++    {
++        std::lock_guard<std::mutex> guard(queueLock);
++        for (uint64 raw : gone)
++            asking.erase(raw);
++    }
++    if (byQuest.empty())
++        return;
++
++    time_t const now = time(nullptr);
++    std::set<uint32> placed; // bots given a place this round
++    for (auto& [key, requests] : byQuest)
++    {
++        // The bigger first, then the longer waiting.
++        std::sort(requests.begin(), requests.end(), [](Request const& a, Request const& b)
++        {
++            uint32 const sa = GroupQuests::GroupSize(a.leader), sb = GroupQuests::GroupSize(b.leader);
++            return sa != sb ? sa > sb : a.since < b.since;
++        });
++        std::vector<bool> merged(requests.size(), false);
++        for (size_t i = 0; i < requests.size(); ++i)
++        {
++            if (merged[i])
++                continue;
++            Request const& into = requests[i];
++            // The smaller groups for the same quest, whole, while they fit.
++            for (size_t j = i + 1; j < requests.size(); ++j)
++            {
++                if (merged[j])
++                    continue;
++                Player* other = requests[j].leader;
++                std::vector<Player*> joiners = MembersOf(other);
++                bool fits = Near(into.leader, other) && GroupSize(into.leader) + joiners.size() <= into.wanted &&
++                    FitAll(into.leader, joiners, into.wanted);
++                for (Player* joiner : joiners)
++                    fits = fits && Movable(joiner) && CanEnter(joiner, into.quest) && !placed.count(joiner->GetGUIDLow());
++                if (!fits)
++                    continue;
++                sLog.outString("Bot #%d %s:%d <%s>: its group of %u joins %s's, bigger, for the same quest", other->GetGUIDLow(),
++                    other->GetTeam() == ALLIANCE ? "A" : "H", other->GetLevel(), other->GetName(), uint32(joiners.size()), into.leader->GetName());
++                Withdraw(other);
++                ContextOf(other)->GetValue<bool>("manual bool", "lfg grouped")->Set(false);
++                // Its members first, its leader last: the group it leaves
++                // goes when it is empty.
++                std::stable_partition(joiners.begin(), joiners.end(), [other](Player* p) { return p != other; });
++                for (Player* joiner : joiners)
++                    if (Join(into.leader, joiner, into.quest, into.wanted, ""))
++                        placed.insert(joiner->GetGUIDLow());
++                merged[j] = true;
++            }
++            // Free bots, the nearest first.
++            if (GroupSize(into.leader) >= into.wanted)
++                continue;
++            bool const late = into.since && now - into.since >= HelpAfter;
++            struct Candidate { Player* bot; float distance; char const* how; };
++            std::vector<Candidate> candidates;
++            for (auto const& [low, bot] : sRandomPlayerbotMgr.GetAllBots())
++            {
++                if (!Movable(bot) || bot == into.leader || bot->GetTeam() != into.leader->GetTeam() || bot->GetGroup() || bot->GetGroupInvite() ||
++                    placed.count(bot->GetGUIDLow()) || !Near(into.leader, bot))
++                    continue;
++                AiObjectContext* context = ContextOf(bot);
++                if (context->GetValue<int>("manual int", "lfg quest")->Get() > 0 || context->GetValue<int>("manual int", "group quest focus")->Get() > 0)
++                    continue;
++                uint32 const questId = into.quest->GetQuestId();
++                QuestStatus const status = bot->GetQuestStatus(questId);
++                int32 const above = int32(bot->GetLevel()) - int32(into.quest->GetQuestLevel());
++                char const* how = nullptr;
++                if (status == QUEST_STATUS_INCOMPLETE)
++                    how = "";
++                else if (status == QUEST_STATUS_NONE && bot->GetLevel() >= into.quest->GetMinLevel())
++                {
++                    if ((PlayerbotAI::IsTank(bot, false) || PlayerbotAI::IsHeal(bot, false)) && std::abs(above) <= 5)
++                        how = " to help";
++                    else if (late && above > 0 && above <= HelpLevelGap)
++                        how = above > 5 ? " to help, above its level" : " to help";
++                }
++                if (!how || !CanEnter(bot, into.quest))
++                    continue;
++                candidates.push_back({ bot, into.leader->GetDistance(bot), how });
++            }
++            std::sort(candidates.begin(), candidates.end(), [](Candidate const& a, Candidate const& b) { return a.distance < b.distance; });
++            for (Candidate const& candidate : candidates)
++            {
++                if (GroupSize(into.leader) >= into.wanted)
++                    break;
++                if (!FitAll(into.leader, { candidate.bot }, into.wanted))
++                    continue;
++                if (Join(into.leader, candidate.bot, into.quest, into.wanted, candidate.how))
++                    placed.insert(candidate.bot->GetGUIDLow());
++            }
++        }
++    }
++}
++
+ bool GroupQuests::IsGroupQuest(Quest const* quest)
+ {
+     return quest && (quest->GetType() == QUEST_TYPE_ELITE || quest->GetType() == QUEST_TYPE_DUNGEON || quest->GetType() == QUEST_TYPE_RAID ||
+diff --git a/playerbot/strategy/values/GroupQuests.h b/playerbot/strategy/values/GroupQuests.h
+index 2f3087b..4094af3 100644
+--- a/playerbot/strategy/values/GroupQuests.h
++++ b/playerbot/strategy/values/GroupQuests.h
+@@ -81,5 +81,27 @@ namespace ai
+         // grouper type: on the dev server dungeon groups fell apart on their
+         // way there (Kamino 151).
+         static bool Holds(Player* bot);
++
++        // The queue (owner, 2026-11-24): a bot looking for a group for its
++        // group quest asks here (LookForGroupAction), and withdraws as it
++        // gives up. One matcher, run on the world's own update between map
++        // updates (RandomPlayerbotMgr, every MatchEvery), makes every join
++        // and merge itself, by faction - no bot invites another from chat in
++        // the middle of its update: groups and invites changed by many bots
++        // at once crashed the cluster's world server (2026-11-24). It fills
++        // a group, the bigger first, with:
++        // - the smaller groups asking for the same quest, whole (merged);
++        // - free bots with the quest, any level;
++        // - free tanks and healers within 5 levels, without it;
++        // - after HelpAfter, free bots of any role up to HelpLevelGap above
++        //   it, without it (to help).
++        // Its own continent only; for the first 5 minutes only bots within
++        // NearRange. A bot is free in no group, not asking, not set on a
++        // group quest. Groups with a real player are never touched.
++        static void Ask(Player* leader, Quest const* quest);
++        static void Withdraw(Player* leader);
++        static void Match();
++        static constexpr time_t MatchEvery = 5;
++        static constexpr float NearRange = 1500.0f;
+     };
+ }

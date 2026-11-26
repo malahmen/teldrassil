@@ -49,8 +49,9 @@ chk "nothing outside the subfolder moved"  '[[ "$(cat "$T/kal/other/y")" == x ]]
 
 # _applied, _patch, _unpatch and _checkout_repo, with the messages they print kept.
 eval "$(sed -n -e '/^_applied() {/,/^}/p' -e '/^_patch() {/,/^}/p' -e '/^_unpatch() {/,/^}/p' -e '/^_checkout_repo() {/,/^}/p' "$SRC")"
-eval "$(grep -E '^(_patch_dir\(\) \{|_PATCH_TREES=)' "$SRC")"
-declare -F _patch_dir >/dev/null && [[ ${#_PATCH_TREES[@]} -gt 0 ]] || { echo "no _patch_dir/_PATCH_TREES in $SRC"; exit 1; }
+eval "$(grep -E '^(_patch_dir\(\) \{|_PATCH_TREES=|_commits_changes\(\) \{)' "$SRC")"
+declare -F _patch_dir >/dev/null && declare -F _commits_changes >/dev/null && [[ ${#_PATCH_TREES[@]} -gt 0 ]] ||
+    { echo "no _patch_dir/_commits_changes/_PATCH_TREES in $SRC"; exit 1; }
 info() { echo "info: $*"; }; success() { echo "ok: $*"; }; warn() { echo "warn: $*"; }
 error_exit() { echo "error: $*"; exit 1; }
 mkdir -p "$T/patches/playerbots"; cp "$T/fix.patch" "$T/patches/playerbots/0001-fix.patch"
@@ -123,6 +124,27 @@ chk "  and no file was rewritten (nothing recompiles)" '[[ "$(stat -c %Y.%y "$SR
 _unpatch "$SRC_PB"
 chk "_unpatch takes both off, last first"             'grep -qx "line two" "$SRC_PB/playerbot/x.cpp" && [[ -z "$(g -C "$T/src" status --porcelain -- playerbots)" ]]'
 rm "$T/patches/playerbots/0002-on-top.patch"
+
+printf '\n== a kalimdor tree (PROVENANCE.md): its changes are commits, no patch touches it (Kamino 290)\n'
+# kalimdor's branch past the stack: the patch's lines rewritten by a later
+# commit - neither on nor off. Before, _applied read 0, 0001 "does not apply",
+# and build stopped.
+rm -rf "$T/src"; mk_origin "$T/kal-origin" committed; g clone -q "$T/kal-origin" "$T/src"
+printf 'line one\nline 2, then a later change\n' > "$T/src/playerbots/playerbot/x.cpp"; g -C "$T/src" commit -qam "later"
+out="$( (_patch) 2>&1)"; rc=$?
+chk "without PROVENANCE.md, as before: it does not apply" '[[ $rc -ne 0 && "$out" == *"does not apply"* ]]'
+echo "provenance" > "$T/src/PROVENANCE.md"; g -C "$T/src" add -A; g -C "$T/src" commit -qm provenance
+out="$( (_patch) 2>&1)"; rc=$?
+chk "with it: no error, nothing applied, and it says so"  '[[ $rc -eq 0 && "$out" == *"no patches applied"* && "$out" != *"Patch playerbots"* ]]'
+chk "  the tree untouched"                              '[[ -z "$(g -C "$T/src" status --porcelain)" ]] && grep -qx "line 2, then a later change" "$SRC_PB/playerbot/x.cpp"'
+rm -rf "$T/src"; mk_origin "$T/kal-origin" committed; g clone -q "$T/kal-origin" "$T/src"
+echo "provenance" > "$T/src/PROVENANCE.md"; g -C "$T/src" add -A; g -C "$T/src" commit -qm provenance
+_unpatch "$SRC_PB"
+chk "_unpatch leaves its committed changes on"           '[[ -z "$(g -C "$T/src" status --porcelain)" ]] && grep -qx "line 2" "$SRC_PB/playerbot/x.cpp"'
+upstream_moves "$T/kal-origin"; echo "provenance" > "$T/kal-origin/PROVENANCE.md"; g -C "$T/kal-origin" add -A; g -C "$T/kal-origin" commit -qm provenance
+g -C "$T/src" reset -q --hard HEAD~1
+out="$( (_checkout_repo "$T/src" "$T/kal-origin" main 1) 2>&1)"; rc=$?
+chk "source --update moves it, its changes kept"         '[[ $rc -eq 0 && -z "$(g -C "$T/src" status --porcelain)" ]] && grep -qx "line 2" "$SRC_PB/playerbot/x.cpp"'
 
 printf '\npass=%d fail=%d\n' "$pass" "$fail"
 (( fail == 0 ))

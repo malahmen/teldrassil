@@ -86,6 +86,7 @@ _start() {
         _on_host "$PODMAN" start "$REALM_CONTAINER" >/dev/null; success "Realm server started."
     fi
     if _server_running; then _bots_push_pending_warn; info "The world server is already running."; return 0; fi
+    _world_sql
     since="$(date +%s)"
     _server_start_raw
     _wait_world "$since"

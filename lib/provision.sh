@@ -190,6 +190,13 @@ cmd_source() {
 # the checkout a folder's patches belong to.
 _patch_dir() { case "$1" in playerbots) printf '%s' "$SRC_PB" ;; mangos-classic) printf '%s' "$SRC_MANGOS" ;; esac; }
 _PATCH_TREES=(mangos-classic playerbots)
+# _commits_changes — the sources are a repository that commits its changes
+# itself: kalimdor, with PROVENANCE.md at its root. Its tree is the source of
+# truth and gets no patches applied or taken off: a kalimdor branch ahead of
+# the stack (its next pull request) no longer reads as patched, and the build
+# stopped at 0001 as "does not apply" (Kamino 290). The patches are for the
+# pinned upstreams.
+_commits_changes() { [[ -f "$(dirname "$SRC_PB")/PROVENANCE.md" ]]; }
 # _apply <dir> <git apply args...> — git apply, right in a subfolder too. In a
 # subfolder of a bigger repository (kalimdor's playerbots/), git apply skips
 # every file outside it, so a patch whose paths are relative to playerbots
@@ -230,6 +237,10 @@ _applied() {
 
 _patch() {
     local tree dir p i n
+    if _commits_changes; then
+        info "Sources: $(dirname "$SRC_PB") commits its own changes (PROVENANCE.md) - no patches applied."
+        return 0
+    fi
     for tree in "${_PATCH_TREES[@]}"; do
         dir="$(_patch_dir "$tree")"
         n="$(_applied "$tree")"; i=0
@@ -251,6 +262,7 @@ _patch() {
 _unpatch() {
     local dir="$1" tree p i n
     local -a ps
+    _commits_changes && return 0 # its changes are commits, not patches
     for tree in "${_PATCH_TREES[@]}"; do
         [[ "$dir" == "$(_patch_dir "$tree")" ]] || continue
         n="$(_applied "$tree")"; ps=()
