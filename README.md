@@ -451,11 +451,11 @@ bot in five a tank, one in five a healer, at this population.
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries sixty-four changes to playerbots (`templates/patches/playerbots/`)
+teldrassil carries sixty-five changes to playerbots (`templates/patches/playerbots/`)
 and eight to the core (`templates/patches/mangos-classic/`), applied in order
 before every build to the pinned upstreams - together they make kalimdor's tree
 exactly (checked: the stack on kalimdor's untouched import gives kalimdor
-`98b410a`, both trees). Sources that are kalimdor itself (`PROVENANCE.md` at
+`79ae5e3`, both trees). Sources that are kalimdor itself (`PROVENANCE.md` at
 their root - `SOURCE_REPO`, or `SOURCE_DIR` on a kalimdor clone) commit their
 changes: nothing is applied to them or taken off, so a kalimdor branch ahead
 of the stack builds as it is (Kamino 290).
@@ -741,6 +741,10 @@ on `SSH_HOST` the server's image applies its own (Kamino 298).
   less, as the server - unsold items vanish instead of being mailed to a
   random bot - and buys only as its own character (`AhBot.GUID`), if set.
   (Kamino 273, 2026-11-09.)
+- **playerbots 0065:** no stealth on a dungeon run or its way in - rogues
+  neither stealth nor prowl, and leave it at once: a stealthed rogue leader
+  stood still until what respawned there two hours later attacked it.
+  (kalimdor #1 on GitHub, 2026-11-27.)
 - **playerbots 0064, mangos-classic 0008:** run records - each run, boss
   kills for everyone there, and lifetime totals in `kalimdor_*` tables the
   server creates itself; nothing grows for good. (kalimdor #70, 2026-11-27.)
