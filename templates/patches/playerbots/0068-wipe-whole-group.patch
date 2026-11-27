@@ -1,5 +1,5 @@
 diff --git a/playerbot/strategy/values/DungeonRun.cpp b/playerbot/strategy/values/DungeonRun.cpp
-index b93a4e5..2de6ad3 100644
+index 0470146..3cfb536 100644
 --- a/playerbot/strategy/values/DungeonRun.cpp
 +++ b/playerbot/strategy/values/DungeonRun.cpp
 @@ -16,6 +16,7 @@
@@ -55,10 +55,10 @@ index b93a4e5..2de6ad3 100644
      record.wiped = wiped;
      return record.wipes;
 diff --git a/playerbot/strategy/values/DungeonRun.h b/playerbot/strategy/values/DungeonRun.h
-index 7b4a8b0..9d2588a 100644
+index 0fd7c19..dbe1566 100644
 --- a/playerbot/strategy/values/DungeonRun.h
 +++ b/playerbot/strategy/values/DungeonRun.h
-@@ -402,8 +402,10 @@ namespace ai
+@@ -405,8 +405,10 @@ namespace ai
          // instance - not its leader's alone. A new leader goes on from it
          // (step, best step, wipes, escort tries); it started again from the
          // portal, every count at 0. Wipes are counted here by any member,
