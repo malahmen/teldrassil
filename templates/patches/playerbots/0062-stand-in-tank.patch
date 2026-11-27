@@ -1,0 +1,355 @@
+diff --git a/playerbot/AiFactory.cpp b/playerbot/AiFactory.cpp
+index dec69c5..4d5fd8f 100644
+--- a/playerbot/AiFactory.cpp
++++ b/playerbot/AiFactory.cpp
+@@ -17,6 +17,7 @@
+ #include "playerbot/PlayerbotAIConfig.h"
+ #include "playerbot/RandomPlayerbotMgr.h"
+ #include "BattleGround/BattleGroundMgr.h"
++#include "playerbot/strategy/values/GroupQuests.h"
+ 
+ AiObjectContext* AiFactory::createAiObjectContext(Player* player, PlayerbotAI* ai)
+ {
+@@ -242,7 +243,7 @@ BotRoles AiFactory::GetPlayerRoles(const Player* player)
+     switch (cls)
+     {
+         case CLASS_WARRIOR: {
+-            if (tab == 2 || player->HasAura(71)) // Defensive stance
++            if (tab == 2 || player->HasAura(71) || ai::GroupQuests::StandInTank(player)) // Defensive stance; a stand-in
+             {
+                 role = BOT_ROLE_TANK;
+             }
+@@ -259,7 +260,7 @@ BotRoles AiFactory::GetPlayerRoles(const Player* player)
+         }
+ 
+         case CLASS_DRUID: {
+-            if (player->HasAura(5487) || player->HasAura(9634)) // Bear form, Dire bear form
++            if (player->HasAura(5487) || player->HasAura(9634) || ai::GroupQuests::StandInTank(player)) // Bear form, Dire bear form; a stand-in
+             {
+                 role = BOT_ROLE_TANK;
+             }
+@@ -292,6 +293,8 @@ BotRoles AiFactory::GetPlayerRoles(const Player* player)
+ void AiFactory::AddDefaultCombatStrategies(Player* player, PlayerbotAI* const facade, Engine* combatEngine)
+ {
+     int tab = GetPlayerSpecTab(player);
++    // kalimdor: a stand-in tank tanks (GroupQuests::StandInTank).
++    bool const standIn = ai::GroupQuests::StandInTank(player);
+ 
+     combatEngine->addStrategies("mount", NULL);
+     combatEngine->addStrategy("avoid mobs");
+@@ -351,7 +354,7 @@ void AiFactory::AddDefaultCombatStrategies(Player* player, PlayerbotAI* const fa
+ 
+         case CLASS_WARRIOR:
+         {
+-            if (tab == 2)
++            if (tab == 2 || standIn)
+             {
+                 combatEngine->addStrategies("protection", "tank assist", "pull", "pull back", "close", NULL);
+             }
+@@ -418,9 +421,9 @@ void AiFactory::AddDefaultCombatStrategies(Player* player, PlayerbotAI* const fa
+ 
+         case CLASS_DRUID:
+         {
+-            if (tab == 1)
++            if (tab == 1 || standIn)
+             {
+-                if (player->HasSpell(16961) || player->HasSpell(16958))
++                if (standIn || player->HasSpell(16961) || player->HasSpell(16958))
+                 {
+                     combatEngine->addStrategies("tank feral", "tank assist", "pull", "pull back", "close", NULL);
+                 }
+@@ -692,6 +695,8 @@ Engine* AiFactory::createCombatEngine(Player* player, PlayerbotAI* const facade,
+ void AiFactory::AddDefaultNonCombatStrategies(Player* player, PlayerbotAI* const facade, Engine* nonCombatEngine)
+ {
+     const int tab = GetPlayerSpecTab(player);
++    // kalimdor: a stand-in tank tanks (GroupQuests::StandInTank).
++    bool const standIn = ai::GroupQuests::StandInTank(player);
+     switch (player->getClass())
+     {
+         case CLASS_PRIEST:
+@@ -829,9 +834,9 @@ void AiFactory::AddDefaultNonCombatStrategies(Player* player, PlayerbotAI* const
+ 
+         case CLASS_DRUID:
+         {
+-            if (tab == 1)
++            if (tab == 1 || standIn)
+             {
+-                if (player->HasSpell(16961) || player->HasSpell(16958))
++                if (standIn || player->HasSpell(16961) || player->HasSpell(16958))
+                 {
+                     nonCombatEngine->addStrategies("tank feral", "tank assist", NULL);
+                 }
+@@ -855,7 +860,7 @@ void AiFactory::AddDefaultNonCombatStrategies(Player* player, PlayerbotAI* const
+ 
+         case CLASS_WARRIOR:
+         {
+-            if (tab == 2)
++            if (tab == 2 || standIn)
+             {
+                 nonCombatEngine->addStrategies("protection", "tank assist", NULL);
+             }
+@@ -1125,6 +1130,8 @@ void AiFactory::AddDefaultDeadStrategies(Player* player, PlayerbotAI* const faca
+     }
+ 
+     const int tab = GetPlayerSpecTab(player);
++    // kalimdor: a stand-in tank tanks (GroupQuests::StandInTank).
++    bool const standIn = ai::GroupQuests::StandInTank(player);
+     switch (player->getClass())
+     {
+         case CLASS_SHAMAN:
+@@ -1219,7 +1226,7 @@ void AiFactory::AddDefaultDeadStrategies(Player* player, PlayerbotAI* const faca
+ 
+         case CLASS_WARRIOR:
+         {
+-            if (tab == 2)
++            if (tab == 2 || standIn)
+             {
+                 deadEngine->addStrategy("protection");
+             }
+@@ -1237,9 +1244,9 @@ void AiFactory::AddDefaultDeadStrategies(Player* player, PlayerbotAI* const faca
+ 
+         case CLASS_DRUID:
+         {
+-            if (tab == 1)
++            if (tab == 1 || standIn)
+             {
+-                if (player->HasSpell(16961) || player->HasSpell(16958))
++                if (standIn || player->HasSpell(16961) || player->HasSpell(16958))
+                 {
+                     deadEngine->addStrategy("tank feral");
+                 }
+diff --git a/playerbot/PlayerbotAI.cpp b/playerbot/PlayerbotAI.cpp
+index ad54db9..906ee46 100644
+--- a/playerbot/PlayerbotAI.cpp
++++ b/playerbot/PlayerbotAI.cpp
+@@ -5,6 +5,7 @@
+ 
+ #include "playerbot/AiFactory.h"
+ #include "playerbot/strategy/values/Archetypes.h"
++#include "playerbot/strategy/values/GroupQuests.h"
+ 
+ #include "MotionGenerators/MovementGenerator.h"
+ #include "Grids/GridNotifiers.h"
+@@ -2534,6 +2535,22 @@ void PlayerbotAI::DoNextAction(bool min)
+             ResetStrategies();
+     }
+ 
++    // kalimdor: made a stand-in tank, it tanks; out of the group, it is
++    // itself again (GroupQuests::StandInTank).
++    {
++        bool standIn = ai::GroupQuests::StandInTank(bot);
++        if (standIn && !bot->GetGroup())
++        {
++            ai::GroupQuests::SetStandIn(bot, false);
++            standIn = false;
++        }
++        if (standIn != standInTank)
++        {
++            standInTank = standIn;
++            ResetStrategies();
++        }
++    }
++
+     // fix bots in BG not having proper strategies
+ #ifdef MANGOSBOT_ZERO
+     if (bot->InBattleGround() && !HasStrategy("battleground", BotState::BOT_STATE_NON_COMBAT))
+diff --git a/playerbot/PlayerbotAI.h b/playerbot/PlayerbotAI.h
+index e84b0d0..f7ca2dc 100644
+--- a/playerbot/PlayerbotAI.h
++++ b/playerbot/PlayerbotAI.h
+@@ -793,6 +793,8 @@ protected:
+     bool isWaiting = false;
+     // kalimdor: the level the archetype's weights were last read at (Kamino 249).
+     uint32 archetypeLevel = 0;
++    // kalimdor: whether its strategies are a stand-in tank's (GroupQuests).
++    bool standInTank = false;
+     BotCheatMask cheatMask = BotCheatMask::none;
+     WorldPosition jumpDestination;
+     uint32 jumpTime;
+diff --git a/playerbot/strategy/values/GroupQuests.cpp b/playerbot/strategy/values/GroupQuests.cpp
+index cf2cd54..942a4aa 100644
+--- a/playerbot/strategy/values/GroupQuests.cpp
++++ b/playerbot/strategy/values/GroupQuests.cpp
+@@ -31,9 +31,14 @@ namespace
+ 
+     enum Role { Tank, Healer, Damage };
+ 
++    // Stand-in tanks (GroupQuests::StandInTank): set on the world's update,
++    // read on the maps'.
++    std::mutex standInLock;
++    std::set<uint32> standIns;
++
+     Role RoleOf(Player* player)
+     {
+-        if (PlayerbotAI::IsTank(player, false))
++        if (GroupQuests::StandInTank(player) || PlayerbotAI::IsTank(player, false))
+             return Tank;
+         if (PlayerbotAI::IsHeal(player, false))
+             return Healer;
+@@ -106,6 +111,32 @@ namespace
+         return members;
+     }
+ 
++    bool HasTank(Player* leader)
++    {
++        for (Player* member : MembersOf(leader))
++            if (RoleOf(member) == Tank)
++                return true;
++        return false;
++    }
++
++    // None came: the member that can, the highest level first, stands in as
++    // the group's tank (GroupQuests::StandInAfter).
++    void StandInMember(Player* leader, Quest const* quest, time_t waited)
++    {
++        if (HasTank(leader))
++            return;
++        Player* best = nullptr;
++        for (Player* member : MembersOf(leader))
++            if (GroupQuests::CanStandIn(member) && (!best || member->GetLevel() > best->GetLevel()))
++                best = member;
++        if (!best)
++            return;
++        GroupQuests::SetStandIn(best, true);
++        sLog.outString("Bot #%d %s:%d <%s>: stands in as the tank of %s's group for %s - none came in %u minutes",
++            best->GetGUIDLow(), best->GetTeam() == ALLIANCE ? "A" : "H", best->GetLevel(), best->GetName(),
++            leader->GetName(), quest->GetTitle().c_str(), uint32(waited / 60));
++    }
++
+     // These joiners all fit the leader's group by role at once.
+     bool FitAll(Player* leader, std::vector<Player*> const& joiners, uint32 wanted)
+     {
+@@ -374,6 +405,9 @@ void GroupQuests::Match()
+                 keep = since && time(nullptr) - since <= WaitFor(WantedSize(quest));
+                 if (!keep)
+                     BreakUpNow(leader);
++                // Full with no tank: no real one can join - a member stands in.
++                else if (time(nullptr) - since >= StandInAfter && LimitsFor(WantedSize(quest)).minTanks > 0 && !HasTank(leader))
++                    StandInMember(leader, quest, time(nullptr) - since);
+             }
+         }
+         if (!ok)
+@@ -409,6 +443,10 @@ void GroupQuests::Match()
+             if (merged[i])
+                 continue;
+             Request const& into = requests[i];
++            // Searching StandInAfter with no tank - no real one came, of any
++            // level - one that can stands in (after the real tanks' pass).
++            bool const needTank = !into.setOff && into.since && now - into.since >= StandInAfter && LimitsFor(into.wanted).minTanks > 0 &&
++                !HasTank(into.leader);
+             // The smaller groups for the same quest, whole, while they fit -
+             // groups not set off yet: one set off only takes free bots.
+             for (size_t j = i + 1; j < requests.size() && !into.setOff; ++j)
+@@ -455,11 +493,17 @@ void GroupQuests::Match()
+                 char const* how = nullptr;
+                 if (status == QUEST_STATUS_INCOMPLETE)
+                     how = "";
+-                else if (status == QUEST_STATUS_NONE && bot->GetLevel() >= into.quest->GetMinLevel())
++                else if (bot->GetLevel() >= into.quest->GetMinLevel())
+                 {
+-                    if ((PlayerbotAI::IsTank(bot, false) || PlayerbotAI::IsHeal(bot, false)) && std::abs(above) <= 5)
++                    // A tank: up to TankLevelGap above at once, any level
++                    // above once late - to the cap (owner, 2026-11-26); one
++                    // above has mostly done the quest already.
++                    bool const fresh = status == QUEST_STATUS_NONE;
++                    if (PlayerbotAI::IsTank(bot, false) && above >= -5 && (above <= TankLevelGap || late))
++                        how = above > 5 ? " to tank, above its level" : " to help";
++                    else if (fresh && PlayerbotAI::IsHeal(bot, false) && std::abs(above) <= 5)
+                         how = " to help";
+-                    else if (late && above > 0 && above <= HelpLevelGap)
++                    else if (fresh && late && above > 0 && above <= HelpLevelGap)
+                         how = above > 5 ? " to help, above its level" : " to help";
+                 }
+                 if (!how || !CanEnter(bot, into.quest))
+@@ -467,19 +511,62 @@ void GroupQuests::Match()
+                 candidates.push_back({ bot, into.leader->GetDistance(bot), how });
+             }
+             std::sort(candidates.begin(), candidates.end(), [](Candidate const& a, Candidate const& b) { return a.distance < b.distance; });
++            // Real tanks first: a proper tank, of any level above, before a
++            // stand-in (owner, 2026-11-26: some dungeons need one even at 20).
++            for (int pass = 0; pass < 2; ++pass)
++            {
++            if (pass == 1 && needTank)
++                StandInMember(into.leader, into.quest, now - into.since);
+             for (Candidate const& candidate : candidates)
+             {
+                 if (GroupSize(into.leader) >= into.wanted)
+                     break;
+-                if (!FitAll(into.leader, { candidate.bot }, into.wanted))
++                if (placed.count(candidate.bot->GetGUIDLow()) || (pass == 0 && RoleOf(candidate.bot) != Tank))
+                     continue;
+-                if (Join(into.leader, candidate.bot, into.quest, into.wanted, candidate.how))
+-                    placed.insert(candidate.bot->GetGUIDLow());
++                // Still no tank: one that can, joining, stands in.
++                bool standIn = false;
++                if (needTank && RoleOf(candidate.bot) == Damage && CanStandIn(candidate.bot) &&
++                    !HasTank(into.leader))
++                {
++                    SetStandIn(candidate.bot, true);
++                    standIn = true;
++                }
++                if (!FitAll(into.leader, { candidate.bot }, into.wanted) ||
++                    !Join(into.leader, candidate.bot, into.quest, into.wanted, standIn ? " to stand in as its tank" : candidate.how))
++                {
++                    if (standIn)
++                        SetStandIn(candidate.bot, false);
++                    continue;
++                }
++                placed.insert(candidate.bot->GetGUIDLow());
++            }
+             }
+         }
+     }
+ }
+ 
++bool GroupQuests::StandInTank(Player const* bot)
++{
++    std::lock_guard<std::mutex> guard(standInLock);
++    return bot && standIns.count(bot->GetGUIDLow());
++}
++
++bool GroupQuests::CanStandIn(Player const* bot)
++{
++    // A warrior; a druid with its bear form. Not a healer - a group's one.
++    return bot && (bot->getClass() == CLASS_WARRIOR || (bot->getClass() == CLASS_DRUID && bot->HasSpell(5487))) &&
++        !PlayerbotAI::IsHeal(const_cast<Player*>(bot), false);
++}
++
++void GroupQuests::SetStandIn(Player const* bot, bool on)
++{
++    std::lock_guard<std::mutex> guard(standInLock);
++    if (on)
++        standIns.insert(bot->GetGUIDLow());
++    else
++        standIns.erase(bot->GetGUIDLow());
++}
++
+ bool GroupQuests::IsGroupQuest(Quest const* quest)
+ {
+     return quest && (quest->GetType() == QUEST_TYPE_ELITE || quest->GetType() == QUEST_TYPE_DUNGEON || quest->GetType() == QUEST_TYPE_RAID ||
+diff --git a/playerbot/strategy/values/GroupQuests.h b/playerbot/strategy/values/GroupQuests.h
+index 7292a5a..455d154 100644
+--- a/playerbot/strategy/values/GroupQuests.h
++++ b/playerbot/strategy/values/GroupQuests.h
+@@ -41,6 +41,21 @@ namespace ai
+         // levels above its quest join to help (owner, 2026-11-23).
+         static constexpr time_t HelpAfter = 10 * 60;
+         static constexpr int32 HelpLevelGap = 10;
++        // kalimdor: a real tank joins from up to TankLevelGap levels above
++        // the quest at once, from any level above after HelpAfter (owner,
++        // 2026-11-26: some dungeons need a proper tank even at 20).
++        static constexpr int32 TankLevelGap = 10;
++        // Searching StandInAfter with no tank still, a warrior or a druid
++        // with its bear form - in the group, or joining it - stands in as its
++        // tank for the run: below 20 few bots have the talents that tell a
++        // tank, and 5-bot groups for the Wailing Caverns waited at 4 of 5
++        // for one that never came, and broke up (cluster, 2026-11-26).
++        static constexpr time_t StandInAfter = 2 * HelpAfter;
++        // Its strategies follow (AiFactory); leaving the group, it is
++        // itself again (PlayerbotAI::UpdateAI).
++        static bool StandInTank(Player const* bot);
++        static bool CanStandIn(Player const* bot);
++        static void SetStandIn(Player const* bot, bool on);
+         static constexpr time_t RepostTime = 15 * 60;
+         static constexpr time_t RetryTime = 30 * 60;
+ 

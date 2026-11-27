@@ -1,0 +1,171 @@
+diff --git a/playerbot/strategy/actions/DungeonRunAction.cpp b/playerbot/strategy/actions/DungeonRunAction.cpp
+index fd12602..69cb146 100644
+--- a/playerbot/strategy/actions/DungeonRunAction.cpp
++++ b/playerbot/strategy/actions/DungeonRunAction.cpp
+@@ -1491,6 +1491,9 @@ bool DungeonRunAction::Execute(Event& event)
+                 bot->GetLevel(), bot->GetName(), record.step, record.wipes, record.escortTries);
+             return true;
+         }
++        // kalimdor: a new run recorded, by its leader (kalimdor_run).
++        if (group->IsLeader(bot->GetObjectGuid()))
++            DungeonRun::RecordRunStart(bot, place, bosses);
+         // A test group set to start further on ("rndbot testrun <dungeon>
+         // step N"): its route from step N, the group put at the waypoint
+         // before it - a later boss tested without the whole way to it.
+@@ -1602,6 +1605,10 @@ bool DungeonRunAction::Execute(Event& event)
+     else
+         sLog.outString("Bot #%d %s:%d <%s>: gives up %s after %d wipes - %u of %u bosses left", bot->GetGUIDLow(), team, bot->GetLevel(),
+             bot->GetName(), place, wipes, DungeonRun::Fights(alive), bosses);
++    // kalimdor: the run's end recorded, with its members' totals
++    // (kalimdor_run, kalimdor_run_total).
++    if (leads)
++        DungeonRun::RecordRunEnd(bot, place, alive.empty(), wipes, DungeonRun::Fights(alive));
+     // The pull strategies DungeonRun::Puller added to ask who can pull come
+     // off its bots as the run ends - every bot asked kept them for good
+     // (Kamino 296).
+diff --git a/playerbot/strategy/values/DungeonRun.cpp b/playerbot/strategy/values/DungeonRun.cpp
+index cd376fd..b93a4e5 100644
+--- a/playerbot/strategy/values/DungeonRun.cpp
++++ b/playerbot/strategy/values/DungeonRun.cpp
+@@ -2197,23 +2197,8 @@ bool DungeonRun::EscortPending(Player* leader)
+         failed && time(nullptr) - failed < EscortWaitTime;
+ }
+ 
+-static void EnsureStatsTables()
+-{
+-    static std::once_flag made;
+-    std::call_once(made, []()
+-    {
+-        CharacterDatabase.DirectExecute(
+-            "CREATE TABLE IF NOT EXISTS `kalimdor_boss_kill` ("
+-            " `id` int unsigned NOT NULL AUTO_INCREMENT, `time` bigint unsigned NOT NULL, `map` smallint unsigned NOT NULL,"
+-            " `instance` int unsigned NOT NULL, `boss` int unsigned NOT NULL, `leader` int unsigned NOT NULL, `members` tinyint unsigned NOT NULL,"
+-            " PRIMARY KEY (`id`), KEY `boss` (`boss`)) ENGINE=InnoDB DEFAULT CHARSET=utf8 COMMENT='kalimdor: bosses killed on runs (stats)'");
+-        CharacterDatabase.DirectExecute(
+-            "CREATE TABLE IF NOT EXISTS `kalimdor_boss_loot` ("
+-            " `id` int unsigned NOT NULL AUTO_INCREMENT, `time` bigint unsigned NOT NULL, `map` smallint unsigned NOT NULL,"
+-            " `instance` int unsigned NOT NULL, `boss` int unsigned NOT NULL, `item` int unsigned NOT NULL, `count` tinyint unsigned NOT NULL,"
+-            " PRIMARY KEY (`id`), KEY `boss` (`boss`), KEY `item` (`item`)) ENGINE=InnoDB DEFAULT CHARSET=utf8 COMMENT='kalimdor: what bosses dropped (stats)'");
+-    });
+-}
++// The record tables are core's: made as the world starts, pruned hourly
++// (Unit::MakeKalimdorRecordTables).
+ 
+ namespace
+ {
+@@ -2446,13 +2431,75 @@ bool DungeonRun::IsBoss(Creature* creature)
+ 
+ void DungeonRun::RecordBossKill(Player* leader, uint32 entry)
+ {
+-    EnsureStatsTables();
+-    Group* group = leader->GetGroup();
+     CreatureInfo const* info = ObjectMgr::GetCreatureTemplate(entry);
+     sLog.outString("Bot #%d %s:%d <%s>: its group killed %s (%u)", leader->GetGUIDLow(), leader->GetTeam() == ALLIANCE ? "A" : "H",
+         leader->GetLevel(), leader->GetName(), info ? info->Name : "a boss", entry);
++    // Its records are RecordBossDeath's, as the boss dies - anyone's kill.
++}
++
++void DungeonRun::RecordBossDeath(Player* killer, Creature* boss)
++{
++    if (!killer || !IsBoss(boss))
++        return;
++    // Who was there: the killer's group's members in the copy - in the open
++    // world, within 100 yards of the boss - alive or dead.
++    std::vector<Player*> there;
++    if (Group* group = killer->GetGroup())
++    {
++        for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
++            if (Player* member = ref->getSource())
++                if (member->IsInWorld() && member->GetMapId() == boss->GetMapId() && member->GetInstanceId() == boss->GetInstanceId() &&
++                    (boss->GetMap()->Instanceable() || member->GetDistance(boss) <= 100.0f))
++                    there.push_back(member);
++    }
++    if (there.empty())
++        there.push_back(killer);
++    Player* leader = killer;
++    if (Group* group = killer->GetGroup())
++        if (Player* groupLeader = sObjectMgr.GetPlayer(group->GetLeaderGuid()))
++            leader = groupLeader;
+     CharacterDatabase.PExecute("INSERT INTO `kalimdor_boss_kill` (`time`, `map`, `instance`, `boss`, `leader`, `members`) VALUES (%u, %u, %u, %u, %u, %u)",
+-        uint32(time(nullptr)), leader->GetMapId(), leader->GetInstanceId(), entry, leader->GetGUIDLow(), group ? group->GetMembersCount() : 1);
++        uint32(time(nullptr)), boss->GetMapId(), boss->GetInstanceId(), boss->GetEntry(), leader->GetGUIDLow(), uint32(there.size()));
++    CharacterDatabase.PExecute("INSERT INTO `kalimdor_boss_total` (`boss`, `map`, `kills`) VALUES (%u, %u, 1) ON DUPLICATE KEY UPDATE `kills` = `kills` + 1",
++        boss->GetEntry(), boss->GetMapId());
++    for (Player* member : there)
++        CharacterDatabase.PExecute("INSERT INTO `kalimdor_boss_char_total` (`guid`, `boss`, `map`, `kills`) VALUES (%u, %u, %u, 1)"
++            " ON DUPLICATE KEY UPDATE `kills` = `kills` + 1", member->GetGUIDLow(), boss->GetEntry(), boss->GetMapId());
++}
++
++void DungeonRun::RecordRunStart(Player* leader, char const* dungeon, uint32 bosses)
++{
++    Group* group = leader->GetGroup();
++    std::string name = dungeon;
++    CharacterDatabase.escape_string(name);
++    CharacterDatabase.PExecute("INSERT INTO `kalimdor_run` (`started`, `map`, `instance`, `dungeon`, `leader`, `faction`, `members`, `bosses`)"
++        " VALUES (%u, %u, %u, '%s', %u, '%s', %u, %u)", uint32(time(nullptr)), leader->GetMapId(), leader->GetInstanceId(), name.c_str(),
++        leader->GetGUIDLow(), leader->GetTeam() == ALLIANCE ? "A" : "H", group ? group->GetMembersCount() : 1, bosses);
++}
++
++void DungeonRun::RecordRunEnd(Player* leader, char const* dungeon, bool cleared, int wipes, uint32 bossesLeft)
++{
++    // Once per copy: its leader's last update of the run may come again.
++    static std::mutex lock;
++    static std::set<std::pair<uint32, uint32>> ended;
++    {
++        std::lock_guard<std::mutex> guard(lock);
++        if (!ended.insert({ leader->GetMapId(), leader->GetInstanceId() }).second)
++            return;
++    }
++    std::string name = dungeon;
++    CharacterDatabase.escape_string(name);
++    CharacterDatabase.PExecute("UPDATE `kalimdor_run` SET `ended` = %u, `result` = %u, `wipes` = %u, `bosses_left` = %u"
++        " WHERE `map` = %u AND `instance` = %u AND `result` = 0", uint32(time(nullptr)), cleared ? 1 : 2, uint32(std::max(0, wipes)), bossesLeft,
++        leader->GetMapId(), leader->GetInstanceId());
++    // Its members' totals: those in the copy with it at the end.
++    if (Group* group = leader->GetGroup())
++        for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
++            if (Player* member = ref->getSource())
++                if (member->GetMapId() == leader->GetMapId() && member->GetInstanceId() == leader->GetInstanceId())
++                    CharacterDatabase.PExecute("INSERT INTO `kalimdor_run_total` (`guid`, `map`, `dungeon`, `cleared`, `given_up`) VALUES (%u, %u, '%s', %u, %u)"
++                        " ON DUPLICATE KEY UPDATE `cleared` = `cleared` + %u, `given_up` = `given_up` + %u", member->GetGUIDLow(), leader->GetMapId(),
++                        name.c_str(), cleared ? 1 : 0, cleared ? 0 : 1, cleared ? 1 : 0, cleared ? 0 : 1);
+ }
+ 
+ void DungeonRun::RecordBossLoot(Player* looter, Creature* boss)
+@@ -2466,7 +2513,6 @@ void DungeonRun::RecordBossLoot(Player* looter, Creature* boss)
+         if (!recorded.insert(boss->GetObjectGuid().GetRawValue()).second)
+             return; // once per corpse
+     }
+-    EnsureStatsTables();
+     LootItemList items;
+     boss->m_loot->GetLootItemsListFor(looter, items);
+     std::string list;
+@@ -2478,6 +2524,9 @@ void DungeonRun::RecordBossLoot(Player* looter, Creature* boss)
+         list += (list.empty() ? "" : ", ") + std::string(proto->Name1) + (item->count > 1 ? " x" + std::to_string(item->count) : "");
+         CharacterDatabase.PExecute("INSERT INTO `kalimdor_boss_loot` (`time`, `map`, `instance`, `boss`, `item`, `count`) VALUES (%u, %u, %u, %u, %u, %u)",
+             uint32(time(nullptr)), boss->GetMapId(), boss->GetInstanceId(), boss->GetEntry(), item->itemId, uint32(item->count));
++        CharacterDatabase.PExecute("INSERT INTO `kalimdor_drop_total` (`boss`, `item`, `drops`, `count`) VALUES (%u, %u, 1, %u)"
++            " ON DUPLICATE KEY UPDATE `drops` = `drops` + 1, `count` = `count` + %u", boss->GetEntry(), item->itemId, uint32(item->count),
++            uint32(item->count));
+     }
+     sLog.outString("Bot #%d %s:%d <%s>: %s (%u) dropped: %s; %u copper", looter->GetGUIDLow(), looter->GetTeam() == ALLIANCE ? "A" : "H",
+         looter->GetLevel(), looter->GetName(), boss->GetName(), boss->GetEntry(), list.empty() ? "nothing" : list.c_str(), boss->m_loot->GetGoldAmount());
+diff --git a/playerbot/strategy/values/DungeonRun.h b/playerbot/strategy/values/DungeonRun.h
+index 8e712e8..7b4a8b0 100644
+--- a/playerbot/strategy/values/DungeonRun.h
++++ b/playerbot/strategy/values/DungeonRun.h
+@@ -326,6 +326,14 @@ namespace ai
+         // opened). Logged too.
+         static void RecordBossKill(Player* leader, uint32 entry);
+         static void RecordBossLoot(Player* looter, Creature* boss);
++        // kalimdor: a boss's death, anyone's kill - a dungeon's, a raid's, one
++        // in the open world (IsBoss) - in kalimdor_boss_kill and the totals,
++        // per boss and per member there (Unit::Kill).
++        static void RecordBossDeath(Player* killer, Creature* boss);
++        // kalimdor: a run's record (kalimdor_run), and its members' totals
++        // as it ends (kalimdor_run_total) - by its leader.
++        static void RecordRunStart(Player* leader, char const* dungeon, uint32 bosses);
++        static void RecordRunEnd(Player* leader, char const* dungeon, bool cleared, int wipes, uint32 bossesLeft);
+         static bool IsBoss(Creature* creature);
+         // Bags full and loot worth taking (a boss's, or an upgrade): room
+         // made - its best gear is worn, so what is in its bags is not -

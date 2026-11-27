@@ -1,0 +1,215 @@
+diff --git a/src/game/Entities/Unit.cpp b/src/game/Entities/Unit.cpp
+index b78f137..325fe0f 100644
+--- a/src/game/Entities/Unit.cpp
++++ b/src/game/Entities/Unit.cpp
+@@ -57,6 +57,11 @@
+  #include "Metric/Metric.h"
+ #endif
+ 
++#ifdef ENABLE_PLAYERBOTS
++#include "playerbot/playerbot.h"
++#include "playerbot/strategy/values/DungeonRun.h"
++#endif
++
+ #include <math.h>
+ #include <limits>
+ #include <array>
+@@ -1017,23 +1022,106 @@ uint32 Unit::DealDamage(Unit* dealer, Unit* victim, uint32 damage, CleanDamage c
+     return damage;
+ }
+ 
+-// kalimdor: the PvP kill records' table, made as the world starts - the stats
+-// exporter reads it before any kill (World::SetInitialWorldSettings).
+-void Unit::MakePvPKillTable()
++// kalimdor: kalimdor's record tables, in the characters database: what
++// happened, row by row, kept KalimdorRecordDays (PruneKalimdorRecords) - the
++// PvP kills (RecordPvPKill), the bosses killed and what they dropped, the
++// dungeon runs (playerbots' DungeonRun::Record*) - and their lifetime
++// totals, which never grow past characters x dungeons and bosses x items:
++// neither the rows nor the logs may grow for good (owner, 2026-11-27). Made
++// as the world starts - the stats exporter reads them before any event.
++void Unit::MakeKalimdorRecordTables()
++{
++    char const* tables[] = {
++        "CREATE TABLE IF NOT EXISTS `kalimdor_pvp_kill` ("
++        " `id` int unsigned NOT NULL AUTO_INCREMENT, `time` bigint unsigned NOT NULL,"
++        " `killer` int unsigned NOT NULL, `killer_level` tinyint unsigned NOT NULL,"
++        " `victim` int unsigned NOT NULL, `victim_level` tinyint unsigned NOT NULL,"
++        " `map` smallint unsigned NOT NULL, `zone` int unsigned NOT NULL,"
++        " `battleground` tinyint unsigned NOT NULL, `honorable` tinyint unsigned NOT NULL,"
++        " PRIMARY KEY (`id`), KEY `killer` (`killer`), KEY `victim` (`victim`), KEY `time` (`time`))"
++        " ENGINE=InnoDB DEFAULT CHARSET=utf8 COMMENT='kalimdor: PvP kills, killing blows (stats)'",
++        "CREATE TABLE IF NOT EXISTS `kalimdor_pvp_total` ("
++        " `guid` int unsigned NOT NULL, `battleground` tinyint unsigned NOT NULL, `honorable` tinyint unsigned NOT NULL,"
++        " `kills` int unsigned NOT NULL DEFAULT 0, `deaths` int unsigned NOT NULL DEFAULT 0,"
++        " PRIMARY KEY (`guid`, `battleground`, `honorable`))"
++        " ENGINE=InnoDB DEFAULT CHARSET=utf8 COMMENT='kalimdor: PvP kills and deaths per character, all time (stats)'",
++        "CREATE TABLE IF NOT EXISTS `kalimdor_boss_kill` ("
++        " `id` int unsigned NOT NULL AUTO_INCREMENT, `time` bigint unsigned NOT NULL, `map` smallint unsigned NOT NULL,"
++        " `instance` int unsigned NOT NULL, `boss` int unsigned NOT NULL, `leader` int unsigned NOT NULL, `members` tinyint unsigned NOT NULL,"
++        " PRIMARY KEY (`id`), KEY `boss` (`boss`)) ENGINE=InnoDB DEFAULT CHARSET=utf8 COMMENT='kalimdor: bosses killed on runs (stats)'",
++        "ALTER TABLE `kalimdor_boss_kill` ADD INDEX IF NOT EXISTS `time` (`time`)",
++        "CREATE TABLE IF NOT EXISTS `kalimdor_boss_loot` ("
++        " `id` int unsigned NOT NULL AUTO_INCREMENT, `time` bigint unsigned NOT NULL, `map` smallint unsigned NOT NULL,"
++        " `instance` int unsigned NOT NULL, `boss` int unsigned NOT NULL, `item` int unsigned NOT NULL, `count` tinyint unsigned NOT NULL,"
++        " PRIMARY KEY (`id`), KEY `boss` (`boss`), KEY `item` (`item`)) ENGINE=InnoDB DEFAULT CHARSET=utf8 COMMENT='kalimdor: what bosses dropped (stats)'",
++        "ALTER TABLE `kalimdor_boss_loot` ADD INDEX IF NOT EXISTS `time` (`time`)",
++        "CREATE TABLE IF NOT EXISTS `kalimdor_boss_total` ("
++        " `boss` int unsigned NOT NULL, `map` smallint unsigned NOT NULL, `kills` int unsigned NOT NULL DEFAULT 0,"
++        " PRIMARY KEY (`boss`)) ENGINE=InnoDB DEFAULT CHARSET=utf8 COMMENT='kalimdor: kills per boss, all time (stats)'",
++        "CREATE TABLE IF NOT EXISTS `kalimdor_drop_total` ("
++        " `boss` int unsigned NOT NULL, `item` int unsigned NOT NULL, `drops` int unsigned NOT NULL DEFAULT 0,"
++        " `count` int unsigned NOT NULL DEFAULT 0, PRIMARY KEY (`boss`, `item`))"
++        " ENGINE=InnoDB DEFAULT CHARSET=utf8 COMMENT='kalimdor: what each boss dropped, all time (stats)'",
++        "CREATE TABLE IF NOT EXISTS `kalimdor_run` ("
++        " `id` int unsigned NOT NULL AUTO_INCREMENT, `started` bigint unsigned NOT NULL, `ended` bigint unsigned NOT NULL DEFAULT 0,"
++        " `map` smallint unsigned NOT NULL, `instance` int unsigned NOT NULL, `dungeon` varchar(64) NOT NULL,"
++        " `leader` int unsigned NOT NULL, `faction` char(1) NOT NULL, `members` tinyint unsigned NOT NULL,"
++        " `bosses` tinyint unsigned NOT NULL, `bosses_left` tinyint unsigned NOT NULL DEFAULT 0, `wipes` smallint unsigned NOT NULL DEFAULT 0,"
++        " `result` tinyint unsigned NOT NULL DEFAULT 0 COMMENT '0 on, 1 cleared, 2 given up, 3 unfinished (the world stopped)',"
++        " PRIMARY KEY (`id`), KEY `instance` (`map`, `instance`), KEY `started` (`started`))"
++        " ENGINE=InnoDB DEFAULT CHARSET=utf8 COMMENT='kalimdor: dungeon runs (stats)'",
++        "CREATE TABLE IF NOT EXISTS `kalimdor_run_total` ("
++        " `guid` int unsigned NOT NULL, `map` smallint unsigned NOT NULL, `dungeon` varchar(64) NOT NULL,"
++        " `cleared` int unsigned NOT NULL DEFAULT 0, `given_up` int unsigned NOT NULL DEFAULT 0,"
++        " PRIMARY KEY (`guid`, `map`)) ENGINE=InnoDB DEFAULT CHARSET=utf8 COMMENT='kalimdor: dungeon and raid runs ended per character, all time (stats)'",
++        "CREATE TABLE IF NOT EXISTS `kalimdor_boss_char_total` ("
++        " `guid` int unsigned NOT NULL, `boss` int unsigned NOT NULL, `map` smallint unsigned NOT NULL,"
++        " `kills` int unsigned NOT NULL DEFAULT 0, PRIMARY KEY (`guid`, `boss`))"
++        " ENGINE=InnoDB DEFAULT CHARSET=utf8 COMMENT='kalimdor: bosses killed per character - dungeons, raids, the open world - all time (stats)'",
++    };
++    for (char const* sql : tables)
++        CharacterDatabase.DirectExecute(sql);
++    // A run still on as the world starts was cut off by the stop: unfinished.
++    CharacterDatabase.DirectExecute("UPDATE `kalimdor_run` SET `result` = 3, `ended` = UNIX_TIMESTAMP() WHERE `result` = 0");
++
++    // Totals new, rows already there (recorded before the totals were):
++    // filled from them once.
++    auto empty = [](char const* table)
++    {
++        std::unique_ptr<QueryResult> result(CharacterDatabase.PQuery("SELECT 1 FROM `%s` LIMIT 1", table));
++        return !result;
++    };
++    if (empty("kalimdor_pvp_total"))
++    {
++        CharacterDatabase.DirectExecute("INSERT INTO `kalimdor_pvp_total` (`guid`, `battleground`, `honorable`, `kills`)"
++            " SELECT `killer`, `battleground`, `honorable`, COUNT(*) FROM `kalimdor_pvp_kill` GROUP BY `killer`, `battleground`, `honorable`"
++            " ON DUPLICATE KEY UPDATE `kills` = VALUES(`kills`)");
++        CharacterDatabase.DirectExecute("INSERT INTO `kalimdor_pvp_total` (`guid`, `battleground`, `honorable`, `deaths`)"
++            " SELECT `victim`, `battleground`, `honorable`, COUNT(*) FROM `kalimdor_pvp_kill` GROUP BY `victim`, `battleground`, `honorable`"
++            " ON DUPLICATE KEY UPDATE `deaths` = VALUES(`deaths`)");
++    }
++    if (empty("kalimdor_boss_total"))
++        CharacterDatabase.DirectExecute("INSERT INTO `kalimdor_boss_total` (`boss`, `map`, `kills`)"
++            " SELECT `boss`, MIN(`map`), COUNT(*) FROM `kalimdor_boss_kill` GROUP BY `boss`");
++    if (empty("kalimdor_drop_total"))
++        CharacterDatabase.DirectExecute("INSERT INTO `kalimdor_drop_total` (`boss`, `item`, `drops`, `count`)"
++            " SELECT `boss`, `item`, COUNT(*), SUM(`count`) FROM `kalimdor_boss_loot` GROUP BY `boss`, `item`");
++}
++
++void Unit::PruneKalimdorRecords()
+ {
+-    CharacterDatabase.DirectExecute(
+-            "CREATE TABLE IF NOT EXISTS `kalimdor_pvp_kill` ("
+-            " `id` int unsigned NOT NULL AUTO_INCREMENT, `time` bigint unsigned NOT NULL,"
+-            " `killer` int unsigned NOT NULL, `killer_level` tinyint unsigned NOT NULL,"
+-            " `victim` int unsigned NOT NULL, `victim_level` tinyint unsigned NOT NULL,"
+-            " `map` smallint unsigned NOT NULL, `zone` int unsigned NOT NULL,"
+-            " `battleground` tinyint unsigned NOT NULL, `honorable` tinyint unsigned NOT NULL,"
+-            " PRIMARY KEY (`id`), KEY `killer` (`killer`), KEY `victim` (`victim`), KEY `time` (`time`))"
+-            " ENGINE=InnoDB DEFAULT CHARSET=utf8 COMMENT='kalimdor: PvP kills, killing blows (stats)'");
++    uint32 const before = uint32(time(nullptr)) - KalimdorRecordDays * DAY;
++    // In batches: a big delete holds the table.
++    CharacterDatabase.PExecute("DELETE FROM `kalimdor_pvp_kill` WHERE `time` < %u LIMIT 10000", before);
++    CharacterDatabase.PExecute("DELETE FROM `kalimdor_boss_kill` WHERE `time` < %u LIMIT 10000", before);
++    CharacterDatabase.PExecute("DELETE FROM `kalimdor_boss_loot` WHERE `time` < %u LIMIT 10000", before);
++    CharacterDatabase.PExecute("DELETE FROM `kalimdor_run` WHERE `started` < %u LIMIT 10000", before);
++    // A deleted character's totals.
++    CharacterDatabase.Execute("DELETE t FROM `kalimdor_pvp_total` t LEFT JOIN `characters` c ON c.`guid` = t.`guid` WHERE c.`guid` IS NULL");
++    CharacterDatabase.Execute("DELETE t FROM `kalimdor_run_total` t LEFT JOIN `characters` c ON c.`guid` = t.`guid` WHERE c.`guid` IS NULL");
++    CharacterDatabase.Execute("DELETE t FROM `kalimdor_boss_char_total` t LEFT JOIN `characters` c ON c.`guid` = t.`guid` WHERE c.`guid` IS NULL");
+ }
+ 
+-// kalimdor: one row per PvP kill in kalimdor_pvp_kill (characters database;
+-// Unit::Kill).
+ void Unit::RecordPvPKill(Player* killer, Player* victim)
+ {
+     // Honorable as the game rewards it: not a grey victim to the killer, no
+@@ -1044,6 +1132,10 @@ void Unit::RecordPvPKill(Player* killer, Player* victim)
+         " VALUES (%u, %u, %u, %u, %u, %u, %u, %u, %u)", uint32(time(nullptr)), killer->GetGUIDLow(), uint32(killer->GetLevel()),
+         victim->GetGUIDLow(), uint32(victim->GetLevel()), victim->GetMapId(), victim->GetZoneId(),
+         uint32(victim->GetMap()->IsBattleGround()), uint32(honorable));
++    CharacterDatabase.PExecute("INSERT INTO `kalimdor_pvp_total` (`guid`, `battleground`, `honorable`, `kills`) VALUES (%u, %u, %u, 1)"
++        " ON DUPLICATE KEY UPDATE `kills` = `kills` + 1", killer->GetGUIDLow(), uint32(victim->GetMap()->IsBattleGround()), uint32(honorable));
++    CharacterDatabase.PExecute("INSERT INTO `kalimdor_pvp_total` (`guid`, `battleground`, `honorable`, `deaths`) VALUES (%u, %u, %u, 1)"
++        " ON DUPLICATE KEY UPDATE `deaths` = `deaths` + 1", victim->GetGUIDLow(), uint32(victim->GetMap()->IsBattleGround()), uint32(honorable));
+ }
+ 
+ void Unit::Kill(Unit* killer, Unit* victim, DamageEffectType damagetype, SpellEntry const* spellInfo, bool durabilityLoss, bool duel_hasEnded)
+@@ -1124,6 +1216,13 @@ void Unit::Kill(Unit* killer, Unit* victim, DamageEffectType damagetype, SpellEn
+     if (responsiblePlayer && victim->GetTypeId() == TYPEID_PLAYER && responsiblePlayer != victim &&
+         responsiblePlayer->GetTeam() != static_cast<Player*>(victim)->GetTeam())
+         RecordPvPKill(responsiblePlayer, static_cast<Player*>(victim));
++#ifdef ENABLE_PLAYERBOTS
++    // kalimdor: a boss's death recorded - a dungeon's, a raid's or one in the
++    // open world - for every group member there, players and bots alike
++    // (DungeonRun::RecordBossDeath: playerbots knows the bosses).
++    if (responsiblePlayer && victim->GetTypeId() == TYPEID_UNIT)
++        ai::DungeonRun::RecordBossDeath(responsiblePlayer, static_cast<Creature*>(victim));
++#endif
+ 
+     // Reward player, his pets, and group/raid members
+     if (tapper != victim)
+diff --git a/src/game/Entities/Unit.h b/src/game/Entities/Unit.h
+index 0bc7986..e31f7c4 100644
+--- a/src/game/Entities/Unit.h
++++ b/src/game/Entities/Unit.h
+@@ -1461,7 +1461,13 @@ class Unit : public WorldObject
+         static void Kill(Unit* killer, Unit* victim, DamageEffectType damagetype, SpellEntry const* spellInfo, bool durabilityLoss, bool duel_hasEnded);
+         // kalimdor: a PvP kill recorded for the stats (kalimdor_pvp_kill).
+         static void RecordPvPKill(Player* killer, Player* victim);
+-        static void MakePvPKillTable();
++        // kalimdor: every kalimdor record table made, and its lifetime totals
++        // filled from its rows if new (World::SetInitialWorldSettings).
++        static void MakeKalimdorRecordTables();
++        // kalimdor: rows older than KalimdorRecordDays gone, and the totals
++        // of deleted characters (World::Update, hourly).
++        static void PruneKalimdorRecords();
++        static constexpr uint32 KalimdorRecordDays = 30;
+         static void HandleDamageDealt(Unit* dealer, Unit* victim, uint32& damage, CleanDamage const* cleanDamage, DamageEffectType damagetype, SpellSchoolMask damageSchoolMask, SpellEntry const* spellInfo, bool duel_hasEnded);
+         void InterruptOrDelaySpell(Unit* pVictim, DamageEffectType damagetype, SpellEntry const* spellInfo);
+ 
+diff --git a/src/game/World/World.cpp b/src/game/World/World.cpp
+index 2e10c7c..b4ad418 100644
+--- a/src/game/World/World.cpp
++++ b/src/game/World/World.cpp
+@@ -1449,8 +1449,9 @@ void World::SetInitialWorldSettings()
+ #endif
+ #endif
+ 
+-    // kalimdor: the PvP kill records' table (Unit::RecordPvPKill).
+-    Unit::MakePvPKillTable();
++    // kalimdor: the record tables - PvP kills, boss kills and drops, runs -
++    // and their lifetime totals (Unit::MakeKalimdorRecordTables).
++    Unit::MakeKalimdorRecordTables();
+ 
+     sLog.outString("---------------------------------------");
+     sLog.outString("      CMANGOS: World initialized       ");
+@@ -1512,6 +1513,17 @@ void World::DetectDBCLang()
+ void World::Update(uint32 diff)
+ {
+     m_currentMSTime = WorldTimer::getMSTime();
++
++    // kalimdor: the record tables pruned hourly - neither they nor the logs
++    // may grow for good (owner, 2026-11-27).
++    {
++        static time_t pruned = time(nullptr);
++        if (time(nullptr) - pruned >= HOUR)
++        {
++            pruned = time(nullptr);
++            Unit::PruneKalimdorRecords();
++        }
++    }
+     m_currentTime = std::chrono::time_point_cast<std::chrono::milliseconds>(Clock::now());
+     m_currentDiff = diff;
+ 

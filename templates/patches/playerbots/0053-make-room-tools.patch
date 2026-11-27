@@ -1,0 +1,90 @@
+diff --git a/playerbot/strategy/actions/LootAction.cpp b/playerbot/strategy/actions/LootAction.cpp
+index 713c209..627ea27 100644
+--- a/playerbot/strategy/actions/LootAction.cpp
++++ b/playerbot/strategy/actions/LootAction.cpp
+@@ -318,10 +318,14 @@ bool StoreLootAction::Execute(Event& event)
+ 
+         // kalimdor: no room - for a boss's loot or an upgrade, room made (its
+         // cheapest bag item destroyed; DungeonRun::MakeRoom), the upgrade
+-        // worn after; else not taken (owner, 2026-11-22).
++        // worn after; else not taken (owner, 2026-11-22). Only on a run, and
++        // never for a bot a player leads: outside runs a bot with full bags
++        // destroyed its tools for any upgrade (Kamino 295).
+         bool upgrade = false;
+         if (AI_VALUE2(uint32, "stack space for item", itemid) < itemcount)
+         {
++            if (ai->HasRealPlayerMaster() || !DungeonRun::Active(bot))
++                continue;
+             ItemPrototype const* wanted = sItemStorage.LookupEntry<ItemPrototype>(itemid);
+             upgrade = AI_VALUE2(ItemUsage, "item usage", itemQualifier.GetQualifier()) == ItemUsage::ITEM_USAGE_EQUIP;
+             bool const bossLoot = DungeonRun::IsBoss(ai->GetCreature(guid));
+diff --git a/playerbot/strategy/values/DungeonRun.cpp b/playerbot/strategy/values/DungeonRun.cpp
+index a05c689..e05652f 100644
+--- a/playerbot/strategy/values/DungeonRun.cpp
++++ b/playerbot/strategy/values/DungeonRun.cpp
+@@ -1807,6 +1807,39 @@ static void EnsureStatsTables()
+     });
+ }
+ 
++namespace
++{
++    // kalimdor: what a bot never parts with to make room - not destroyed
++    // (MakeRoom), not sold (SellForRoom); one list for both (Kamino 295).
++    // Nothing to sell: a hearthstone, a key, a token - two hearthstones went
++    // for linen (dev, 2026-11-22). The profession tools, upstream's list
++    // (ItemUsageValue::IsItemNeededForSkill) and fishing poles: with a vendor
++    // price of a few copper they were the cheapest, so the first to go.
++    bool NeverPartedWith(ItemPrototype const* proto)
++    {
++        if (!proto || !proto->SellPrice || proto->Class == ITEM_CLASS_QUEST || proto->Class == ITEM_CLASS_CONSUMABLE ||
++            proto->Class == ITEM_CLASS_CONTAINER || proto->Class == ITEM_CLASS_PROJECTILE || proto->Class == ITEM_CLASS_QUIVER ||
++            proto->Class == ITEM_CLASS_KEY || proto->StartQuest || proto->Bonding == BIND_QUEST_ITEM || proto->ItemSet ||
++            proto->InventoryType == INVTYPE_TABARD || proto->InventoryType == INVTYPE_BODY ||
++            (proto->Class == ITEM_CLASS_WEAPON && proto->SubClass == ITEM_SUBCLASS_WEAPON_FISHING_POLE))
++            return true;
++        switch (proto->ItemId)
++        {
++            case 2901:  // Mining Pick
++            case 5956:  // Blacksmith Hammer
++            case 6219:  // Arclight Spanner
++            case 7005:  // Skinning Knife
++            case 6218: case 6339: case 11130: case 11145: case 16207:  // runed enchanting rods
++            case 4471:  // Flint and Tinder
++            case 4470:  // Simple Wood
++            case 6256:  // Fishing Pole
++                return true;
++            default:
++                return false;
++        }
++    }
++}
++
+ bool DungeonRun::MakeRoom(Player* bot, ItemPrototype const* forItem)
+ {
+     Item* cheapest = nullptr;
+@@ -1814,10 +1847,7 @@ bool DungeonRun::MakeRoom(Player* bot, ItemPrototype const* forItem)
+     auto consider = [&](Item* item)
+     {
+         ItemPrototype const* proto = item ? item->GetProto() : nullptr;
+-        if (!proto || proto->Class == ITEM_CLASS_QUEST || proto->Class == ITEM_CLASS_CONTAINER || proto->Class == ITEM_CLASS_CONSUMABLE ||
+-            proto->Class == ITEM_CLASS_PROJECTILE || proto->Class == ITEM_CLASS_QUIVER || proto->Class == ITEM_CLASS_REAGENT ||
+-            proto->Class == ITEM_CLASS_KEY || proto->ItemSet || proto->StartQuest || proto->Bonding == BIND_QUEST_ITEM ||
+-            !proto->SellPrice) // nothing to sell: a hearthstone, a key, a token - two hearthstones went for linen (dev, 2026-11-22)
++        if (NeverPartedWith(proto) || proto->Class == ITEM_CLASS_REAGENT)
+             return;
+         uint32 const price = proto->SellPrice * item->GetCount();
+         if (!cheapest || price < cheapestPrice)
+@@ -1943,12 +1973,7 @@ void DungeonRun::SellForRoom(Player* bot, uint32& sold, uint32& money)
+             return;
+         }
+         ItemPrototype const* proto = item->GetProto();
+-        if (!proto->SellPrice || proto->Class == ITEM_CLASS_QUEST || proto->Class == ITEM_CLASS_CONSUMABLE || proto->Class == ITEM_CLASS_CONTAINER ||
+-            proto->Class == ITEM_CLASS_PROJECTILE || proto->Class == ITEM_CLASS_QUIVER || proto->Class == ITEM_CLASS_KEY ||
+-            proto->StartQuest || proto->Bonding == BIND_QUEST_ITEM || proto->ItemSet ||
+-            proto->InventoryType == INVTYPE_TABARD || proto->InventoryType == INVTYPE_BODY ||
+-            (proto->Class == ITEM_CLASS_WEAPON && proto->SubClass == ITEM_SUBCLASS_WEAPON_FISHING_POLE) ||
+-            proto->ItemId == 2901 || proto->ItemId == 5956 || proto->ItemId == 7005 || proto->ItemId == 6219) // pick, hammer, knife, wrench
++        if (NeverPartedWith(proto))
+             return;
+         ItemUsage const usage = ai->GetAiObjectContext()->GetValue<ItemUsage>("item usage", ItemQualifier(item).GetQualifier())->Get();
+         bool const gear = proto->Class == ITEM_CLASS_WEAPON || proto->Class == ITEM_CLASS_ARMOR;

@@ -451,11 +451,11 @@ bot in five a tank, one in five a healer, at this population.
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries fifty-two changes to playerbots (`templates/patches/playerbots/`)
-and four to the core (`templates/patches/mangos-classic/`), applied in order
+teldrassil carries sixty-four changes to playerbots (`templates/patches/playerbots/`)
+and eight to the core (`templates/patches/mangos-classic/`), applied in order
 before every build to the pinned upstreams - together they make kalimdor's tree
 exactly (checked: the stack on kalimdor's untouched import gives kalimdor
-`7b8b5a3`, both trees). Sources that are kalimdor itself (`PROVENANCE.md` at
+`98b410a`, both trees). Sources that are kalimdor itself (`PROVENANCE.md` at
 their root - `SOURCE_REPO`, or `SOURCE_DIR` on a kalimdor clone) commit their
 changes: nothing is applied to them or taken off, so a kalimdor branch ahead
 of the stack builds as it is (Kamino 290).
@@ -741,6 +741,48 @@ on `SSH_HOST` the server's image applies its own (Kamino 298).
   less, as the server - unsold items vanish instead of being mailed to a
   random bot - and buys only as its own character (`AhBot.GUID`), if set.
   (Kamino 273, 2026-11-09.)
+- **playerbots 0064, mangos-classic 0008:** run records - each run, boss
+  kills for everyone there, and lifetime totals in `kalimdor_*` tables the
+  server creates itself; nothing grows for good. (kalimdor #70, 2026-11-27.)
+- **mangos-classic 0007:** PvP kill records - each killing blow on a player
+  of the other faction in `kalimdor_pvp_kill`. (kalimdor #69, 2026-11-27.)
+- **playerbots 0063:** stand-in healers - after 20 minutes with no healer, a
+  priest, shaman, druid or paladin in the group heals for the run; real
+  healers from above the level first; a bot searching alone keeps its
+  stand-in role. (kalimdor #68, 2026-11-27.)
+- **playerbots 0062:** tanks from 10 levels above the quest at once, any
+  level after 10 minutes, then a warrior or bear druid stands in as tank.
+  (kalimdor #67, 2026-11-26.)
+- **playerbots 0061:** a hearthstone that did not take a trapped bot home -
+  it is put at its inn. (kalimdor #66, 2026-11-26.)
+- **playerbots 0060, mangos-classic 0006:** runs out of their traps - a
+  zone-0 graveyard, the guards' push-back, a cleared dungeon whose quest is
+  still open (reset and run again, at most twice). (kalimdor #65,
+  2026-11-26.)
+- **playerbots 0059:** runs and the queue - smaller bugs and the matcher's
+  cost: a player is never put or pulled, pull strategies off at a run's end,
+  an unreachable vendor given up, the resurrect target in reach. (kalimdor
+  #61, Kamino 296, 2026-11-26.)
+- **playerbots 0058:** run marks - the leader marks the skull and the mobs
+  to crowd-control, healers first, then crowd controllers, summoners, area
+  damage; damage dealers follow the tank's target. (kalimdor #62, Kamino
+  299, 2026-11-26.)
+- **playerbots 0057:** a run belongs to its group - a new leader takes it
+  over, wipes counted by any member, revives waited for, the escort given
+  up when lost. (kalimdor #60, Kamino 293, 2026-11-26.)
+- **playerbots 0056:** the group queue made safe - break-ups on the world
+  thread, no stray invites, stale asks dropped, roles kept. (kalimdor #59,
+  Kamino 291, 292, 2026-11-26.)
+- **playerbots 0055:** the 45-second unhurt rule counts only while the group
+  fights the mob, never under crowd control. (kalimdor #58, Kamino 294,
+  2026-11-26.)
+- **playerbots 0054:** dungeon runs act on other bots only from their own
+  map's thread. (kalimdor #57, Kamino 288, 2026-11-26.)
+- **playerbots 0053:** full bags - room made only on a run, tools never
+  destroyed. (kalimdor #56, Kamino 295, 2026-11-26.)
+- **mangos-classic 0005:** 0004 narrowed - a dead copy refused only under
+  the new creature's own guid - and grids unload again. (kalimdor #55,
+  Kamino 289, 2026-11-26.)
 - **playerbots 0052:** a group queue - one matcher, every 5 seconds on the
   world thread, joins and merges bots for group quests by faction, the bigger
   group first, with no invites; real players' groups are never touched.

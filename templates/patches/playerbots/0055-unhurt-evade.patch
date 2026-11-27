@@ -1,0 +1,36 @@
+diff --git a/playerbot/strategy/values/DungeonRun.cpp b/playerbot/strategy/values/DungeonRun.cpp
+index f3a3271..ebefda3 100644
+--- a/playerbot/strategy/values/DungeonRun.cpp
++++ b/playerbot/strategy/values/DungeonRun.cpp
+@@ -1953,10 +1953,30 @@ void DungeonRun::UnseenAttackers(Player* member)
+                             ++by;
+                     }
+             bool const present = by >= std::min<uint32>(3, inside);
++            // And only while the group fights it, out of its allies' care:
++            // the last of a pack waiting its turn, a creature polymorphed,
++            // shackled or sapped on purpose, one its allies heal were sent
++            // off as stale (Kamino 294). A member (on this map, so this
++            // thread) has it as its victim - or none fights anything, the
++            // group held in combat by what it cannot reach (the Lurker
++            // evading below); crowd control holds it out; any change of
++            // health - a hit, or a heal - restarts the count.
++            bool attacked = false, busy = false;
++            for (GroupReference* g = group->GetFirstMember(); g && !attacked; g = g->next())
++                if (Player* other = g->getSource())
++                    if (other->IsInWorld() && other->GetMapId() == fighting->GetMapId() && other->GetInstanceId() == fighting->GetInstanceId())
++                        if (Unit* victim = other->GetVictim())
++                        {
++                            busy = true;
++                            attacked = victim == fighting;
++                        }
++            attacked = attacked || !busy;
++            bool const held = fighting->IsCrowdControlled() || fighting->IsPolymorphed();
+             {
+                 std::lock_guard<std::mutex> guard(unhurtLock);
+                 auto at = unhurt.find(key);
+-                if (!present || at == unhurt.end() || fighting->GetHealth() < at->second.first || now - at->second.second > 2 * UnhurtTime)
++                if (!present || !attacked || held || at == unhurt.end() || fighting->GetHealth() != at->second.first ||
++                    now - at->second.second > 2 * UnhurtTime)
+                     unhurt[key] = { fighting->GetHealth(), now };
+                 else if (now - at->second.second >= UnhurtTime && !IsBoss(fighting))
+                 {

@@ -1,0 +1,36 @@
+diff --git a/src/game/Globals/GraveyardManager.cpp b/src/game/Globals/GraveyardManager.cpp
+index 91b392c..18bcf01 100644
+--- a/src/game/Globals/GraveyardManager.cpp
++++ b/src/game/Globals/GraveyardManager.cpp
+@@ -165,6 +165,31 @@ WorldSafeLocsEntry const* GraveyardManager::GetClosestGraveYard(float x, float y
+         graveyard = GetClosestGraveyardHelper(bounds, x, y, z, mapId, team);
+     }
+ 
++    // kalimdor: no area or zone known here (a spot the terrain does not cover)
++    // - the nearest graveyard of the team on this map, by any link, before the
++    // team's one default: bots dead in such spots of Kalimdor all woke at
++    // Horde default 10, Talrendis Point in Azshara, an Alliance outpost,
++    // and never got out (the cluster, 2026-11-25/26).
++    if (graveyard == nullptr && areaId == 0 && zoneId == 0)
++    {
++        float best = std::numeric_limits<float>::max();
++        for (auto const& link : m_graveyardMap)
++        {
++            GraveYardData const& data = link.second;
++            if (data.team != TEAM_BOTH_ALLOWED && data.team != team && team != TEAM_BOTH_ALLOWED)
++                continue;
++            WorldSafeLocsEntry const* entry = sWorldSafeLocsStore.LookupEntry<WorldSafeLocsEntry>(data.safeLocId);
++            if (!entry || entry->map_id != mapId)
++                continue;
++            float const dist2 = (entry->x - x) * (entry->x - x) + (entry->y - y) * (entry->y - y) + (entry->z - z) * (entry->z - z);
++            if (dist2 < best)
++            {
++                best = dist2;
++                graveyard = entry;
++            }
++        }
++    }
++
+     if (graveyard == nullptr)
+     {
+         sLog.outErrorDb("Table `game_graveyard_zone` incomplete: Map %u Zone "

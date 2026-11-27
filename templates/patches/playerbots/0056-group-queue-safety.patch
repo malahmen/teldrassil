@@ -1,0 +1,358 @@
+diff --git a/playerbot/strategy/actions/AcceptInvitationAction.h b/playerbot/strategy/actions/AcceptInvitationAction.h
+index 188918f..5c50c26 100644
+--- a/playerbot/strategy/actions/AcceptInvitationAction.h
++++ b/playerbot/strategy/actions/AcceptInvitationAction.h
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include "playerbot/strategy/Action.h"
++#include "playerbot/strategy/values/GroupQuests.h"
+ 
+ namespace ai
+ {
+@@ -19,7 +20,11 @@ namespace ai
+             if (!inviter)
+                 return false;
+ 
+-			if (!ai->GetSecurity()->CheckLevelFor(PlayerbotSecurityLevel::PLAYERBOT_SECURITY_INVITE, false, inviter))
++			// kalimdor: a bot in the group quest queue turns down another
++			// bot's invitation - its group is the matcher's (Kamino 291). A
++			// player's is still answered as before.
++			bool const queued = !inviter->GetPlayerbotAI() ? false : !inviter->GetPlayerbotAI()->IsRealPlayer() && GroupQuests::Queued(bot);
++			if (queued || !ai->GetSecurity()->CheckLevelFor(PlayerbotSecurityLevel::PLAYERBOT_SECURITY_INVITE, false, inviter))
+             {
+                 WorldPacket data(SMSG_GROUP_DECLINE, 10);
+                 data << bot->GetName();
+diff --git a/playerbot/strategy/actions/InviteToGroupAction.cpp b/playerbot/strategy/actions/InviteToGroupAction.cpp
+index 367cd28..7ea866b 100644
+--- a/playerbot/strategy/actions/InviteToGroupAction.cpp
++++ b/playerbot/strategy/actions/InviteToGroupAction.cpp
+@@ -4,6 +4,7 @@
+ #include "playerbot/ServerFacade.h"
+ #include "playerbot/strategy/values/Formations.h"
+ #include "Guilds/GuildMgr.h"
++#include "playerbot/strategy/values/GroupQuests.h"
+ 
+ namespace ai
+ {
+@@ -397,6 +398,12 @@ namespace ai
+         if (bot->InBattleGroundQueue())
+             return false;
+ 
++        // kalimdor: a bot in the group quest queue invites no one - the
++        // matcher fills its group, by role, on the world's update; these
++        // invites, from its own update, bypassed both (Kamino 291).
++        if (GroupQuests::Queued(bot))
++            return false;
++
+         GrouperType grouperType = ai->GetGrouperType();
+ 
+         if (grouperType == GrouperType::SOLO || grouperType == GrouperType::MEMBER)
+diff --git a/playerbot/strategy/actions/LookForGroupAction.cpp b/playerbot/strategy/actions/LookForGroupAction.cpp
+index a372eb8..5fa7199 100644
+--- a/playerbot/strategy/actions/LookForGroupAction.cpp
++++ b/playerbot/strategy/actions/LookForGroupAction.cpp
+@@ -44,9 +44,11 @@ bool LookForGroupAction::Execute(Event& event)
+         sLog.outString("Bot #%d %s:%d <%s>: no group for %s (%u of %u) - %s, again in %d minutes", bot->GetGUIDLow(),
+             bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), quest->GetTitle().c_str(), have, wanted,
+             breakUp ? "the group breaks up" : "gives up for now", int(GroupQuests::RetryTime / 60));
+-        GroupQuests::Withdraw(bot);
++        // The break-up is the matcher's, on the world's update (Kamino 291).
+         if (breakUp)
+-            group->Disband();
++            GroupQuests::BreakUp(bot);
++        else
++            GroupQuests::Withdraw(bot);
+ 
+         SET_AI_VALUE2(int, "manual int", "lfg quest", 0);
+         SET_AI_VALUE2(time_t, "manual time", "lfg since", 0);
+@@ -161,5 +163,12 @@ bool EndGroupQuestAction::Execute(Event& event)
+         bot->GetLevel(), bot->GetName(), quest ? quest->GetTitle().c_str() : "a group quest",
+         !bot->GetGroup() ? "no group" : bot->GetQuestStatus(uint32(questId)) == QUEST_STATUS_COMPLETE ? "done" : "no longer in its log");
+     SetGroupQuestFocus(bot, 0);
++    // Its queue values go with it: "lfg joined" kept it in its group
++    // (GroupQuests::Holds) and "lfg quest" asking, after the quest was over
++    // (Kamino 292).
++    SET_AI_VALUE2(int, "manual int", "lfg quest", 0);
++    SET_AI_VALUE2(int, "manual int", "lfg joined", 0);
++    SET_AI_VALUE2(time_t, "manual time", "lfg since", 0);
++    SET_AI_VALUE2(bool, "manual bool", "lfg grouped", false);
+     return true;
+ }
+diff --git a/playerbot/strategy/values/GroupQuests.cpp b/playerbot/strategy/values/GroupQuests.cpp
+index ad4d672..cc7113b 100644
+--- a/playerbot/strategy/values/GroupQuests.cpp
++++ b/playerbot/strategy/values/GroupQuests.cpp
+@@ -62,6 +62,7 @@ namespace
+ {
+     std::mutex queueLock;
+     std::map<uint64, uint32> asking; // leader's guid -> quest
++    std::set<uint64> breakingUp;     // leaders whose groups break up, on the world's update (Kamino 291)
+ 
+     AiObjectContext* ContextOf(Player* player) { return player->GetPlayerbotAI()->GetAiObjectContext(); }
+ 
+@@ -72,6 +73,21 @@ namespace
+             player->GetPlayerbotAI() && !player->GetPlayerbotAI()->IsRealPlayer();
+     }
+ 
++    // Every member slot a random bot's, online or not: a player's group, its
++    // player offline and a random bot leading it, is not the queue's to fill,
++    // merge or break up - the guard saw online members only (Kamino 291).
++    bool OnlyRandomBots(Group* group)
++    {
++        for (auto const& slot : group->GetMemberSlots())
++        {
++            Player* member = sObjectMgr.GetPlayer(slot.guid);
++            if (member ? !member->GetPlayerbotAI() || member->GetPlayerbotAI()->IsRealPlayer() || !sRandomPlayerbotMgr.IsRandomBot(member)
++                       : !sRandomPlayerbotMgr.IsRandomBot(slot.guid.GetCounter()))
++                return false;
++        }
++        return true;
++    }
++
+     // Its group's members, or itself alone.
+     std::vector<Player*> MembersOf(Player* leader)
+     {
+@@ -103,6 +119,10 @@ namespace
+             ++counts[RoleOf(joiner)];
+             ++total;
+         }
++        // Slots its open invitations hold, as GroupSize counts them; their
++        // role unknown (Kamino 292). Members offline hold theirs too.
++        if (Group* group = leader->GetGroup())
++            total += group->GetInviteesCount() + (group->GetMembersCount() - uint32(MembersOf(leader).size()));
+         if (total > wanted || counts[Tank] > limits.maxTanks || counts[Healer] > limits.maxHealers)
+             return false;
+         uint32 const stillNeeded = (counts[Tank] < limits.minTanks ? limits.minTanks - counts[Tank] : 0) +
+@@ -115,6 +135,11 @@ namespace
+     {
+         if (Group* group = leader->GetGroup())
+             return group;
++        // An invitation of its own still open (upstream's, or another's to
++        // it) goes first: left, the group it was for kept it as an invitee -
++        // it could end up in two groups, or freed in that one's list
++        // (Kamino 291).
++        leader->UninviteFromGroup();
+         Group* group = new Group();
+         if (!group->Create(leader->GetObjectGuid(), leader->GetName()))
+         {
+@@ -136,14 +161,26 @@ namespace
+             group->ConvertToRaid();
+         if (bot->GetGroup())
+             bot->RemoveFromGroup();
++        bot->UninviteFromGroup(); // as for the leader (GroupFor)
+         if (!group->AddMember(bot->GetObjectGuid(), bot->GetName()))
+             return false;
+         ContextOf(bot)->GetValue<int>("manual int", "lfg joined")->Set(int(quest->GetQuestId()));
+         ContextOf(bot)->GetValue<int>("manual int", "lfg quest")->Set(0);
+         ContextOf(bot)->GetValue<time_t>("manual time", "lfg since")->Set(0);
+         ContextOf(bot)->GetValue<TravelTarget*>("travel target")->Get()->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
+-        ContextOf(leader)->GetValue<bool>("manual bool", "lfg grouped")->Set(true);
+-        ContextOf(leader)->GetValue<TravelTarget*>("travel target")->Get()->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
++        // A replacement for a group set off on the quest takes its focus at
++        // once - the leader's "group quest ready" ran before it came (Kamino
++        // 292); the leader's own trip goes on.
++        if (ContextOf(leader)->GetValue<int>("manual int", "group quest focus")->Get() == int(quest->GetQuestId()))
++        {
++            ContextOf(bot)->GetValue<std::set<uint32>>("focus travel target")->Set(std::set<uint32>{ quest->GetQuestId() });
++            ContextOf(bot)->GetValue<int>("manual int", "group quest focus")->Set(int(quest->GetQuestId()));
++        }
++        else
++        {
++            ContextOf(leader)->GetValue<bool>("manual bool", "lfg grouped")->Set(true);
++            ContextOf(leader)->GetValue<TravelTarget*>("travel target")->Get()->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
++        }
+         sLog.outString("Bot #%d %s:%d <%s>: joins %s's group for %s%s (%u of %u, %s)", bot->GetGUIDLow(),
+             bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), leader->GetName(), quest->GetTitle().c_str(), how,
+             group->GetMembersCount(), wanted, GroupQuests::RoleName(bot));
+@@ -173,39 +210,124 @@ void GroupQuests::Withdraw(Player* leader)
+     asking.erase(leader->GetObjectGuid().GetRawValue());
+ }
+ 
++void GroupQuests::BreakUp(Player* leader)
++{
++    std::lock_guard<std::mutex> guard(queueLock);
++    asking.erase(leader->GetObjectGuid().GetRawValue());
++    breakingUp.insert(leader->GetObjectGuid().GetRawValue());
++}
++
++bool GroupQuests::Queued(Player* bot)
++{
++    AiObjectContext* context = ContextOf(bot);
++    return context->GetValue<int>("manual int", "lfg quest")->Get() > 0 || context->GetValue<int>("manual int", "lfg joined")->Get() > 0 ||
++        context->GetValue<int>("manual int", "group quest focus")->Get() > 0;
++}
++
++// Still the leader's to look for: unfinished, not grey, enterable, and the
++// leader out of any dungeon - else its ask goes, whatever held it (Kamino 292).
++static bool StillWanted(Player* leader, Quest const* quest)
++{
++    return GroupQuests::IsGroupQuest(quest) && leader->GetQuestStatus(quest->GetQuestId()) == QUEST_STATUS_INCOMPLETE &&
++        !QuestFlow::IsGrey(leader, quest) && !leader->GetMap()->IsDungeon() && GroupQuests::CanEnter(leader, quest);
++}
++
++// A group the queue formed, broken up here, on the world's update: its
++// members may be on other maps, and the group is removed and freed as the
++// core does after its own disband (Player::RemoveFromGroup) - from the
++// leader's update it was neither, one leaked group a break-up (Kamino 291).
++// Every member waits RetryTime before it asks again, not the leader only:
++// they asked at once and the same group formed again (Kamino 292).
++static void BreakUpNow(Player* leader)
++{
++    Group* group = leader->GetGroup();
++    if (!group || !group->IsLeader(leader->GetObjectGuid()) || !OnlyRandomBots(group))
++        return;
++    time_t const retry = time(nullptr) + GroupQuests::RetryTime;
++    for (Player* member : MembersOf(leader))
++        if (member->GetPlayerbotAI())
++        {
++            AiObjectContext* context = ContextOf(member);
++            context->GetValue<int>("manual int", "lfg quest")->Set(0);
++            context->GetValue<int>("manual int", "lfg joined")->Set(0);
++            context->GetValue<time_t>("manual time", "lfg since")->Set(0);
++            context->GetValue<bool>("manual bool", "lfg grouped")->Set(false);
++            context->GetValue<time_t>("manual time", "lfg retry")->Set(retry);
++        }
++    sLog.outString("Bot #%d %s:%d <%s>: its group of %u breaks up", leader->GetGUIDLow(), leader->GetTeam() == ALLIANCE ? "A" : "H",
++        leader->GetLevel(), leader->GetName(), group->GetMembersCount());
++    group->Disband(true);
++    sObjectMgr.RemoveGroup(group);
++    delete group;
++}
++
+ void GroupQuests::Match()
+ {
+     std::map<uint64, uint32> asks;
++    std::set<uint64> breakUps;
+     {
+         std::lock_guard<std::mutex> guard(queueLock);
+         asks = asking;
++        breakUps.swap(breakingUp);
+     }
+-    struct Request { Player* leader; Quest const* quest; uint32 wanted; time_t since; };
++    for (uint64 raw : breakUps)
++        if (Player* leader = sObjectMgr.GetPlayer(ObjectGuid(raw)))
++            if (leader->IsInWorld() && leader->GetPlayerbotAI())
++                BreakUpNow(leader);
++    struct Request { Player* leader; Quest const* quest; uint32 wanted; time_t since; bool setOff; };
+     std::map<std::pair<uint32, uint32>, std::vector<Request>> byQuest; // (team, quest)
+     std::vector<uint64> gone;
+     for (auto const& [raw, questId] : asks)
+     {
+         Player* leader = sObjectMgr.GetPlayer(ObjectGuid(raw));
+         Quest const* quest = sObjectMgr.GetQuestTemplate(questId);
++        // Set off on it, a group asks for a replacement (Kamino 292: the
++        // focus had to be none, and a member lost was never replaced).
++        int const focus = Movable(leader) ? ContextOf(leader)->GetValue<int>("manual int", "group quest focus")->Get() : 0;
+         bool ok = Movable(leader) && quest && ContextOf(leader)->GetValue<int>("manual int", "lfg quest")->Get() == int(questId) &&
+-            ContextOf(leader)->GetValue<int>("manual int", "group quest focus")->Get() <= 0;
++            (focus <= 0 || focus == int(questId));
+         if (ok)
+             if (Group* group = leader->GetGroup())
++                ok = group->IsLeader(leader->GetObjectGuid()) && OnlyRandomBots(group);
++        // The quest done, grey or dropped, or the leader gone in: the ask
++        // goes, and a group formed for it and not set off breaks up - else it
++        // filled, never set off, and held its members for good (Kamino 292).
++        if (ok && !StillWanted(leader, quest))
++        {
++            ok = false;
++            bool const formed = ContextOf(leader)->GetValue<bool>("manual bool", "lfg grouped")->Get();
++            if (formed && focus <= 0)
++                BreakUpNow(leader);
++            else
+             {
+-                ok = group->IsLeader(leader->GetObjectGuid());
+-                for (Player* member : MembersOf(leader))
+-                    if (!member->GetPlayerbotAI() || member->GetPlayerbotAI()->IsRealPlayer())
+-                        ok = false; // a real player's group is its own
++                ContextOf(leader)->GetValue<int>("manual int", "lfg quest")->Set(0);
++                ContextOf(leader)->GetValue<time_t>("manual time", "lfg since")->Set(0);
+             }
++        }
++        bool keep = false;
+         if (ok && GroupSize(leader) >= WantedSize(quest))
++        {
+             ok = false;
++            // Full but not ready - short of a tank or a healer (filled by
++            // upstream's invites), or invitations still open: its ask stays
++            // until it is, or until its time is out and it breaks up; full,
++            // it no longer asked, and stayed so for good (Kamino 292).
++            if (focus <= 0 && leader->GetGroup() && !Ready(leader))
++            {
++                time_t const since = ContextOf(leader)->GetValue<time_t>("manual time", "lfg since")->Get();
++                keep = since && time(nullptr) - since <= WaitFor(WantedSize(quest));
++                if (!keep)
++                    BreakUpNow(leader);
++            }
++        }
+         if (!ok)
+         {
+-            gone.push_back(raw);
++            if (!keep)
++                gone.push_back(raw);
+             continue;
+         }
+         byQuest[{ uint32(leader->GetTeam()), questId }].push_back({ leader, quest, WantedSize(quest),
+-            ContextOf(leader)->GetValue<time_t>("manual time", "lfg since")->Get() });
++            ContextOf(leader)->GetValue<time_t>("manual time", "lfg since")->Get(), focus > 0 });
+     }
+     {
+         std::lock_guard<std::mutex> guard(queueLock);
+@@ -231,10 +353,11 @@ void GroupQuests::Match()
+             if (merged[i])
+                 continue;
+             Request const& into = requests[i];
+-            // The smaller groups for the same quest, whole, while they fit.
+-            for (size_t j = i + 1; j < requests.size(); ++j)
++            // The smaller groups for the same quest, whole, while they fit -
++            // groups not set off yet: one set off only takes free bots.
++            for (size_t j = i + 1; j < requests.size() && !into.setOff; ++j)
+             {
+-                if (merged[j])
++                if (merged[j] || requests[j].setOff)
+                     continue;
+                 Player* other = requests[j].leader;
+                 std::vector<Player*> joiners = MembersOf(other);
+@@ -417,8 +540,23 @@ Quest const* GroupQuests::Ready(Player* bot)
+     if (!IsGroupQuest(quest) || bot->GetQuestStatus(quest->GetQuestId()) != QUEST_STATUS_INCOMPLETE || QuestFlow::IsGrey(bot, quest))
+         return nullptr;
+ 
+-    // Members, not invitations still open.
+-    return group->GetMembersCount() >= WantedSize(quest) ? quest : nullptr;
++    // Members, not invitations still open - and its tanks and healers:
++    // upstream's invites filled groups with damage dealers, and they set off
++    // with no tank or healer (Kamino 292). Short of them, it waits; not
++    // fixed in time, it breaks up as any group not filled.
++    uint32 const wanted = WantedSize(quest);
++    if (group->GetMembersCount() < wanted)
++        return nullptr;
++    Limits const limits = LimitsFor(wanted);
++    uint32 tanks = 0, healers = 0;
++    for (auto const& slot : group->GetMemberSlots())
++        if (Player* member = sObjectMgr.GetPlayer(slot.guid))
++        {
++            Role const role = RoleOf(member);
++            tanks += role == Tank;
++            healers += role == Healer;
++        }
++    return tanks >= limits.minTanks && healers >= limits.minHealers ? quest : nullptr;
+ }
+ 
+ // Whose log tells the group quest's state: the group's leader's - it chose
+diff --git a/playerbot/strategy/values/GroupQuests.h b/playerbot/strategy/values/GroupQuests.h
+index 4094af3..e2bac13 100644
+--- a/playerbot/strategy/values/GroupQuests.h
++++ b/playerbot/strategy/values/GroupQuests.h
+@@ -100,6 +100,12 @@ namespace ai
+         // group quest. Groups with a real player are never touched.
+         static void Ask(Player* leader, Quest const* quest);
+         static void Withdraw(Player* leader);
++        // Its group, formed by the queue, breaks up on the matcher's next run
++        // (the world's update), every member waiting RetryTime (Kamino 291).
++        static void BreakUp(Player* leader);
++        // Asking, joined for a group quest, or set on one: upstream's
++        // invites leave it alone, and it them (Kamino 291).
++        static bool Queued(Player* bot);
+         static void Match();
+         static constexpr time_t MatchEvery = 5;
+         static constexpr float NearRange = 1500.0f;

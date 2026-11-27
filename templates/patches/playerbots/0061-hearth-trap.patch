@@ -1,0 +1,36 @@
+diff --git a/playerbot/strategy/actions/MoveAwayFromEnemyGuardAction.cpp b/playerbot/strategy/actions/MoveAwayFromEnemyGuardAction.cpp
+index e871b28..d5d1d39 100644
+--- a/playerbot/strategy/actions/MoveAwayFromEnemyGuardAction.cpp
++++ b/playerbot/strategy/actions/MoveAwayFromEnemyGuardAction.cpp
+@@ -206,7 +206,15 @@ bool LeaveHostileTerritoryAction::Execute(Event& event)
+         time_t const now = time(nullptr);
+         if (now - AI_VALUE2(time_t, "manual time", "hearth tried") < EnemyGuards::HearthRetry)
+             return false;
++        // Its hearthstone tried last time from this same zone, and it is
++        // still here: the hearth never took it - refused for a group not all
++        // ready, or its cast broken by the guards' push - so put at its inn
++        // (eleven bots at Talrendis Point "used" it every 10 minutes, the
++        // cluster, 2026-11-26).
++        bool const hearthFailed = AI_VALUE2(time_t, "manual time", "hearth tried") &&
++            AI_VALUE2(int32, "manual int", "hearth tried zone") == int32(bot->GetZoneId());
+         SET_AI_VALUE2(time_t, "manual time", "hearth tried", now);
++        SET_AI_VALUE2(int32, "manual int", "hearth tried zone", int32(bot->GetZoneId()));
+         RESET_AI_VALUE2(std::string, "manual string", "failed exits");
+         RESET_AI_VALUE2(int32, "manual int", "failed exit count");
+ 
+@@ -215,10 +223,12 @@ bool LeaveHostileTerritoryAction::Execute(Event& event)
+         SET_AI_VALUE2(int32, "manual int", "walkouts", 0);
+         // Trapped and no hearthstone ready: put at its inn - the trap held
+         // for a day with the hearth on cooldown or gone.
+-        if (trapped && leader == bot && (!bot->HasItemCount(6948, 1) || !AI_VALUE2(bool, "spell ready", "8690")))
++        if (hearthFailed || (trapped && leader == bot && (!bot->HasItemCount(6948, 1) || !AI_VALUE2(bool, "spell ready", "8690"))))
+         {
+-            sLog.outString("Bot #%d %s:%d <%s> in %s: %s - no hearthstone ready, put at its inn", bot->GetGUIDLow(),
+-                bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), botPosition.getAreaName().c_str(), why);
++            sLog.outString("Bot #%d %s:%d <%s> in %s: %s - %s, put at its inn", bot->GetGUIDLow(),
++                bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), botPosition.getAreaName().c_str(), why,
++                hearthFailed ? "its hearthstone did not take it home" : "no hearthstone ready");
++            SET_AI_VALUE2(time_t, "manual time", "hearth tried", 0);
+             bot->TeleportToHomebind();
+             return true;
+         }

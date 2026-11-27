@@ -1,0 +1,550 @@
+diff --git a/playerbot/strategy/values/DpsTargetValue.cpp b/playerbot/strategy/values/DpsTargetValue.cpp
+index ac17066..827ec80 100644
+--- a/playerbot/strategy/values/DpsTargetValue.cpp
++++ b/playerbot/strategy/values/DpsTargetValue.cpp
+@@ -2,6 +2,7 @@
+ #include "playerbot/playerbot.h"
+ #include "DpsTargetValue.h"
+ #include "LeastHpTargetValue.h"
++#include "DungeonRun.h"
+ 
+ using namespace ai;
+ 
+@@ -11,6 +12,21 @@ ObjectGuid DpsTargetValue::Calculate()
+     ObjectGuid rti = RtiTargetValue::Calculate();
+     if (rti) return rti;
+ 
++    // kalimdor (Kamino 299): on a run with no skull, the tank's target - not
++    // held, not marked for holding; the tank dead, the least health below.
++    if (DungeonRun::Active(bot))
++        if (Player* tank = DungeonRun::TankOf(bot))
++            if (tank != bot && DungeonRun::Mine(tank))
++                if (Unit* victim = tank->GetVictim())
++                {
++                    bool marked = false;
++                    if (Group* group = bot->GetGroup())
++                        for (uint8 icon : { 4, 0, 6 }) // moon, star, cross: held for crowd control
++                            marked = marked || group->GetTargetIcon(icon) == victim->GetObjectGuid();
++                    if (victim->IsAlive() && !victim->IsPlayer() && !marked && !DungeonRun::HeldByCc(victim))
++                        return victim->GetObjectGuid();
++                }
++
+     FindLeastHpTargetStrategy strategy(ai);
+     Unit* target = TargetValue::FindTarget(&strategy);
+     return target ? target->GetObjectGuid() : ObjectGuid();
+diff --git a/playerbot/strategy/values/DungeonRun.cpp b/playerbot/strategy/values/DungeonRun.cpp
+index a97ae4f..74e6c85 100644
+--- a/playerbot/strategy/values/DungeonRun.cpp
++++ b/playerbot/strategy/values/DungeonRun.cpp
+@@ -223,6 +223,10 @@ void DungeonRun::Sync(Player* bot)
+     AiObjectContext* context = ContextOf(bot);
+     if (!context)
+         return;
++    // A run's leader marks, every update it has, alive or dead (Kamino 299).
++    if (Group* group = bot->GetGroup())
++        if (group->IsLeader(bot->GetObjectGuid()) && bot->IsInWorld() && !bot->IsBeingTeleported() && bot->GetMap()->IsDungeon())
++            UpdateMarks(bot);
+     // What was posted for it, in its own update.
+     if (postedCount.load() > 0)
+     {
+@@ -1734,6 +1738,8 @@ bool DungeonRun::StartPull(Player* leader, Player* puller, Creature* target, Wor
+     ai->GetAiObjectContext()->GetValue<std::string>("manual string", "hold from")->Set(spot.to_string());
+     ai->GetAiObjectContext()->GetValue<time_t>("manual time", "hold from since")->Set(time(nullptr));
+     strategy->RequestPull(target);
++    // Its pack marked before it comes (Kamino 299).
++    UpdateMarks(leader, target);
+     ai->OnCombatStarted();
+     // The damage dealers hold till the tank has it a moment: the run's own
+     // hold (RunTankFirstMultiplier) - not 3 seconds from their own fight's
+@@ -3088,3 +3094,422 @@ bool InDungeonRunValue::Calculate()
+ {
+     return DungeonRun::Active(bot);
+ }
++
++
++// -----------------------------------------------------------------------------
++// The run's marks (Kamino 299)
++// -----------------------------------------------------------------------------
++
++namespace
++{
++    std::mutex rolesLock;
++    std::map<uint32, DungeonRun::MarkRole> mobRoles;      // creature entry -> its role
++    std::map<uint32, std::set<uint32>> eventAiSpells;     // creature entry -> spells its EventAI casts
++    std::set<uint32> eventAiSummoners;                    // creatures whose EventAI spawns others
++    std::once_flag eventAiLoaded;
++
++    void LoadEventAiSpells()
++    {
++        std::call_once(eventAiLoaded, []()
++        {
++            // ACTION_T_CAST (11): its spell; ACTION_T_SPAWN (12) and
++            // ACTION_T_SUMMON_ID (32): a summoner.
++            if (auto result = WorldDatabase.Query("SELECT creature_id, action1_type, action1_param1, action2_type, action2_param1, "
++                "action3_type, action3_param1 FROM creature_ai_scripts"))
++                do
++                {
++                    Field* fields = result->Fetch();
++                    uint32 const entry = fields[0].GetUInt32();
++                    for (int a = 0; a < 3; ++a)
++                    {
++                        uint32 const type = fields[1 + 2 * a].GetUInt32();
++                        int32 const param = fields[2 + 2 * a].GetInt32();
++                        if (type == 11 && param > 0)
++                            eventAiSpells[entry].insert(uint32(param));
++                        else if (type == 12 || type == 32)
++                            eventAiSummoners.insert(entry);
++                    }
++                } while (result->NextRow());
++        });
++    }
++
++    DungeonRun::MarkRole RoleOfSpell(SpellEntry const* spell)
++    {
++        DungeonRun::MarkRole role = DungeonRun::MARK_MELEE;
++        auto better = [&role](DungeonRun::MarkRole r) { if (r < role) role = r; };
++        bool damage = false;
++        for (int e = 0; e < MAX_EFFECT_INDEX; ++e)
++        {
++            uint32 const effect = spell->Effect[e];
++            uint32 const aura = spell->EffectApplyAuraName[e];
++            if (effect == SPELL_EFFECT_HEAL || aura == SPELL_AURA_PERIODIC_HEAL)
++                better(DungeonRun::MARK_HEALER);
++            if (effect == SPELL_EFFECT_SUMMON || effect == SPELL_EFFECT_SUMMON_WILD || effect == SPELL_EFFECT_SUMMON_GUARDIAN ||
++                effect == SPELL_EFFECT_SUMMON_POSSESSED)
++                better(DungeonRun::MARK_SUMMONER);
++            if (aura == SPELL_AURA_MOD_STUN || aura == SPELL_AURA_MOD_CONFUSE || aura == SPELL_AURA_MOD_FEAR || aura == SPELL_AURA_MOD_CHARM ||
++                aura == SPELL_AURA_MOD_POSSESS || aura == SPELL_AURA_MOD_SILENCE)
++                better(DungeonRun::MARK_CC);
++            if (effect == SPELL_EFFECT_SCHOOL_DAMAGE || aura == SPELL_AURA_PERIODIC_DAMAGE)
++                damage = true;
++        }
++        if (damage)
++            better(IsAreaOfEffectSpell(spell) ? DungeonRun::MARK_AOE : DungeonRun::MARK_CASTER);
++        return role;
++    }
++
++    // A crowd controller's spell (its first rank: the later ones are kept
++    // with it), its mechanic and the creature types it holds; 0 types: any.
++    struct CcSpell { uint8 cls; uint32 spell; uint32 mechanic; std::set<uint32> types; };
++    std::vector<CcSpell> const ccSpells =
++    {
++        { CLASS_MAGE, 118, MECHANIC_POLYMORPH, { CREATURE_TYPE_HUMANOID, CREATURE_TYPE_BEAST, CREATURE_TYPE_CRITTER } },
++        { CLASS_PRIEST, 9484, MECHANIC_SHACKLE, { CREATURE_TYPE_UNDEAD } },
++        { CLASS_DRUID, 2637, MECHANIC_SLEEP, { CREATURE_TYPE_BEAST, CREATURE_TYPE_DRAGONKIN } },
++        { CLASS_WARLOCK, 710, MECHANIC_BANISH, { CREATURE_TYPE_DEMON, CREATURE_TYPE_ELEMENTAL } },
++        { CLASS_HUNTER, 1499, MECHANIC_FREEZE, {} },
++    };
++
++    CcSpell const* CcSpellOf(Player* member)
++    {
++        for (CcSpell const& cc : ccSpells)
++            if (member->getClass() == cc.cls && member->HasSpell(cc.spell))
++                return &cc;
++        return nullptr;
++    }
++
++    bool CanHold(CcSpell const& cc, Creature* mob)
++    {
++        CreatureInfo const* info = mob->GetCreatureInfo();
++        if (!info || (info->MechanicImmuneMask & (1 << (cc.mechanic - 1))))
++            return false;
++        return cc.types.empty() || cc.types.count(mob->GetCreatureType());
++    }
++
++    // The crowd-control icons, in the order they are given.
++    struct CcIcon { uint8 index; char const* name; };
++    CcIcon const ccIcons[] = { { 4, "moon" }, { 0, "star" }, { 6, "cross" } };
++
++    struct CcMark { uint8 icon; char const* name; ObjectGuid ccer; ObjectGuid target; time_t since; };
++    struct RunMarks
++    {
++        ObjectGuid skull;
++        std::vector<CcMark> cc;
++        std::set<uint32> aoeOff;   // members whose "aoe" strategy it took off
++        std::set<uint32> ccAdded;  // members it gave the "cc" strategy
++        time_t quietSince = 0;
++        time_t last = 0;
++    };
++    std::mutex marksLock;
++    std::map<uint32, RunMarks> runMarks; // group id -> its marks
++
++    // A crowd controller let go: its mark's name off, the "cc" strategy
++    // off if the marks gave it.
++    void ReleaseCcer(Player* ccer, bool added)
++    {
++        DungeonRun::PostCall(ccer, [added](Player* m)
++        {
++            PlayerbotAI* ai = m->GetPlayerbotAI();
++            if (!ai)
++                return;
++            ai->GetAiObjectContext()->GetValue<std::string>("rti cc")->Set("none");
++            if (added && ai->HasStrategy("cc", BotState::BOT_STATE_COMBAT))
++                ai->ChangeStrategy("-cc", BotState::BOT_STATE_COMBAT);
++        });
++    }
++
++    void SetAoe(Player* member, bool on)
++    {
++        DungeonRun::PostCall(member, [on](Player* m)
++        {
++            if (PlayerbotAI* ai = m->GetPlayerbotAI())
++                ai->ChangeStrategy(on ? "+aoe" : "-aoe", BotState::BOT_STATE_COMBAT);
++        });
++    }
++
++    bool Here(Player* member, Player* leader)
++    {
++        return member && member->IsInWorld() && member->GetMapId() == leader->GetMapId() && member->GetInstanceId() == leader->GetInstanceId() &&
++            DungeonRun::Mine(member);
++    }
++}
++
++DungeonRun::MarkRole DungeonRun::RoleOfMob(Creature* creature)
++{
++    LoadKillFirst();
++    LoadEventAiSpells();
++    uint32 const entry = creature->GetEntry();
++    {
++        std::lock_guard<std::mutex> guard(rolesLock);
++        auto const known = mobRoles.find(entry);
++        if (known != mobRoles.end())
++            return known->second;
++    }
++    MarkRole role = MARK_MELEE;
++    auto better = [&role](MarkRole r) { if (r < role) role = r; };
++    if (healers.count(entry))
++        better(MARK_HEALER);
++    if (eventAiSummoners.count(entry))
++        better(MARK_SUMMONER);
++    std::set<uint32> spells;
++    auto const eai = eventAiSpells.find(entry);
++    if (eai != eventAiSpells.end())
++        spells = eai->second;
++    for (auto const& [position, listed] : creature->GetSpellList().Spells)
++        spells.insert(listed.SpellId);
++    for (uint32 id : spells)
++        if (SpellEntry const* spell = sSpellTemplate.LookupEntry<SpellEntry>(id))
++            better(RoleOfSpell(spell));
++    if (CreatureInfo const* info = creature->GetCreatureInfo())
++        if (info->UnitClass == CLASS_MAGE || info->UnitClass == CLASS_PALADIN)
++            better(MARK_CASTER);
++    std::lock_guard<std::mutex> guard(rolesLock);
++    mobRoles[entry] = role;
++    return role;
++}
++
++void DungeonRun::ClearMarks(Player* leader)
++{
++    Group* group = leader->GetGroup();
++    if (!group)
++        return;
++    RunMarks marks;
++    {
++        std::lock_guard<std::mutex> guard(marksLock);
++        auto const at = runMarks.find(group->GetId());
++        if (at == runMarks.end())
++            return;
++        marks = std::move(at->second);
++        runMarks.erase(at);
++    }
++    if (marks.skull && group->GetTargetIcon(IconSkull) == marks.skull)
++        group->SetTargetIcon(IconSkull, ObjectGuid());
++    for (CcMark const& cc : marks.cc)
++    {
++        if (group->GetTargetIcon(cc.icon) == cc.target)
++            group->SetTargetIcon(cc.icon, ObjectGuid());
++        if (Player* ccer = sObjectMgr.GetPlayer(cc.ccer))
++            ReleaseCcer(ccer, marks.ccAdded.count(ccer->GetGUIDLow()) > 0);
++    }
++    for (uint32 low : marks.aoeOff)
++        if (Player* member = sObjectMgr.GetPlayer(ObjectGuid(HIGHGUID_PLAYER, low)))
++            SetAoe(member, true);
++}
++
++void DungeonRun::UpdateMarks(Player* leader, Creature* pulling)
++{
++    Group* group = leader->GetGroup();
++    if (!group)
++        return;
++    if (!pulling && !Active(leader))
++    {
++        bool any = false;
++        {
++            std::lock_guard<std::mutex> guard(marksLock);
++            any = runMarks.count(group->GetId()) > 0;
++        }
++        if (any)
++            ClearMarks(leader);
++        return;
++    }
++    time_t const now = time(nullptr);
++    {
++        std::lock_guard<std::mutex> guard(marksLock);
++        RunMarks& marks = runMarks[group->GetId()];
++        if (!pulling && marks.last == now)
++            return; // once a second, but at a pull
++        marks.last = now;
++    }
++
++    // The mobs: what fights a member here, and the pack about to be pulled.
++    std::vector<Creature*> mobs;
++    auto add = [&](Unit* unit)
++    {
++        if (!unit || unit->GetTypeId() != TYPEID_UNIT || !unit->IsAlive() || !unit->IsInWorld() || unit->GetMapId() != leader->GetMapId() ||
++            unit->GetInstanceId() != leader->GetInstanceId())
++            return;
++        Creature* creature = static_cast<Creature*>(unit);
++        if (creature->IsCritter() || creature->IsPet() || std::find(mobs.begin(), mobs.end(), creature) != mobs.end())
++            return;
++        mobs.push_back(creature);
++    };
++    for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
++        if (Player* member = ref->getSource())
++            if (Here(member, leader))
++                for (HostileReference* hate = member->getHostileRefManager().getFirst(); hate; hate = hate->next())
++                    add(hate->getSource() ? hate->getSource()->getOwner() : nullptr);
++    if (pulling && pulling->IsInWorld())
++    {
++        add(pulling);
++        std::list<Unit*> near;
++        MaNGOS::AnyUnitInObjectRangeCheck check(pulling, PackRange);
++        MaNGOS::UnitListSearcher<MaNGOS::AnyUnitInObjectRangeCheck> searcher(near, check);
++        Cell::VisitAllObjects(pulling, searcher, PackRange);
++        for (Unit* unit : near)
++            if (unit->GetTypeId() == TYPEID_UNIT && !unit->IsInCombat() && unit->IsEnemy(leader))
++                add(unit);
++    }
++
++    if (mobs.empty())
++    {
++        bool clear = false;
++        {
++            std::lock_guard<std::mutex> guard(marksLock);
++            RunMarks& marks = runMarks[group->GetId()];
++            if (!marks.quietSince)
++                marks.quietSince = now;
++            clear = now - marks.quietSince >= MarksQuiet && (marks.skull || !marks.cc.empty() || !marks.aoeOff.empty());
++        }
++        if (clear)
++            ClearMarks(leader);
++        return;
++    }
++
++    // Kill order: role, then health as a value.
++    std::sort(mobs.begin(), mobs.end(), [](Creature* a, Creature* b)
++    {
++        MarkRole const ra = RoleOfMob(a), rb = RoleOfMob(b);
++        return ra != rb ? ra < rb : a->GetHealth() < b->GetHealth();
++    });
++
++    std::lock_guard<std::mutex> guard(marksLock);
++    RunMarks& marks = runMarks[group->GetId()];
++    marks.quietSince = 0;
++    Map* map = leader->GetMap();
++
++    // Crowd control kept while it holds (or its controller still has time
++    // to); else its mark comes off, and the mob is fought.
++    for (auto cc = marks.cc.begin(); cc != marks.cc.end();)
++    {
++        Creature* target = map->GetAnyTypeCreature(cc->target);
++        Player* ccer = sObjectMgr.GetPlayer(cc->ccer);
++        bool const keep = target && target->IsAlive() && ccer && Here(ccer, leader) && ccer->IsAlive() &&
++            (HeldByCc(target) || now - cc->since < CcGrace);
++        if (keep)
++        {
++            ++cc;
++            continue;
++        }
++        if (group->GetTargetIcon(cc->icon) == cc->target)
++            group->SetTargetIcon(cc->icon, ObjectGuid());
++        if (ccer)
++            ReleaseCcer(ccer, marks.ccAdded.count(ccer->GetGUIDLow()) > 0);
++        if (ccer)
++            marks.ccAdded.erase(ccer->GetGUIDLow());
++        cc = marks.cc.erase(cc);
++    }
++    auto ccTarget = [&marks](Creature* mob)
++    {
++        for (CcMark const& cc : marks.cc)
++            if (cc.target == mob->GetObjectGuid())
++                return true;
++        return false;
++    };
++
++    // The skull: kept while it lives and is fought; else the first in the
++    // kill order that is not held.
++    Creature* skull = nullptr;
++    for (Creature* mob : mobs)
++        if (mob->GetObjectGuid() == marks.skull && !ccTarget(mob) && !HeldByCc(mob))
++            skull = mob;
++    if (!skull)
++        for (Creature* mob : mobs)
++            if (!ccTarget(mob) && !HeldByCc(mob))
++            {
++                skull = mob;
++                break;
++            }
++    if (skull && (skull->GetObjectGuid() != marks.skull || group->GetTargetIcon(IconSkull) != skull->GetObjectGuid()))
++    {
++        group->SetTargetIcon(IconSkull, skull->GetObjectGuid());
++        marks.skull = skull->GetObjectGuid();
++    }
++
++    // Crowd control for the next in the kill order, up to 3, while two or
++    // more are on the group - never a boss, never the skull.
++    if (mobs.size() >= 2 && marks.cc.size() < 3)
++    {
++        std::vector<Player*> ccers;
++        for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
++        {
++            Player* member = ref->getSource();
++            if (!Here(member, leader) || !member->IsAlive() || !member->GetPlayerbotAI() || member->GetPlayerbotAI()->IsRealPlayer() ||
++                PlayerbotAI::IsTank(member) || !CcSpellOf(member))
++                continue;
++            bool busy = false;
++            for (CcMark const& cc : marks.cc)
++                busy = busy || cc.ccer == member->GetObjectGuid();
++            if (!busy)
++                ccers.push_back(member);
++        }
++        for (Creature* mob : mobs)
++        {
++            if (marks.cc.size() >= 3 || ccers.empty())
++                break;
++            if (mob == skull || IsBoss(mob) || ccTarget(mob) || HeldByCc(mob))
++                continue;
++            auto who = std::find_if(ccers.begin(), ccers.end(), [mob](Player* p) { return CanHold(*CcSpellOf(p), mob); });
++            if (who == ccers.end())
++                continue;
++            CcIcon const* icon = nullptr;
++            for (CcIcon const& free : ccIcons)
++            {
++                bool used = false;
++                for (CcMark const& cc : marks.cc)
++                    used = used || cc.icon == free.index;
++                if (!used)
++                {
++                    icon = &free;
++                    break;
++                }
++            }
++            if (!icon)
++                break;
++            Player* ccer = *who;
++            ccers.erase(who);
++            group->SetTargetIcon(icon->index, mob->GetObjectGuid());
++            marks.cc.push_back({ icon->index, icon->name, ccer->GetObjectGuid(), mob->GetObjectGuid(), now });
++            bool const adds = !ccer->GetPlayerbotAI()->HasStrategy("cc", BotState::BOT_STATE_COMBAT);
++            if (adds)
++                marks.ccAdded.insert(ccer->GetGUIDLow());
++            std::string const name = icon->name;
++            PostCall(ccer, [name, adds](Player* m)
++            {
++                PlayerbotAI* ai = m->GetPlayerbotAI();
++                if (!ai)
++                    return;
++                ai->GetAiObjectContext()->GetValue<std::string>("rti cc")->Set(name);
++                if (adds)
++                    ai->ChangeStrategy("+cc", BotState::BOT_STATE_COMBAT);
++            });
++            sLog.outString("Bot #%d %s:%d <%s>: marks %s (%u) with the %s for %s to hold", leader->GetGUIDLow(),
++                leader->GetTeam() == ALLIANCE ? "A" : "H", leader->GetLevel(), leader->GetName(), mob->GetName(), mob->GetDbGuid(),
++                icon->name, ccer->GetName());
++        }
++    }
++
++    // No AOE while one is held - its damage dealers' "aoe" off, and back on
++    // after.
++    bool held = false;
++    for (CcMark const& cc : marks.cc)
++        if (Creature* target = map->GetAnyTypeCreature(cc.target))
++            held = held || HeldByCc(target);
++    for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
++    {
++        Player* member = ref->getSource();
++        if (!Here(member, leader) || !member->GetPlayerbotAI() || member->GetPlayerbotAI()->IsRealPlayer() ||
++            PlayerbotAI::IsTank(member) || PlayerbotAI::IsHeal(member))
++            continue;
++        bool const off = marks.aoeOff.count(member->GetGUIDLow()) > 0;
++        if (held && !off && member->GetPlayerbotAI()->HasStrategy("aoe", BotState::BOT_STATE_COMBAT))
++        {
++            marks.aoeOff.insert(member->GetGUIDLow());
++            SetAoe(member, false);
++        }
++        else if (!held && off)
++        {
++            marks.aoeOff.erase(member->GetGUIDLow());
++            SetAoe(member, true);
++        }
++    }
++}
+diff --git a/playerbot/strategy/values/DungeonRun.h b/playerbot/strategy/values/DungeonRun.h
+index 741c74c..8f5eeb6 100644
+--- a/playerbot/strategy/values/DungeonRun.h
++++ b/playerbot/strategy/values/DungeonRun.h
+@@ -409,6 +409,30 @@ namespace ai
+         // run to it, melee stay by it - unless a hold says otherwise (owner,
+         // 2026-11-21).
+         static Player* TankOf(Player* member);
++
++        // kalimdor (Kamino 299; the owner's "New Ideas", 2026-11-26): the
++        // run's marks. Its leader, alive or dead, marks the skull on the mob
++        // to kill first - healers, then crowd controllers, summoners, AOE
++        // casters, casters, melee (owner, 2026-11-26: what changes the
++        // group's response before what only adds damage); the least health
++        // (a value, not a percent) first among equals - before a pull (its pack) and through
++        // the fight, and moves it as each dies. Up to 3 crowd controllers of
++        // the group (mage, priest, druid, warlock, hunter) get moon, star and
++        // cross on mobs their spell can hold; their "rti cc" names it, their
++        // "cc" strategy holds it. While one is held its damage dealers use
++        // no AOE. Playerbots' dps and tank targets take the skull first, and
++        // skip held and marked mobs (FindNonCcTargetStrategy); on a run the
++        // tank takes every loose mob back before the skull, and breaks a
++        // held one, the least health first, only when nothing else is left;
++        // with no skull a damage dealer takes the tank's target.
++        enum MarkRole { MARK_HEALER, MARK_CC, MARK_SUMMONER, MARK_AOE, MARK_CASTER, MARK_MELEE };
++        static MarkRole RoleOfMob(Creature* creature);
++        static void UpdateMarks(Player* leader, Creature* pulling = nullptr);
++        static void ClearMarks(Player* leader);
++        static constexpr uint8 IconSkull = 7;
++        static constexpr float PackRange = 12.0f;
++        static constexpr time_t CcGrace = 15;   // a crowd controller's time to hold its mark
++        static constexpr time_t MarksQuiet = 5; // no mob this long: marks cleared
+         static constexpr float ByTankRange = 8.0f;
+         // Its hold spot in this fight (set as it starts), if it holds now.
+         static bool HoldSpot(Player* member, WorldPosition& spot);
+diff --git a/playerbot/strategy/values/TankTargetValue.cpp b/playerbot/strategy/values/TankTargetValue.cpp
+index 66f2b01..33153cf 100644
+--- a/playerbot/strategy/values/TankTargetValue.cpp
++++ b/playerbot/strategy/values/TankTargetValue.cpp
+@@ -55,6 +55,29 @@ protected:
+ 
+ ObjectGuid TankTargetValue::Calculate()
+ {
++    // kalimdor (Kamino 299): on a run, every loose mob taken back first -
++    // one on someone else - and the skull after; nothing else left, a held
++    // one is broken, the least health first (only the tank or the leader
++    // breaks crowd control).
++    if (DungeonRun::Active(bot))
++    {
++        FindTargetForTankStrategy strategy(ai);
++        Unit* loose = FindTarget(&strategy);
++        if (loose && loose->GetVictim() && loose->GetVictim() != bot)
++            return loose->GetObjectGuid();
++        ObjectGuid const skull = RtiTargetValue::Calculate();
++        if (skull)
++            return skull;
++        if (loose)
++            return loose->GetObjectGuid();
++        Unit* held = nullptr;
++        for (ObjectGuid const& guid : AI_VALUE(std::list<ObjectGuid>, "possible targets no los"))
++            if (Unit* unit = ai->GetUnit(guid))
++                if (unit->IsAlive() && unit->IsInCombat() && DungeonRun::HeldByCc(unit) && (!held || unit->GetHealth() < held->GetHealth()))
++                    held = unit;
++        return held ? held->GetObjectGuid() : ObjectGuid();
++    }
++
+     ObjectGuid rti = RtiTargetValue::Calculate();
+     if (rti) return rti;
+ 
