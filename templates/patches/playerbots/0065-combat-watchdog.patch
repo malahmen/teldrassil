@@ -1,0 +1,100 @@
+diff --git a/playerbot/PlayerbotAI.cpp b/playerbot/PlayerbotAI.cpp
+index ee26e06..d137cad 100644
+--- a/playerbot/PlayerbotAI.cpp
++++ b/playerbot/PlayerbotAI.cpp
+@@ -276,6 +276,85 @@ PlayerbotAI::~PlayerbotAI()
+         delete aiObjectContext;
+ }
+ 
++// kalimdor: the combat watchdog (Kamino 300). A bot leaves the core's combat
++// only when no creature lists it on its threat list; one that cannot reach
++// it, frozen far away, or kept by a pet held bots "fighting" for hours after
++// their mob died, and playerbots' own stuck checks run only in its combat
++// state and without a real master - neither of which such a bot had. So,
++// for every bot, whatever its AI state or master: in the core's combat with
++// no real fight for CombatWatchdogQuiet, its combat (and its pets') is
++// stopped. A real fight is a living unit within CombatWatchdogRange that
++// attacks it, that it attacks, or that holds it and fights a member of its
++// group within that range of the member - a boss fought by the tank while
++// the bot stands back still is one.
++static constexpr time_t CombatWatchdogQuiet = 2 * MINUTE;
++static constexpr float CombatWatchdogRange = 40.0f;
++
++static bool InRealFight(Player* bot)
++{
++    auto near = [bot](Unit* unit, Unit* to)
++    {
++        return unit && unit->IsInWorld() && unit->IsAlive() && unit->GetMapId() == to->GetMapId() &&
++            unit->GetInstanceId() == to->GetInstanceId() && to->GetDistance(unit) <= CombatWatchdogRange;
++    };
++    if (Unit* victim = bot->GetVictim())
++        if (near(victim, bot))
++            return true;
++    for (Unit* attacker : bot->getAttackers())
++        if (near(attacker, bot))
++            return true;
++    Group* group = bot->GetGroup();
++    for (HostileReference* ref = bot->getHostileRefManager().getFirst(); ref; ref = ref->next())
++    {
++        Unit* holder = ref->getSource() ? ref->getSource()->getOwner() : nullptr;
++        if (!holder || !holder->IsAlive() || !holder->IsInWorld())
++            continue;
++        if (near(holder, bot))
++            return true;
++        Unit* victim = holder->GetVictim();
++        Player* member = victim ? victim->GetBeneficiaryPlayer() : nullptr;
++        if (member && member != bot && group && member->GetGroup() == group && near(holder, member))
++            return true;
++    }
++    return false;
++}
++
++static void CombatWatchdog(Player* bot, AiObjectContext* context)
++{
++    Value<time_t>* quiet = context->GetValue<time_t>("manual time", "combat quiet since");
++    if (!bot->IsAlive() || !bot->IsInWorld() || bot->IsBeingTeleported() || !bot->IsInCombat() || InRealFight(bot))
++    {
++        if (quiet->Get())
++            quiet->Set(0);
++        return;
++    }
++    time_t const now = time(nullptr);
++    if (!quiet->Get())
++    {
++        quiet->Set(now);
++        return;
++    }
++    if (now - quiet->Get() < CombatWatchdogQuiet)
++        return;
++
++    // What held it, for the log: the creatures listing it, where they are.
++    std::string held;
++    for (HostileReference* ref = bot->getHostileRefManager().getFirst(); ref; ref = ref->next())
++        if (Unit* holder = ref->getSource() ? ref->getSource()->getOwner() : nullptr)
++        {
++            char line[160];
++            snprintf(line, sizeof(line), "%s%s (%u)%s %.0f yd%s", held.empty() ? "" : ", ", holder->GetName(), holder->GetEntry(),
++                holder->IsAlive() ? "" : " dead", holder->GetMapId() == bot->GetMapId() ? bot->GetDistance(holder) : -1.0f,
++                holder->GetCombatManager().IsEvadingHome() ? " evading" : "");
++            held += line;
++        }
++    sLog.outString("Bot #%d %s:%d <%s>: out of a combat with no fight in it for %ld s - held by %s", bot->GetGUIDLow(),
++        bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), long(now - quiet->Get()),
++        held.empty() ? "nothing (its own combat timer, or a pet)" : held.c_str());
++    bot->CombatStopWithPets(true);
++    quiet->Set(0);
++}
++
+ void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
+ {
+     // kalimdor (Kamino 288): this bot is the one updating on this thread -
+@@ -285,6 +364,9 @@ void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
+     DungeonRun::Updating updating(bot);
+     DungeonRun::Sync(bot);
+     AiObjectContext* context = aiObjectContext;
++    // A bot's own AI only: a player with selfbot fights as it chooses.
++    if (!IsRealPlayer())
++        CombatWatchdog(bot, context);
+     std::string mapString = WorldPosition(bot).isInstance() ? "I" : std::to_string(bot->GetMapId());
+     auto pmo = sPerformanceMonitor.start(PERF_MON_TOTAL, "PlayerbotAI::UpdateAI " + mapString, nullptr, bot->GetMapId(), bot->GetInstanceId());
+     

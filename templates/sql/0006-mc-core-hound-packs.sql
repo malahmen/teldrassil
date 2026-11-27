@@ -1,0 +1,11 @@
+-- kalimdor: Molten Core's Core Hound packs die together (Kamino 307).
+--
+-- The hounds (11671) ran EventAI with only Serrated Bite and died one by
+-- one; the game's texts for their smoldering and reigniting (broadcast_text
+-- 7866, 7867) were never used. Their script (molten_coreScripts.cpp,
+-- npc_core_hound) keeps the bite and adds the pack: a hound brought down
+-- while another of its pack fights smolders and reignites at full health
+-- 10 seconds later, unless the whole pack is down.
+--
+-- It can run again.
+UPDATE `creature_template` SET `AIName` = '', `ScriptName` = 'npc_core_hound' WHERE `Entry` = 11671;

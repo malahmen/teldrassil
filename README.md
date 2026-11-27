@@ -451,11 +451,12 @@ bot in five a tank, one in five a healer, at this population.
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries sixty-four changes to playerbots (`templates/patches/playerbots/`)
-and eight to the core (`templates/patches/mangos-classic/`), applied in order
+teldrassil carries sixty-nine changes to playerbots (`templates/patches/playerbots/`)
+and twelve to the core (`templates/patches/mangos-classic/`), applied in order
 before every build to the pinned upstreams - together they make kalimdor's tree
 exactly (checked: the stack on kalimdor's untouched import gives kalimdor
-`98b410a`, both trees). Sources that are kalimdor itself (`PROVENANCE.md` at
+`98b410a` with its branches for Kamino 300-308 merged in order, both trees;
+see the newest patches below). Sources that are kalimdor itself (`PROVENANCE.md` at
 their root - `SOURCE_REPO`, or `SOURCE_DIR` on a kalimdor clone) commit their
 changes: nothing is applied to them or taken off, so a kalimdor branch ahead
 of the stack builds as it is (Kamino 290).
@@ -741,6 +742,35 @@ on `SSH_HOST` the server's image applies its own (Kamino 298).
   less, as the server - unsold items vanish instead of being mailed to a
   random bot - and buys only as its own character (`AhBot.GUID`), if set.
   (Kamino 273, 2026-11-09.)
+- **Ahead of kalimdor `main` (2026-11-27):** 0065-0069 and core 0009-0012 are
+  kalimdor branches not merged yet, in this order: `fix/combat-watchdog`,
+  `fix/lfg-by-place`, `fix/wipe-whole-group`, `fix/marli-spell-lists`,
+  `fix/jeklik-swoop` (`sql/` only), `fix/naxx-strategy-switch`,
+  `feat/onyxia-strategy`, `fix/onyxia-eruptions`, `fix/core-hound-packs`,
+  `fix/emerald-dragons-respawn`. Merged in another order, or changed before
+  merging, they are made again from kalimdor's merges.
+- **mangos-classic 0012:** the Emerald Dragons come back 3 days after the last
+  of the four dies (30 hours before). (Kamino 308, 2026-11-27.)
+- **mangos-classic 0011:** Molten Core's Core Hound packs die together - a
+  hound brought down while its pack fights smolders and reignites at full
+  health 10 seconds later. Its script is set by `sql/0006`. (Kamino 307,
+  2026-11-27.)
+- **mangos-classic 0010:** Onyxia's phase-3 Bellowing Roar makes the lair's
+  lava fissures erupt. (Kamino 306, 2026-11-27.)
+- **playerbots 0069:** an Onyxia fight strategy - out of each Deep Breath's
+  lane, and everyone but her target on her flanks on the ground. (Kamino 305,
+  2026-11-27.)
+- **playerbots 0068:** Naxxramas's bot strategy switched on (the Four
+  Horsemen's Void Zones), and off again after the fight. (Kamino 305,
+  2026-11-27.)
+- **mangos-classic 0009:** Mar'li casts her own spells, not Venoxis's. (Kamino
+  303, 2026-11-27.) Jeklik's Swoop (Kamino 304) is `sql/0005` only.
+- **playerbots 0067:** a wipe is every member of the group died inside the
+  dungeon. (Kamino 302, 2026-11-27.)
+- **playerbots 0066:** the group queue matches by place - dungeon, wing or
+  world boss - not by quest. (Kamino 301, 2026-11-27.)
+- **playerbots 0065:** a combat watchdog - a bot in combat 2 minutes with no
+  real fight near it is taken out of combat. (Kamino 300, 2026-11-27.)
 - **playerbots 0064, mangos-classic 0008:** run records - each run, boss
   kills for everyone there, and lifetime totals in `kalimdor_*` tables the
   server creates itself; nothing grows for good. (kalimdor #70, 2026-11-27.)

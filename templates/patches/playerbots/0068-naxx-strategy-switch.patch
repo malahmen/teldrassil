@@ -1,0 +1,56 @@
+diff --git a/playerbot/strategy/generic/DungeonStrategy.cpp b/playerbot/strategy/generic/DungeonStrategy.cpp
+index 684eab8..b7226fe 100644
+--- a/playerbot/strategy/generic/DungeonStrategy.cpp
++++ b/playerbot/strategy/generic/DungeonStrategy.cpp
+@@ -71,6 +71,12 @@ void DungeonStrategy::InitCombatTriggers(std::list<TriggerNode*>& triggers)
+     triggers.push_back(new TriggerNode(
+         "enter mechanar",
+         NextAction::array(0, new NextAction("enable mechanar strategy", 100.0f), NULL)));
++
++    // kalimdor: Naxxramas's strategy (the Four Horsemen's Void Zones) had its
++    // triggers, actions and strategies but was never switched on here.
++    triggers.push_back(new TriggerNode(
++        "enter naxxramas",
++        NextAction::array(0, new NextAction("enable naxxramas strategy", 100.0f), NULL)));
+ }
+ 
+ void DungeonStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
+@@ -120,6 +126,14 @@ void DungeonStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
+     triggers.push_back(new TriggerNode(
+         "leave mechanar",
+         NextAction::array(0, new NextAction("disable mechanar strategy", 100.0f), NULL)));
++
++    triggers.push_back(new TriggerNode(
++        "enter naxxramas",
++        NextAction::array(0, new NextAction("enable naxxramas strategy", 100.0f), NULL)));
++
++    triggers.push_back(new TriggerNode(
++        "leave naxxramas",
++        NextAction::array(0, new NextAction("disable naxxramas strategy", 100.0f), NULL)));
+ }
+ // kalimdor: a member holding its spot in a fight moves for nothing but to get
+ // back to it - its other moves off (attacking, casting and healing from where
+diff --git a/playerbot/strategy/generic/NaxxramasDungeonStrategies.cpp b/playerbot/strategy/generic/NaxxramasDungeonStrategies.cpp
+index 330d174..d7f53f4 100644
+--- a/playerbot/strategy/generic/NaxxramasDungeonStrategies.cpp
++++ b/playerbot/strategy/generic/NaxxramasDungeonStrategies.cpp
+@@ -22,13 +22,17 @@ void FourHorsemanFightStrategy::InitCombatTriggers(std::list<TriggerNode*>& trig
+ void FourHorsemanFightStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
+ {
+ 	triggers.push_back(new TriggerNode(
+-		"end horseman fight",
++		// kalimdor: the registered name (TriggerContext.h) - "end horseman fight"
++		// matched nothing, so the fight strategy never switched off.
++		"end four horseman fight",
+ 		NextAction::array(0, new NextAction("disable four horseman fight strategy", 100.0f), NULL)));
+ }
+ 
+ void FourHorsemanFightStrategy::InitDeadTriggers(std::list<TriggerNode*>& triggers)
+ {
+ 	triggers.push_back(new TriggerNode(
+-		"end horseman fight",
++		// kalimdor: the registered name (TriggerContext.h) - "end horseman fight"
++		// matched nothing, so the fight strategy never switched off.
++		"end four horseman fight",
+ 		NextAction::array(0, new NextAction("disable four horseman fight strategy", 100.0f), NULL)));
+ }

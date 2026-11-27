@@ -1,0 +1,18 @@
+diff --git a/src/game/AI/ScriptDevAI/scripts/eastern_kingdoms/zulgurub/boss_marli.cpp b/src/game/AI/ScriptDevAI/scripts/eastern_kingdoms/zulgurub/boss_marli.cpp
+index b9d64c9..2e9cb40 100644
+--- a/src/game/AI/ScriptDevAI/scripts/eastern_kingdoms/zulgurub/boss_marli.cpp
++++ b/src/game/AI/ScriptDevAI/scripts/eastern_kingdoms/zulgurub/boss_marli.cpp
+@@ -53,8 +53,11 @@ enum
+     SPELL_TRASH                 = 3391,
+     SPELL_HATCH_EGGS            = 24083,                    // note this should only target 4 eggs!
+ 
+-    SPELL_LIST_PHASE_1          = 1450701,
+-    SPELL_LIST_PHASE_2          = 1450702,
++    // kalimdor: her own lists (Kamino 303) - 1450701/1450702 are High Priest
++    // Venoxis's: she cast his Holy Nova and the rest, never Poison Volley,
++    // Drain Life or Spider Egg, nor the spider form's webs and poisons.
++    SPELL_LIST_PHASE_1          = 1451001,
++    SPELL_LIST_PHASE_2          = 1451002,
+ };
+ 
+ enum MarliActions
