@@ -1,0 +1,119 @@
+diff --git a/playerbot/strategy/druid/DruidTriggers.h b/playerbot/strategy/druid/DruidTriggers.h
+index 8266762..c55064e 100644
+--- a/playerbot/strategy/druid/DruidTriggers.h
++++ b/playerbot/strategy/druid/DruidTriggers.h
+@@ -3,6 +3,15 @@
+ 
+ namespace ai 
+ {
++    // kalimdor: no stealth on a dungeon run or its way in - stealthed, a
++    // rogue or a cat does only its stealth actions (the "stealthed"
++    // multipliers), and leaves stealth only as it moves: a leader that
++    // stealthed while it waited for its group after a fight never moved
++    // again - its run's actions zeroed - till what respawned there two hours
++    // later attacked it (Jenora, Jihthu, Wailing Caverns and Ragefire Chasm,
++    // cluster; Rovahoy, Kusi, Shadowfang Keep, dev; 2026-11-27).
++    bool NoStealthOnRun(Player* bot);
++
+     class MarkOfTheWildOnPartyTrigger : public BuffOnPartyTrigger 
+     {
+     public:
+@@ -266,6 +275,11 @@ namespace ai
+ 
+         bool IsActive() override
+         {
++            if (ai->HasAura("prowl", bot) && NoStealthOnRun(bot))
++            {
++                return true;
++            }
++
+             if (ai->HasAura("prowl", bot) && !bot->InBattleGround())
+             {
+                 if (!AI_VALUE(bool, "has attackers") && !AI_VALUE(bool, "has enemy player targets"))
+@@ -300,6 +314,11 @@ namespace ai
+                 return false;
+             }
+ 
++            if (NoStealthOnRun(bot))
++            {
++                return false;
++            }
++
+             Unit* target = ai->GetUnit(AI_VALUE(ObjectGuid, "enemy player target"));
+             if (!target)
+             {
+diff --git a/playerbot/strategy/rogue/RogueTriggers.h b/playerbot/strategy/rogue/RogueTriggers.h
+index 0d0b8d5..6d7925e 100644
+--- a/playerbot/strategy/rogue/RogueTriggers.h
++++ b/playerbot/strategy/rogue/RogueTriggers.h
+@@ -3,6 +3,15 @@
+ 
+ namespace ai
+ {
++    // kalimdor: no stealth on a dungeon run or its way in - stealthed, a
++    // rogue or a cat does only its stealth actions (the "stealthed"
++    // multipliers), and leaves stealth only as it moves: a leader that
++    // stealthed while it waited for its group after a fight never moved
++    // again - its run's actions zeroed - till what respawned there two hours
++    // later attacked it (Jenora, Jihthu, Wailing Caverns and Ragefire Chasm,
++    // cluster; Rovahoy, Kusi, Shadowfang Keep, dev; 2026-11-27).
++    bool NoStealthOnRun(Player* bot);
++
+     class KickInterruptSpellTrigger : public InterruptSpellTrigger
+     {
+     public:
+@@ -98,6 +107,11 @@ namespace ai
+ 
+         bool IsActive() override
+         {
++            if (ai->HasAura("stealth", bot) && NoStealthOnRun(bot))
++            {
++                return true;
++            }
++
+             if (ai->HasAura("stealth", bot) && !bot->InBattleGround())
+             {
+                 if (!AI_VALUE(bool, "has attackers") && !AI_VALUE(bool, "has enemy player targets"))
+@@ -132,6 +146,11 @@ namespace ai
+                 return false;
+             }
+ 
++            if (NoStealthOnRun(bot))
++            {
++                return false;
++            }
++
+             Unit* target = ai->GetUnit(AI_VALUE(ObjectGuid, "enemy player target"));
+             if (!target)
+             {
+diff --git a/playerbot/strategy/values/DungeonRun.cpp b/playerbot/strategy/values/DungeonRun.cpp
+index b93a4e5..0470146 100644
+--- a/playerbot/strategy/values/DungeonRun.cpp
++++ b/playerbot/strategy/values/DungeonRun.cpp
+@@ -3155,6 +3155,12 @@ bool InDungeonRunValue::Calculate()
+     return DungeonRun::Active(bot);
+ }
+ 
++// Declared by the rogue's and the druid's triggers (RogueTriggers.h).
++bool ai::NoStealthOnRun(Player* bot)
++{
++    return bot && bot->GetPlayerbotAI() && bot->GetGroup() && (DungeonRun::Active(bot) || DungeonRun::WalkingIn(bot));
++}
++
+ 
+ // -----------------------------------------------------------------------------
+ // The run's marks (Kamino 299)
+diff --git a/playerbot/strategy/values/DungeonRun.h b/playerbot/strategy/values/DungeonRun.h
+index 7b4a8b0..0fd7c19 100644
+--- a/playerbot/strategy/values/DungeonRun.h
++++ b/playerbot/strategy/values/DungeonRun.h
+@@ -35,6 +35,9 @@ class Player;
+ 
+ namespace ai
+ {
++    // No stealth on a run or its way in (RogueTriggers.h).
++    bool NoStealthOnRun(Player* bot);
++
+     // "in dungeon run": the bot's group is on a run in its instance - read
+     // into PlayerTravelInfo, for travel's boss destinations.
+     class InDungeonRunValue : public BoolCalculatedValue
