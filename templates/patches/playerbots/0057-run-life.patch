@@ -1,0 +1,368 @@
+diff --git a/playerbot/strategy/actions/DungeonRunAction.cpp b/playerbot/strategy/actions/DungeonRunAction.cpp
+index cc21dbd..231521a 100644
+--- a/playerbot/strategy/actions/DungeonRunAction.cpp
++++ b/playerbot/strategy/actions/DungeonRunAction.cpp
+@@ -43,8 +43,31 @@ bool RunNextBossAction::Escort()
+     // only as it respawns - two hours for the Disciple of Naralex, a group
+     // waiting all along (dev, 2026-11-22) - so it is respawned now, as a GM
+     // would, for the next try; its last try failed, the escort given up.
++    // Neither alive nor dead within reach (a wipe carried the group off,
++    // its corpse gone): the one it started, by its guid, wherever it lies,
++    // dead - respawned as below; else, gone or alive out of reach this long
++    // since the start, failed with no respawn (Kamino 293).
++    Creature* lost = nullptr;
++    if (state == DungeonRun::ESCORT_ON && !starter && !GetClosestCreatureWithEntry(bot, escort->starter, 300.0f, false, true))
++    {
++        std::string const known = AI_VALUE2(std::string, "manual string", "run escort starter");
++        Creature* byGuid = known.empty() ? nullptr : bot->GetMap()->GetCreature(ObjectGuid(uint64(std::stoull(known))));
++        if (byGuid && !byGuid->IsAlive())
++            lost = byGuid;
++        else if (AI_VALUE2(time_t, "manual time", "run escort started") &&
++            now - AI_VALUE2(time_t, "manual time", "run escort started") >= DungeonRun::EscortLostTime)
++        {
++            SET_AI_VALUE2(int, "manual int", "run escort on", 0);
++            SET_AI_VALUE2(time_t, "manual time", "run escort failed", now);
++            SET_AI_VALUE2(int, "manual int", "run escort tries", DungeonRun::EscortTries + 1);
++            sLog.outString("Bot #%d %s:%d <%s>: its escort lost - its starter not found in %ld minutes, given up", bot->GetGUIDLow(),
++                bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), long(DungeonRun::EscortLostTime / 60));
++            EscortRestart();
++            return true;
++        }
++    }
+     if (state == DungeonRun::ESCORT_ON && !starter)
+-        if (Creature* dead = GetClosestCreatureWithEntry(bot, escort->starter, 300.0f, false, true))
++        if (Creature* dead = lost ? lost : GetClosestCreatureWithEntry(bot, escort->starter, 300.0f, false, true))
+         {
+             int const tries = AI_VALUE2(int, "manual int", "run escort tries");
+             SET_AI_VALUE2(int, "manual int", "run escort on", 0);
+@@ -113,6 +136,8 @@ bool RunNextBossAction::Escort()
+     // Its gossip's "begin" (GOSSIP_SENDER_MAIN, GOSSIP_ACTION_INFO_DEF + 1).
+     sScriptDevAIMgr.OnGossipSelect(bot, starter, 1, 1000 + 1, nullptr);
+     SET_AI_VALUE2(time_t, "manual time", "run escort", now);
++    SET_AI_VALUE2(time_t, "manual time", "run escort started", now);
++    SET_AI_VALUE2(std::string, "manual string", "run escort starter", std::to_string(starter->GetObjectGuid().GetRawValue()));
+     SET_AI_VALUE2(int, "manual int", "run escort on", 1);
+     return true;
+ }
+@@ -280,7 +305,8 @@ bool RunNextBossAction::Execute(Event& event)
+         // in a pull's fight state 36 yards up a cliff, its follow never run).
+         // Outside still, its leader in, ten minutes: likewise (one left on a
+         // hill by the way in, its leader waiting 21 minutes; dev,
+-        // 2026-11-21).
++        // 2026-11-21) - in another dungeon or another copy of this one too:
++        // that one was waited for with no end (Kamino 293).
+         // The one waited for its puller, its pull over its time: ended, the
+         // puller back - leader and puller waited for each other 8 minutes
+         // (Kresh, dev, 2026-11-22).
+@@ -304,7 +330,7 @@ bool RunNextBossAction::Execute(Event& event)
+             !notReady->IsInCombat() && notReady->GetPlayerbotAI() && !bot->IsInCombat() &&
+             ((here && now - since >= 120 && bot->GetDistance(notReady) > DungeonRun::ReadyRange) ||
+              (!here && bot->GetMap()->IsDungeon() && notReady->IsInWorld() && !notReady->IsBeingTeleported() &&
+-              !DungeonRun::OnDungeonMap(notReady) && now - since >= DungeonRun::GoingInTime)))
++              now - since >= DungeonRun::GoingInTime)))
+         {
+             sLog.outString("Bot #%d %s:%d <%s>: %s off its way %lds - put by it", bot->GetGUIDLow(), bot->GetTeam() == ALLIANCE ? "A" : "H",
+                 bot->GetLevel(), bot->GetName(), notReady->GetName(), long(now - since));
+@@ -1424,6 +1450,8 @@ bool DungeonRunAction::Execute(Event& event)
+         SET_AI_VALUE2(int, "manual int", "run best", 0);
+         SET_AI_VALUE2(int, "manual int", "run escort tries", 0);
+         SET_AI_VALUE2(int, "manual int", "run escort on", 0);
++        SET_AI_VALUE2(time_t, "manual time", "run escort started", 0);
++        SET_AI_VALUE2(std::string, "manual string", "run escort starter", "");
+         SET_AI_VALUE2(int, "manual int", "shortcut to", 0);
+         SET_AI_VALUE2(std::string, "manual string", "run seen", "");
+         SET_AI_VALUE2(std::string, "manual string", "run pull", "");
+@@ -1439,6 +1467,20 @@ bool DungeonRunAction::Execute(Event& event)
+         AI_VALUE(TravelTarget*, "travel target")->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
+         sLog.outString("Bot #%d %s:%d <%s>: starts a run in %s with %u - %u bosses, %u alive", bot->GetGUIDLow(), team, bot->GetLevel(),
+             bot->GetName(), place, group->GetMembersCount(), bosses, DungeonRun::Fights(DungeonRun::AliveBosses(bot)));
++        // Its group's run here already (its leader left, or went offline):
++        // taken over where it was, not walked again from the portal with
++        // every count at 0 (Kamino 293).
++        DungeonRun::RunRecord record;
++        if (group->IsLeader(bot->GetObjectGuid()) && DungeonRun::RunRecordOf(bot, record))
++        {
++            SET_AI_VALUE2(int, "manual int", "run step", record.step);
++            SET_AI_VALUE2(int, "manual int", "run best", record.best);
++            SET_AI_VALUE2(int, "manual int", "run escort tries", record.escortTries);
++            SET_AI_VALUE2(int, "manual int", "run wipes", record.wipes);
++            sLog.outString("Bot #%d %s:%d <%s>: takes over its group's run at step %d - %d wipes, %d escort tries", bot->GetGUIDLow(), team,
++                bot->GetLevel(), bot->GetName(), record.step, record.wipes, record.escortTries);
++            return true;
++        }
+         // A test group set to start further on ("rndbot testrun <dungeon>
+         // step N"): its route from step N, the group put at the waypoint
+         // before it - a later boss tested without the whole way to it.
+@@ -1466,36 +1508,27 @@ bool DungeonRunAction::Execute(Event& event)
+         return true;
+     }
+ 
+-    // A wipe: every member in the dungeon dead at once.
+-    uint32 here = 0, dead = 0;
+-    for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+-    {
+-        Player* member = ref->getSource();
+-        if (!member || member->GetMapId() != bot->GetMapId() || member->GetInstanceId() != bot->GetInstanceId())
+-            continue;
+-        ++here;
+-        if (!member->IsAlive())
+-            ++dead;
+-    }
+-    bool const wiped = here && dead == here;
+-    int wipes = AI_VALUE2(int, "manual int", "run wipes");
+-    if (wiped && !AI_VALUE2(bool, "manual bool", "run wiped"))
+-    {
+-        SET_AI_VALUE2(int, "manual int", "run wipes", ++wipes);
+-        sLog.outString("Bot #%d %s:%d <%s>: wipe %d in %s (it gives up after %u)", bot->GetGUIDLow(), team, bot->GetLevel(), bot->GetName(),
+-            wipes, place, bosses);
+-    }
+-    SET_AI_VALUE2(bool, "manual bool", "run wiped", wiped);
++    // Alive and on its run: any wait for a resurrecter is over.
++    SET_AI_VALUE2(time_t, "manual time", "run dead since", 0);
++    // Wipes: its group's, counted by whoever sees every member in the
++    // instance dead (DungeonRun::NoteWipe; Kamino 293). The leader keeps its
++    // group's record of the run.
++    int const wipes = DungeonRun::NoteWipe(bot);
++    SET_AI_VALUE2(int, "manual int", "run wipes", wipes);
++    bool const leads = group->IsLeader(bot->GetObjectGuid());
++    if (leads)
++        DungeonRun::KeepRunRecord(bot);
+ 
++    // Given up after as many wipes as it has bosses (the rulebook) - it went
++    // on one more (Kamino 293).
+     std::vector<DungeonRun::Boss> const alive = DungeonRun::AliveBosses(bot);
+-    if (!alive.empty() && wipes <= int(bosses))
++    if (!alive.empty() && wipes < int(bosses))
+         return false;
+     // Its escort and last boss to do (Mutanus): not cleared yet.
+     if (alive.empty() && DungeonRun::EscortPending(bot))
+         return false;
+     // Its last boss's corpse looted first (RunNextBossAction) - 2 minutes
+     // at most.
+-    bool const leads = group->IsLeader(bot->GetObjectGuid());
+     if (alive.empty() && leads)
+     {
+         time_t const now = time(nullptr);
+@@ -1559,6 +1592,8 @@ bool DungeonRunAction::Execute(Event& event)
+     else
+         sLog.outString("Bot #%d %s:%d <%s>: gives up %s after %d wipes - %u of %u bosses left", bot->GetGUIDLow(), team, bot->GetLevel(),
+             bot->GetName(), place, wipes, DungeonRun::Fights(alive), bosses);
++    if (leads)
++        DungeonRun::ForgetRun(bot);
+     SET_AI_VALUE2(int, "manual int", "run instance", 0);
+     SET_AI_VALUE2(int, "manual int", "run done instance", instance);
+     SET_AI_VALUE2(int, "manual int", "run done wing", wing);
+diff --git a/playerbot/strategy/actions/ReleaseSpiritAction.h b/playerbot/strategy/actions/ReleaseSpiritAction.h
+index 1ff0f2f..9957a37 100644
+--- a/playerbot/strategy/actions/ReleaseSpiritAction.h
++++ b/playerbot/strategy/actions/ReleaseSpiritAction.h
+@@ -112,6 +112,7 @@ namespace ai
+                     sLog.outString("Bot #%d %s:%d <%s>: dead in its dungeon group - revived (%s can) and brought back to %s", bot->GetGUIDLow(),
+                         bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), reviver->GetName(), place.c_str());
+                     SET_AI_VALUE(uint32, "death count", 0);
++                    SET_AI_VALUE2(time_t, "manual time", "run dead since", 0);
+                     // Its route walked again from the first step, the way its
+                     // group came (DungeonRun::MemberStep).
+                     SET_AI_VALUE2(std::string, "manual string", "follow route", "");
+@@ -120,24 +121,11 @@ namespace ai
+                     bot->SaveToDB();
+                     return bot->TeleportTo(point.getMapId(), point.getX(), point.getY(), point.getZ(), bot->GetOrientation());
+                 }
+-                // None to revive it: released as usual. The run's leader
+-                // counts a wipe as it goes (DungeonRunAction counts only
+-                // what it sees, and a dead leader sees nothing).
+-                if (DungeonRun::Active(bot) && DungeonRun::Leader(bot) == bot)
+-                {
+-                    bool allDead = true;
+-                    for (GroupReference* ref = bot->GetGroup()->GetFirstMember(); ref && allDead; ref = ref->next())
+-                        if (Player* member = ref->getSource())
+-                            if (member->IsInWorld() && member->GetMapId() == bot->GetMapId() && member->GetInstanceId() == bot->GetInstanceId() && member->IsAlive())
+-                                allDead = false;
+-                    if (allDead && !AI_VALUE2(bool, "manual bool", "run wiped"))
+-                    {
+-                        SET_AI_VALUE2(bool, "manual bool", "run wiped", true);
+-                        SET_AI_VALUE2(int, "manual int", "run wipes", AI_VALUE2(int, "manual int", "run wipes") + 1);
+-                        sLog.outString("Bot #%d %s:%d <%s>: wipe %d in its run", bot->GetGUIDLow(), bot->GetTeam() == ALLIANCE ? "A" : "H",
+-                            bot->GetLevel(), bot->GetName(), AI_VALUE2(int, "manual int", "run wipes"));
+-                    }
+-                }
++                // None to revive it: released as usual - its group's wipe
++                // counted as it goes, whoever it is (Kamino 293: only a
++                // dead leader releasing last counted one).
++                if (DungeonRun::Active(bot))
++                    DungeonRun::NoteWipe(bot);
+                 sLog.outString("Bot #%d %s:%d <%s>: dead in its dungeon group - none alive to revive it, released", bot->GetGUIDLow(),
+                     bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName());
+             }
+@@ -184,9 +172,27 @@ namespace ai
+                 return false;
+ 
+             // kalimdor: dead in a dungeon group, it waits for the fight to
+-            // end (see Execute).
++            // end (see Execute) - and, a resurrecter alive in its instance,
++            // RaiseWait more for it to raise it, as the rulebook has it:
++            // raised by fiat at once, the healer's Resurrection never won
++            // (Kamino 293). The wait is counted from the fight's end.
+             if (!ai->HasRealPlayerMaster() && DungeonRun::InDungeonGroup(bot) && DungeonRun::Reviver(bot))
+-                return !DungeonRun::FightInside(bot);
++            {
++                if (DungeonRun::FightInside(bot))
++                {
++                    SET_AI_VALUE2(time_t, "manual time", "run dead since", 0);
++                    return false;
++                }
++                if (DungeonRun::ReviverHere(bot))
++                {
++                    time_t const now = time(nullptr);
++                    time_t const since = AI_VALUE2(time_t, "manual time", "run dead since");
++                    if (!since)
++                        SET_AI_VALUE2(time_t, "manual time", "run dead since", now);
++                    return since && now - since >= DungeonRun::RaiseWait;
++                }
++                return true;
++            }
+ 
+             if (!bot->GetGroup())
+                 return true;
+diff --git a/playerbot/strategy/values/DungeonRun.cpp b/playerbot/strategy/values/DungeonRun.cpp
+index ebefda3..a97ae4f 100644
+--- a/playerbot/strategy/values/DungeonRun.cpp
++++ b/playerbot/strategy/values/DungeonRun.cpp
+@@ -1324,7 +1324,7 @@ bool DungeonRun::InDungeonGroup(Player* bot)
+     return leader && leader != bot && leader->IsInWorld() && OnDungeonMap(leader);
+ }
+ 
+-Player* DungeonRun::Reviver(Player* bot)
++static Player* ReviverOf(Player* bot, bool here)
+ {
+     // Resurrection, Redemption, Ancestral Spirit, Rebirth - the first ranks,
+     // kept in the spellbook with the later ones.
+@@ -1335,6 +1335,8 @@ Player* DungeonRun::Reviver(Player* bot)
+         Player* member = ref->getSource();
+         if (!member || member == bot || !member->IsInWorld() || !member->IsAlive())
+             continue;
++        if (here && (member->GetMapId() != bot->GetMapId() || member->GetInstanceId() != bot->GetInstanceId()))
++            continue;
+         for (uint32 spell : revives)
+             if (member->HasSpell(spell))
+                 return member;
+@@ -1342,6 +1344,80 @@ Player* DungeonRun::Reviver(Player* bot)
+     return nullptr;
+ }
+ 
++Player* DungeonRun::Reviver(Player* bot) { return ReviverOf(bot, false); }
++Player* DungeonRun::ReviverHere(Player* bot) { return ReviverOf(bot, true); }
++
++namespace
++{
++    std::mutex runsLock;
++    std::map<uint32, DungeonRun::RunRecord> runs; // group id -> its run
++}
++
++bool DungeonRun::RunRecordOf(Player* bot, RunRecord& record)
++{
++    Group* group = bot->GetGroup();
++    if (!group)
++        return false;
++    std::lock_guard<std::mutex> guard(runsLock);
++    auto const at = runs.find(group->GetId());
++    if (at == runs.end() || at->second.instance != int(bot->GetInstanceId()))
++        return false;
++    record = at->second;
++    return true;
++}
++
++void DungeonRun::KeepRunRecord(Player* leader)
++{
++    Group* group = leader->GetGroup();
++    if (!group)
++        return;
++    AiObjectContext* context = leader->GetPlayerbotAI()->GetAiObjectContext();
++    std::lock_guard<std::mutex> guard(runsLock);
++    RunRecord& record = runs[group->GetId()];
++    if (record.instance != int(leader->GetInstanceId()))
++        record = RunRecord{ int(leader->GetInstanceId()) };
++    record.step = context->GetValue<int>("manual int", "run step")->Get();
++    record.best = context->GetValue<int>("manual int", "run best")->Get();
++    record.escortTries = context->GetValue<int>("manual int", "run escort tries")->Get();
++}
++
++int DungeonRun::NoteWipe(Player* member)
++{
++    Group* group = member->GetGroup();
++    if (!group || !member->IsInWorld())
++        return 0;
++    uint32 here = 0, dead = 0;
++    for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
++        if (Player* other = ref->getSource())
++            if (other->IsInWorld() && other->GetMapId() == member->GetMapId() && other->GetInstanceId() == member->GetInstanceId())
++            {
++                ++here;
++                dead += !other->IsAlive();
++            }
++    bool const wiped = here && dead == here;
++    std::lock_guard<std::mutex> guard(runsLock);
++    RunRecord& record = runs[group->GetId()];
++    if (record.instance != int(member->GetInstanceId()))
++        record = RunRecord{ int(member->GetInstanceId()) };
++    if (wiped && !record.wiped)
++    {
++        ++record.wipes;
++        sLog.outString("Bot #%d %s:%d <%s>: wipe %d in its run (%u dead)", member->GetGUIDLow(), member->GetTeam() == ALLIANCE ? "A" : "H",
++            member->GetLevel(), member->GetName(), record.wipes, here);
++    }
++    record.wiped = wiped;
++    return record.wipes;
++}
++
++void DungeonRun::ForgetRun(Player* bot)
++{
++    if (Group* group = bot->GetGroup())
++    {
++        std::lock_guard<std::mutex> guard(runsLock);
++        runs.erase(group->GetId());
++    }
++}
++
+ bool DungeonRun::GoingIn(Player* bot)
+ {
+     Group* group = bot->GetGroup();
+diff --git a/playerbot/strategy/values/DungeonRun.h b/playerbot/strategy/values/DungeonRun.h
+index 45805ee..741c74c 100644
+--- a/playerbot/strategy/values/DungeonRun.h
++++ b/playerbot/strategy/values/DungeonRun.h
+@@ -114,6 +114,11 @@ namespace ai
+         // dungeon fights, then is revived and sent back to the group (as
+         // that member would have revived it). With none, released as usual.
+         static Player* Reviver(Player* bot);
++        // One that can, alive in its instance: it raises the dead (the
++        // rulebook); revived by fiat only after RaiseWait out of a fight -
++        // the healer's Resurrection never won against it (Kamino 293).
++        static Player* ReviverHere(Player* bot);
++        static constexpr time_t RaiseWait = 90;
+         // Its group gathered for a dungeon and going in, not all inside yet:
+         // it flees no enemy, and a member killed meanwhile runs back to its
+         // body and revives there, by the entrance - no spirit healer
+@@ -376,6 +381,22 @@ namespace ai
+         static bool EscortPending(Player* leader);
+         static constexpr int EscortTries = 3;
+         static constexpr time_t EscortWaitTime = 15 * 60;
++        // On, its starter neither alive nor dead within reach this long (a
++        // wipe carried the group off, its corpse gone): failed (Kamino 293 -
++        // "in progress" until the Disciple's 2-hour respawn).
++        static constexpr time_t EscortLostTime = 20 * 60;
++
++        // kalimdor (Kamino 293): a run's progress is its group's, for its
++        // instance - not its leader's alone. A new leader goes on from it
++        // (step, best step, wipes, escort tries); it started again from the
++        // portal, every count at 0. Wipes are counted here by any member,
++        // dead or alive, that sees every member in the instance dead - the
++        // leader's own check never ran while it was dead.
++        struct RunRecord { int instance = 0, step = 0, best = 0, wipes = 0, escortTries = 0; bool wiped = false; };
++        static bool RunRecordOf(Player* bot, RunRecord& record);
++        static void KeepRunRecord(Player* leader);
++        static int NoteWipe(Player* member);
++        static void ForgetRun(Player* bot);
+         // A creature fighting a member of a run that none of its group can
+         // see - alive and hitting it, seen by a GM only, not to be killed
+         // even by one; its respawn already set as if dead (a Deviate

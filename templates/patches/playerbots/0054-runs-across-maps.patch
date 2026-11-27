@@ -1,0 +1,1041 @@
+diff --git a/playerbot/PlayerbotAI.cpp b/playerbot/PlayerbotAI.cpp
+index e151d1b..ad54db9 100644
+--- a/playerbot/PlayerbotAI.cpp
++++ b/playerbot/PlayerbotAI.cpp
+@@ -38,6 +38,7 @@
+ #include "strategy/ItemVisitors.h"
+ #include "strategy/values/LootValues.h"
+ #include "strategy/values/AttackersValue.h"
++#include "strategy/values/DungeonRun.h" // kalimdor: Kamino 288
+ #include "Entities/Transports.h"
+ #include "Guilds/GuildMgr.h"
+ #include "Chat/ChannelMgr.h"
+@@ -276,6 +277,12 @@ PlayerbotAI::~PlayerbotAI()
+ 
+ void PlayerbotAI::UpdateAI(uint32 elapsed, bool minimal)
+ {
++    // kalimdor (Kamino 288): this bot is the one updating on this thread -
++    // what it does to other bots goes through DungeonRun::Mine - and what was
++    // posted for it from other maps' threads is done now, its values
++    // published for its group elsewhere.
++    DungeonRun::Updating updating(bot);
++    DungeonRun::Sync(bot);
+     AiObjectContext* context = aiObjectContext;
+     std::string mapString = WorldPosition(bot).isInstance() ? "I" : std::to_string(bot->GetMapId());
+     auto pmo = sPerformanceMonitor.start(PERF_MON_TOTAL, "PlayerbotAI::UpdateAI " + mapString, nullptr, bot->GetMapId(), bot->GetInstanceId());
+diff --git a/playerbot/strategy/actions/DungeonRunAction.cpp b/playerbot/strategy/actions/DungeonRunAction.cpp
+index d7755a1..cc21dbd 100644
+--- a/playerbot/strategy/actions/DungeonRunAction.cpp
++++ b/playerbot/strategy/actions/DungeonRunAction.cpp
+@@ -11,6 +11,23 @@
+ 
+ using namespace ai;
+ 
++// kalimdor (Kamino 288): the run's puller by its name - a member of the
++// group on this map and instance, which the leader may move and make cast;
++// not any player of that name anywhere (sObjectMgr.GetPlayer(name): every
++// player compared under the global lock, each update, and one on another map
++// driven from this thread).
++static Player* PullerNamed(Player* bot, std::string const& name)
++{
++    Group* group = bot->GetGroup();
++    if (name.empty() || !group)
++        return nullptr;
++    for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
++        if (Player* member = ref->getSource())
++            if (name == member->GetName() && DungeonRun::Mine(member))
++                return member;
++    return nullptr;
++}
++
+ // The escort (DungeonRun::EscortOf): to its starter, the group ready, its
+ // event started through its script - a bot has no gossip window; then by
+ // him, its group after it, whatever attacks him attacked; Mutanus at the end
+@@ -273,7 +290,7 @@ bool RunNextBossAction::Execute(Event& event)
+         {
+             sLog.outString("Bot #%d %s:%d <%s>: %s's pull over its time - ended, it comes back", bot->GetGUIDLow(),
+                 bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), notReady->GetName());
+-            if (PlayerbotAI* pullerAi = notReady->GetPlayerbotAI())
++            if (PlayerbotAI* pullerAi = DungeonRun::Mine(notReady) ? notReady->GetPlayerbotAI() : nullptr)
+             {
+                 if (PullStrategy* strategy = PullStrategy::Get(pullerAi))
+                     strategy->OnPullEnded();
+@@ -286,27 +303,28 @@ bool RunNextBossAction::Execute(Event& event)
+         if (DungeonRun::OnRoute(bot) && since && notReady && notReady != bot && notReady->IsAlive() &&
+             !notReady->IsInCombat() && notReady->GetPlayerbotAI() && !bot->IsInCombat() &&
+             ((here && now - since >= 120 && bot->GetDistance(notReady) > DungeonRun::ReadyRange) ||
+-             (!here && bot->GetMap()->IsDungeon() && !notReady->GetMap()->IsDungeon() && now - since >= DungeonRun::GoingInTime)))
++             (!here && bot->GetMap()->IsDungeon() && notReady->IsInWorld() && !notReady->IsBeingTeleported() &&
++              !DungeonRun::OnDungeonMap(notReady) && now - since >= DungeonRun::GoingInTime)))
+         {
+             sLog.outString("Bot #%d %s:%d <%s>: %s off its way %lds - put by it", bot->GetGUIDLow(), bot->GetTeam() == ALLIANCE ? "A" : "H",
+                 bot->GetLevel(), bot->GetName(), notReady->GetName(), long(now - since));
+-            notReady->GetPlayerbotAI()->OnCombatEnded();
+             // On its leader's points from there, not the nearest of the
+-            // route's (it may pass the same place twice).
++            // route's (it may pass the same place twice). Outside, on
++            // another map's thread: posted, done in its own update (Kamino
++            // 288 - the leader teleported it and wrote its values from here).
+             {
+                 int step = 0;
+                 std::string key;
+                 if (DungeonRun::LeaderRoute(bot, step, key))
+                 {
+-                    AiObjectContext* const other = notReady->GetPlayerbotAI()->GetAiObjectContext();
+-                    other->GetValue<std::string>("manual string", "follow route")->Set(key);
+-                    other->GetValue<int>("manual int", "follow step")->Set(std::max(0, step));
+-                    other->GetValue<time_t>("manual time", "follow last")->Set(now);
+-                    other->GetValue<time_t>("manual time", "follow since")->Set(0);
++                    DungeonRun::PostString(notReady, "follow route", key);
++                    DungeonRun::PostInt(notReady, "follow step", std::max(0, step));
++                    DungeonRun::PostTime(notReady, "follow last", now);
++                    DungeonRun::PostTime(notReady, "follow since", 0);
+                 }
+             }
+             SET_AI_VALUE2(time_t, "manual time", "run wait since", now);
+-            notReady->TeleportTo(bot->GetMapId(), bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ(), bot->GetOrientation());
++            DungeonRun::PostPut(notReady, WorldPosition(bot));
+             return true;
+         }
+         // A member alive in here that does not come a minute long: the
+@@ -342,8 +360,8 @@ bool RunNextBossAction::Execute(Event& event)
+         // A member far off, in combat with nothing attacking it: out of it,
+         // to walk its steps - two stood 160 yards off six hours, in a fight
+         // they could neither finish nor leave (dev, 2026-11-18).
+-        if (notReady && notReady != bot && notReady->IsAlive() && notReady->IsInCombat() && notReady->getAttackers().empty() &&
+-            notReady->GetMapId() == bot->GetMapId() && bot->GetDistance(notReady) > DungeonRun::ReadyRange)
++        if (notReady && notReady != bot && DungeonRun::Mine(notReady) && notReady->IsAlive() && notReady->IsInCombat() &&
++            notReady->getAttackers().empty() && notReady->GetMapId() == bot->GetMapId() && bot->GetDistance(notReady) > DungeonRun::ReadyRange)
+         {
+             sLog.outString("Bot #%d %s:%d <%s>: out of a fight nothing fights it in, %.0fy from its leader", notReady->GetGUIDLow(),
+                 notReady->GetTeam() == ALLIANCE ? "A" : "H", notReady->GetLevel(), notReady->GetName(), bot->GetDistance(notReady));
+@@ -789,7 +807,7 @@ bool RunNextBossAction::Execute(Event& event)
+             // range first. Upstream's pull shoots once as it starts; a shot
+             // that failed left the puller standing by, re-arming it did not
+             // help (27 of 41 pulls, dev, 2026-11-17).
+-            if (Player* puller = sObjectMgr.GetPlayer(AI_VALUE2(std::string, "manual string", "run puller").c_str()))
++            if (Player* puller = PullerNamed(bot, AI_VALUE2(std::string, "manual string", "run puller")))
+                 if (puller->GetPlayerbotAI() && puller->IsAlive() && !puller->IsNonMeleeSpellCasted(true) &&
+                     now - AI_VALUE2(time_t, "manual time", "run pull since") >= 2)
+                     if (PullStrategy* strategy = PullStrategy::Get(puller->GetPlayerbotAI()))
+@@ -847,7 +865,7 @@ bool RunNextBossAction::Execute(Event& event)
+         // The puller let go: its pull over, out of the fight state the pull
+         // put it in, if nothing fights it - one left in it stood 11 minutes,
+         // its follow never run again (dev, 2026-11-20).
+-        if (Player* puller = sObjectMgr.GetPlayer(AI_VALUE2(std::string, "manual string", "run puller").c_str()))
++        if (Player* puller = PullerNamed(bot, AI_VALUE2(std::string, "manual string", "run puller")))
+             if (PlayerbotAI* pullerAi = puller->GetPlayerbotAI())
+             {
+                 if (PullStrategy* strategy = PullStrategy::Get(pullerAi))
+@@ -925,7 +943,7 @@ bool RunNextBossAction::Execute(Event& event)
+         for (GroupReference* ref = bot->GetGroup()->GetFirstMember(); !holdLeg && ref; ref = ref->next())
+             if (Player* member = ref->getSource())
+                 if (member != bot && member->IsInWorld() && member->IsAlive() && member->GetMapId() == bot->GetMapId() &&
+-                    member->GetDistance(bot) > DungeonRun::CloseUpRange)
++                    DungeonRun::Mine(member) && member->GetDistance(bot) > DungeonRun::CloseUpRange)
+                 {
+                     if (bot->IsMoving())
+                         ai->StopMoving();
+@@ -951,8 +969,7 @@ bool RunNextBossAction::Execute(Event& event)
+                         sLog.outString("Bot #%d %s:%d <%s>: %s has not closed up in 90s - put by it", bot->GetGUIDLow(),
+                             bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), member->GetName());
+                         SET_AI_VALUE2(std::string, "manual string", "close up for", "");
+-                        member->GetPlayerbotAI()->OnCombatEnded();
+-                        member->TeleportTo(bot->GetMapId(), bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ(), bot->GetOrientation());
++                        DungeonRun::PostPut(member, WorldPosition(bot));
+                     }
+                     return true; // they come to it (RunFollowAction)
+                 }
+@@ -1061,7 +1078,7 @@ bool RunFollowAction::Execute(Event& event)
+             MoveTo(leader->GetMapId(), leader->GetPositionX(), leader->GetPositionY(), leader->GetPositionZ()) : false;
+     // Its leader about to pull: to it, whatever its point - the group pulls
+     // from where it stands together.
+-    if (leader->GetPlayerbotAI() && time(nullptr) - leader->GetPlayerbotAI()->GetAiObjectContext()->GetValue<time_t>("manual time", "run close up")->Get() <= 3 &&
++    if (leader->GetPlayerbotAI() && time(nullptr) - DungeonRun::PeerTime(leader, "run close up") <= 3 &&
+         bot->GetDistance(leader) > DungeonRun::CloseUpRange / 2.0f)
+         return MoveNear(leader, 3.0f);
+     DungeonRun::RouteStep const* next = nullptr;
+@@ -1439,7 +1456,7 @@ bool DungeonRunAction::Execute(Event& event)
+                         for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+                             if (Player* member = ref->getSource())
+                                 if (member->IsInWorld() && member->IsAlive())
+-                                    member->TeleportTo(at.getMapId(), at.getX(), at.getY(), at.getZ(), member->GetOrientation());
++                                    DungeonRun::PostPut(member, at);
+                         break;
+                     }
+                 sLog.outString("Bot #%d %s:%d <%s>: a test run - from step %d of its route", bot->GetGUIDLow(), team, bot->GetLevel(),
+@@ -1513,7 +1530,7 @@ bool DungeonRunAction::Execute(Event& event)
+         for (GroupReference* ref = group->GetFirstMember(); ref && all; ref = ref->next())
+         {
+             Player* member = ref->getSource();
+-            if (!member || member->GetMapId() != bot->GetMapId() || member->GetInstanceId() != bot->GetInstanceId())
++            if (!member || member->GetMapId() != bot->GetMapId() || member->GetInstanceId() != bot->GetInstanceId() || !DungeonRun::Mine(member))
+                 continue;
+             PlayerbotAI* memberAi = member->GetPlayerbotAI();
+             all = memberAi && !memberAi->IsRealPlayer() && member->IsAlive() && !member->IsInCombat() && member->HasItemCount(6948, 1) &&
+@@ -1551,8 +1568,8 @@ bool DungeonRunAction::Execute(Event& event)
+ 
+ bool RunLeashAction::Execute(Event& event)
+ {
+-    Player* leader = sObjectMgr.GetPlayer(bot->GetGroup()->GetLeaderGuid());
+-    if (!leader)
++    Player* leader = bot->GetGroup() ? sObjectMgr.GetPlayer(bot->GetGroup()->GetLeaderGuid()) : nullptr;
++    if (!leader || leader->GetMapId() != bot->GetMapId())
+         return false;
+     if (bot->GetVictim())
+         bot->AttackStop();
+@@ -1659,7 +1676,7 @@ bool RunChainPullAction::Execute(Event& event)
+ {
+     Player* puller = nullptr;
+     Creature* next = DungeonRun::ChainNext(bot, puller);
+-    if (!next || !puller)
++    if (!next || !puller || !DungeonRun::Mine(puller))
+         return false;
+     PlayerbotAI* pullerAi = puller->GetPlayerbotAI();
+     PullStrategy* strategy = PullStrategy::Get(pullerAi);
+diff --git a/playerbot/strategy/actions/LookForGroupAction.cpp b/playerbot/strategy/actions/LookForGroupAction.cpp
+index 092a964..a372eb8 100644
+--- a/playerbot/strategy/actions/LookForGroupAction.cpp
++++ b/playerbot/strategy/actions/LookForGroupAction.cpp
+@@ -75,7 +75,7 @@ namespace
+ {
+     // The quest as the bot's only travel focus, or none (0); its current
+     // destination dropped, so the next one is chosen now.
+-    void SetGroupQuestFocus(Player* member, uint32 questId)
++    void SetGroupQuestFocusHere(Player* member, uint32 questId)
+     {
+         AiObjectContext* context = member->GetPlayerbotAI()->GetAiObjectContext();
+         std::set<uint32> focus;
+@@ -85,6 +85,13 @@ namespace
+         context->GetValue<int>("manual int", "group quest focus")->Set(int(questId));
+         context->GetValue<TravelTarget*>("travel target")->Get()->SetStatus(TravelStatus::TRAVEL_STATUS_EXPIRED);
+     }
++
++    // kalimdor (Kamino 288): a member on another map or instance sets it in
++    // its own update - its values and travel target are its thread's.
++    void SetGroupQuestFocus(Player* member, uint32 questId)
++    {
++        DungeonRun::PostCall(member, [questId](Player* m) { if (m->GetPlayerbotAI()) SetGroupQuestFocusHere(m, questId); });
++    }
+ }
+ 
+ // Repairs at a repairer in sight, if any, paying as usual: a group repairs
+diff --git a/playerbot/strategy/actions/ReviveFromCorpseAction.cpp b/playerbot/strategy/actions/ReviveFromCorpseAction.cpp
+index a8efcb9..9f67d1c 100644
+--- a/playerbot/strategy/actions/ReviveFromCorpseAction.cpp
++++ b/playerbot/strategy/actions/ReviveFromCorpseAction.cpp
+@@ -252,7 +252,7 @@ bool SpiritHealerAction::Execute(Event& event)
+         // Its leader still outside, walking the way in: to it, revived by
+         // it - a ghost waited at the portal for a leader waiting for it
+         // (dev, 2026-11-19).
+-        if (leader && leader != bot && leader->IsInWorld() && leader->IsAlive() && !leader->GetMap()->IsDungeon() &&
++        if (leader && leader != bot && leader->IsInWorld() && leader->IsAlive() && !DungeonRun::OnDungeonMap(leader) &&
+             leader->GetMapId() == bot->GetMapId() && AI_VALUE2(bool, "manual bool", "ghost met"))
+         {
+             if (bot->GetDistance(leader) <= 30.0f)
+diff --git a/playerbot/strategy/generic/TravelStrategy.cpp b/playerbot/strategy/generic/TravelStrategy.cpp
+index 990c762..728bc22 100644
+--- a/playerbot/strategy/generic/TravelStrategy.cpp
++++ b/playerbot/strategy/generic/TravelStrategy.cpp
+@@ -58,7 +58,7 @@ float TravelActionMultiplier::GetValue(Action* action)
+             Player* leader = sObjectMgr.GetPlayer(bot->GetGroup()->GetLeaderGuid());
+             GameObject* go = ai->GetGameObject(loot.guid);
+             if (!leader || !go || leader->IsInCombat() || bot->GetDistance(go) > 15.0f ||
+-                !leader->GetPlayerbotAI() || !leader->GetPlayerbotAI()->GetAiObjectContext()->GetValue<std::string>("manual string", "run pull")->Get().empty())
++                !leader->GetPlayerbotAI() || !DungeonRun::PeerString(leader, "run pull").empty())
+                 return 0.0f;
+         }
+     }
+diff --git a/playerbot/strategy/triggers/DungeonRunTrigger.cpp b/playerbot/strategy/triggers/DungeonRunTrigger.cpp
+index 124f432..c268d6f 100644
+--- a/playerbot/strategy/triggers/DungeonRunTrigger.cpp
++++ b/playerbot/strategy/triggers/DungeonRunTrigger.cpp
+@@ -26,7 +26,7 @@ bool RunFollowTrigger::IsActive()
+     else if (DungeonRun::WalkingIn(bot) || DungeonRun::WayInLeft(bot))
+         leader = sObjectMgr.GetPlayer(bot->GetGroup()->GetLeaderGuid());
+     // Its leader inside, it outside: its own way in, by its points.
+-    if (leader && leader->GetMap()->IsDungeon() && !bot->GetMap()->IsDungeon())
++    if (leader && DungeonRun::OnDungeonMap(leader) && !bot->GetMap()->IsDungeon())
+     {
+         DungeonRun::RouteStep const* next = nullptr;
+         return DungeonRun::MemberStep(bot, leader, next);
+@@ -34,7 +34,7 @@ bool RunFollowTrigger::IsActive()
+     if (!leader || leader->GetMapId() != bot->GetMapId())
+         return false;
+     // Its leader about to pull: the group closes up to it.
+-    if (leader->GetPlayerbotAI() && time(nullptr) - leader->GetPlayerbotAI()->GetAiObjectContext()->GetValue<time_t>("manual time", "run close up")->Get() <= 3 &&
++    if (leader->GetPlayerbotAI() && time(nullptr) - DungeonRun::PeerTime(leader, "run close up") <= 3 &&
+         bot->GetDistance(leader) > DungeonRun::CloseUpRange / 2.0f)
+         return true;
+     // An escort under way: after its leader, not the route - by the
+diff --git a/playerbot/strategy/triggers/GenericTriggers.cpp b/playerbot/strategy/triggers/GenericTriggers.cpp
+index 23a3761..b2c94c5 100644
+--- a/playerbot/strategy/triggers/GenericTriggers.cpp
++++ b/playerbot/strategy/triggers/GenericTriggers.cpp
+@@ -833,7 +833,7 @@ bool BlockedInHostileTerritoryTrigger::IsActive()
+     {
+         Player* leader = sObjectMgr.GetPlayer(group->GetLeaderGuid());
+         if (leader && leader != bot && leader->GetPlayerbotAI() && !leader->GetPlayerbotAI()->IsRealPlayer() &&
+-            leader->GetMapId() == bot->GetMapId() && bot->GetDistance(leader) <= EnemyGuards::GroupRange)
++            leader->GetMapId() == bot->GetMapId() && DungeonRun::Mine(leader) && bot->GetDistance(leader) <= EnemyGuards::GroupRange)
+             judged = leader->GetPlayerbotAI();
+     }
+     TravelTarget* target = judged->GetAiObjectContext()->GetValue<TravelTarget*>("travel target")->Get();
+diff --git a/playerbot/strategy/values/DungeonRun.cpp b/playerbot/strategy/values/DungeonRun.cpp
+index e05652f..f3a3271 100644
+--- a/playerbot/strategy/values/DungeonRun.cpp
++++ b/playerbot/strategy/values/DungeonRun.cpp
+@@ -20,6 +20,7 @@
+ #include "Pools/PoolManager.h"
+ #include "GameEvents/GameEventMgr.h"
+ 
++#include <atomic>
+ #include <map>
+ #include <mutex>
+ #include <set>
+@@ -27,6 +28,269 @@
+ 
+ using namespace ai;
+ 
++// kalimdor (Kamino 288): who reads and writes whose AI values, from which
++// thread - see DungeonRun::Mine.
++namespace
++{
++    thread_local Player* updating = nullptr;
++
++    // What a bot's group reads of it from elsewhere: its values by name, and
++    // the route it walks (LeaderRoute) - the names every Peer* read here
++    // asks for.
++    char const* const publishedInts[] = { "group quest focus", "gathered", "run wing", "run instance", "run escort tries", "run step",
++        "way in step", "shortcut from", "shortcut to" };
++    char const* const publishedTimes[] = { "run close up", "rest full since", "to tank spot", "run escort", "run escort failed" };
++    char const* const publishedStrings[] = { "gather point", "run pull failed", "run pull" };
++
++    struct Published
++    {
++        time_t at = 0;
++        std::map<std::string, int> ints;
++        std::map<std::string, time_t> times;
++        std::map<std::string, std::string> strings;
++        uint32 focusQuest = 0;
++        QuestStatus focusStatus = QUEST_STATUS_NONE;
++        std::vector<DungeonRun::RouteStep> const* route = nullptr;
++        int routeStep = 0;
++        std::string routeKey;
++    };
++
++    struct Posted
++    {
++        std::vector<std::pair<std::string, int>> ints;
++        std::vector<std::pair<std::string, time_t>> times;
++        std::vector<std::pair<std::string, std::string>> strings;
++        bool put = false;
++        WorldPosition at;
++        std::vector<std::function<void(Player*)>> calls;
++    };
++
++    std::mutex peersLock;
++    std::map<uint32, Published> published;
++    std::map<uint32, Posted> posted;
++    std::atomic<int> postedCount{ 0 };
++
++    AiObjectContext* ContextOf(Player* player)
++    {
++        return player && player->GetPlayerbotAI() ? player->GetPlayerbotAI()->GetAiObjectContext() : nullptr;
++    }
++}
++
++DungeonRun::Updating::Updating(Player* bot) : previous(updating) { updating = bot; }
++DungeonRun::Updating::~Updating() { updating = previous; }
++
++bool DungeonRun::Mine(Player* other)
++{
++    // No bot updating: the world thread, which runs with every map thread
++    // parked (the console, the group queue's matcher).
++    Player* const self = updating;
++    if (!other || !self || other == self)
++        return true;
++    // One map object, one thread: the same map and instance, both in it.
++    return self->IsInWorld() && other->IsInWorld() && other->GetMapId() == self->GetMapId() &&
++        other->GetInstanceId() == self->GetInstanceId();
++}
++
++bool DungeonRun::OnDungeonMap(Player* player)
++{
++    MapEntry const* entry = player ? sMapStore.LookupEntry(player->GetMapId()) : nullptr;
++    return entry && entry->IsDungeon();
++}
++
++int DungeonRun::PeerInt(Player* other, std::string const& name)
++{
++    if (Mine(other))
++    {
++        AiObjectContext* context = ContextOf(other);
++        return context ? context->GetValue<int>("manual int", name)->Get() : 0;
++    }
++    std::lock_guard<std::mutex> guard(peersLock);
++    auto const at = published.find(other->GetGUIDLow());
++    if (at == published.end())
++        return 0;
++    auto const value = at->second.ints.find(name);
++    return value == at->second.ints.end() ? 0 : value->second;
++}
++
++time_t DungeonRun::PeerTime(Player* other, std::string const& name)
++{
++    if (Mine(other))
++    {
++        AiObjectContext* context = ContextOf(other);
++        return context ? context->GetValue<time_t>("manual time", name)->Get() : 0;
++    }
++    std::lock_guard<std::mutex> guard(peersLock);
++    auto const at = published.find(other->GetGUIDLow());
++    if (at == published.end())
++        return 0;
++    auto const value = at->second.times.find(name);
++    return value == at->second.times.end() ? 0 : value->second;
++}
++
++std::string DungeonRun::PeerString(Player* other, std::string const& name)
++{
++    if (Mine(other))
++    {
++        AiObjectContext* context = ContextOf(other);
++        return context ? context->GetValue<std::string>("manual string", name)->Get() : "";
++    }
++    std::lock_guard<std::mutex> guard(peersLock);
++    auto const at = published.find(other->GetGUIDLow());
++    if (at == published.end())
++        return "";
++    auto const value = at->second.strings.find(name);
++    return value == at->second.strings.end() ? "" : value->second;
++}
++
++QuestStatus DungeonRun::PeerQuestStatus(Player* other, uint32 questId)
++{
++    if (Mine(other))
++        return other->GetQuestStatus(questId);
++    std::lock_guard<std::mutex> guard(peersLock);
++    auto const at = published.find(other->GetGUIDLow());
++    return at != published.end() && at->second.focusQuest == questId ? at->second.focusStatus : QUEST_STATUS_NONE;
++}
++
++void DungeonRun::PostInt(Player* other, std::string const& name, int value)
++{
++    if (Mine(other))
++    {
++        if (AiObjectContext* context = ContextOf(other))
++            context->GetValue<int>("manual int", name)->Set(value);
++        return;
++    }
++    std::lock_guard<std::mutex> guard(peersLock);
++    posted[other->GetGUIDLow()].ints.emplace_back(name, value);
++    ++postedCount;
++}
++
++void DungeonRun::PostTime(Player* other, std::string const& name, time_t value)
++{
++    if (Mine(other))
++    {
++        if (AiObjectContext* context = ContextOf(other))
++            context->GetValue<time_t>("manual time", name)->Set(value);
++        return;
++    }
++    std::lock_guard<std::mutex> guard(peersLock);
++    posted[other->GetGUIDLow()].times.emplace_back(name, value);
++    ++postedCount;
++}
++
++void DungeonRun::PostString(Player* other, std::string const& name, std::string const& value)
++{
++    if (Mine(other))
++    {
++        if (AiObjectContext* context = ContextOf(other))
++            context->GetValue<std::string>("manual string", name)->Set(value);
++        return;
++    }
++    std::lock_guard<std::mutex> guard(peersLock);
++    posted[other->GetGUIDLow()].strings.emplace_back(name, value);
++    ++postedCount;
++}
++
++void DungeonRun::PostPut(Player* other, WorldPosition const& at)
++{
++    if (Mine(other))
++    {
++        if (other->GetPlayerbotAI())
++            other->GetPlayerbotAI()->OnCombatEnded();
++        other->TeleportTo(at.getMapId(), at.getX(), at.getY(), at.getZ(), other->GetOrientation());
++        return;
++    }
++    std::lock_guard<std::mutex> guard(peersLock);
++    Posted& post = posted[other->GetGUIDLow()];
++    post.put = true;
++    post.at = at;
++    ++postedCount;
++}
++
++void DungeonRun::PostCall(Player* other, std::function<void(Player*)> call)
++{
++    if (Mine(other))
++    {
++        call(other);
++        return;
++    }
++    std::lock_guard<std::mutex> guard(peersLock);
++    posted[other->GetGUIDLow()].calls.push_back(std::move(call));
++    ++postedCount;
++}
++
++void DungeonRun::Sync(Player* bot)
++{
++    AiObjectContext* context = ContextOf(bot);
++    if (!context)
++        return;
++    // What was posted for it, in its own update.
++    if (postedCount.load() > 0)
++    {
++        Posted post;
++        bool any = false;
++        {
++            std::lock_guard<std::mutex> guard(peersLock);
++            auto const at = posted.find(bot->GetGUIDLow());
++            if (at != posted.end())
++            {
++                post = std::move(at->second);
++                posted.erase(at);
++                --postedCount;
++                any = true;
++            }
++        }
++        if (any)
++        {
++            for (auto const& value : post.ints)
++                context->GetValue<int>("manual int", value.first)->Set(value.second);
++            for (auto const& value : post.times)
++                context->GetValue<time_t>("manual time", value.first)->Set(value.second);
++            for (auto const& value : post.strings)
++                context->GetValue<std::string>("manual string", value.first)->Set(value.second);
++            for (auto const& call : post.calls)
++                call(bot);
++            if (post.put && bot->IsInWorld() && !bot->IsBeingTeleported())
++            {
++                bot->GetPlayerbotAI()->OnCombatEnded();
++                bot->TeleportTo(post.at.getMapId(), post.at.getX(), post.at.getY(), post.at.getZ(), bot->GetOrientation());
++            }
++        }
++    }
++
++    // Its values, for its group elsewhere: once a second at most; none
++    // kept out of a group.
++    time_t const now = time(nullptr);
++    if (!bot->GetGroup())
++    {
++        std::lock_guard<std::mutex> guard(peersLock);
++        published.erase(bot->GetGUIDLow());
++        return;
++    }
++    {
++        std::lock_guard<std::mutex> guard(peersLock);
++        auto const at = published.find(bot->GetGUIDLow());
++        if (at != published.end() && at->second.at == now)
++            return;
++    }
++    Published fresh;
++    fresh.at = now;
++    for (char const* name : publishedInts)
++        fresh.ints[name] = context->GetValue<int>("manual int", name)->Get();
++    for (char const* name : publishedTimes)
++        fresh.times[name] = context->GetValue<time_t>("manual time", name)->Get();
++    for (char const* name : publishedStrings)
++        fresh.strings[name] = context->GetValue<std::string>("manual string", name)->Get();
++    if (fresh.ints["group quest focus"] > 0)
++    {
++        fresh.focusQuest = uint32(fresh.ints["group quest focus"]);
++        fresh.focusStatus = bot->GetQuestStatus(fresh.focusQuest);
++    }
++    if (bot->IsInWorld() && bot->GetGroup()->IsLeader(bot->GetObjectGuid()))
++        fresh.route = LeaderRoute(bot, fresh.routeStep, fresh.routeKey);
++    std::lock_guard<std::mutex> guard(peersLock);
++    published[bot->GetGUIDLow()] = std::move(fresh);
++}
++
+ uint32_t DungeonRun::WingAt(uint32_t mapId, float x, float y, float z)
+ {
+     switch (mapId)
+@@ -228,8 +492,7 @@ bool DungeonRun::Active(Player* bot)
+     Player* leader = Leader(bot);
+     if (!leader)
+         return false;
+-    AiObjectContext* context = leader->GetPlayerbotAI()->GetAiObjectContext();
+-    return context->GetValue<int>("manual int", "run instance")->Get() == int(leader->GetInstanceId());
++    return PeerInt(leader, "run instance") == int(leader->GetInstanceId());
+ }
+ 
+ std::vector<DungeonRun::Boss> DungeonRun::RunBosses(Player* bot)
+@@ -239,7 +502,7 @@ std::vector<DungeonRun::Boss> DungeonRun::RunBosses(Player* bot)
+     MapPersistentState* state = map->GetPersistentState();
+     uint32_t wing = WING_NONE;
+     if (Player* leader = Leader(bot))
+-        wing = uint32_t(leader->GetPlayerbotAI()->GetAiObjectContext()->GetValue<int>("manual int", "run wing")->Get());
++        wing = uint32_t(PeerInt(leader, "run wing"));
+     for (Boss boss : BossesOf(bot->GetMapId()))
+     {
+         if (wing && boss.wing != wing)
+@@ -490,7 +753,7 @@ void DungeonRun::SetGatherPoint(Player* leader, Quest const* quest)
+ 
+ void DungeonRun::ClearGatherPoint(Player* leader)
+ {
+-    leader->GetPlayerbotAI()->GetAiObjectContext()->GetValue<std::string>("manual string", "gather point")->Set("");
++    PostString(leader, "gather point", "");
+ }
+ 
+ bool DungeonRun::GatherPoint(Player* bot, WorldPosition& point, Player*& leader, std::string* place, float* radius)
+@@ -501,10 +764,9 @@ bool DungeonRun::GatherPoint(Player* bot, WorldPosition& point, Player*& leader,
+     leader = sObjectMgr.GetPlayer(group->GetLeaderGuid());
+     if (!leader || !leader->GetPlayerbotAI() || leader->GetPlayerbotAI()->IsRealPlayer())
+         return false;
+-    AiObjectContext* context = leader->GetPlayerbotAI()->GetAiObjectContext();
+-    int const focus = context->GetValue<int>("manual int", "group quest focus")->Get();
+-    std::string const stored = context->GetValue<std::string>("manual string", "gather point")->Get();
+-    if (focus <= 0 || stored.empty() || context->GetValue<int>("manual int", "gathered")->Get() == focus)
++    int const focus = PeerInt(leader, "group quest focus");
++    std::string const stored = PeerString(leader, "gather point");
++    if (focus <= 0 || stored.empty() || PeerInt(leader, "gathered") == focus)
+         return false;
+     uint32 map = 0;
+     float x = 0, y = 0, z = 0, r = GatherRange;
+@@ -539,7 +801,7 @@ bool DungeonRun::GroupGathered(Player* leader, std::string* missing)
+     // Only a full group is gathered - fewer groups that finish rather than
+     // short ones that go in to fail (owner, 2026-11-14).
+     bool all = true;
+-    int const focus = leader->GetPlayerbotAI()->GetAiObjectContext()->GetValue<int>("manual int", "group quest focus")->Get();
++    int const focus = PeerInt(leader, "group quest focus");
+     if (Quest const* quest = focus > 0 ? sObjectMgr.GetQuestTemplate(uint32(focus)) : nullptr)
+     {
+         uint32 const have = GroupQuests::GroupSize(leader), wanted = GroupQuests::WantedSize(quest);
+@@ -557,7 +819,7 @@ bool DungeonRun::GroupGathered(Player* leader, std::string* missing)
+             continue;
+         // Not in the world (teleporting, logging in): not here yet - and no
+         // map to ask (the server stopped on GetMap(), 2026-11-11).
+-        bool const here = member->IsInWorld() && !member->IsBeingTeleported() && (member->GetMap()->IsDungeon() ||
++        bool const here = member->IsInWorld() && !member->IsBeingTeleported() && (OnDungeonMap(member) ||
+             (member->GetMapId() == point.getMapId() && point.distance(WorldPosition(member)) <= radius));
+         if (here)
+             continue;
+@@ -618,7 +880,7 @@ bool DungeonRun::WaitForLeaderAtPortal(Player* bot)
+     Player* leader = sObjectMgr.GetPlayer(group->GetLeaderGuid());
+     if (!leader || !leader->GetPlayerbotAI() || leader->GetPlayerbotAI()->IsRealPlayer())
+         return false;
+-    int const focus = leader->GetPlayerbotAI()->GetAiObjectContext()->GetValue<int>("manual int", "group quest focus")->Get();
++    int const focus = PeerInt(leader, "group quest focus");
+     Quest const* quest = focus > 0 ? sObjectMgr.GetQuestTemplate(uint32(focus)) : nullptr;
+     AreaTableEntry const* area = quest && quest->GetZoneOrSort() > 0 ? GetAreaEntryByAreaID(quest->GetZoneOrSort()) : nullptr;
+     MapEntry const* dungeon = area ? sMapStore.LookupEntry(area->mapid) : nullptr;
+@@ -640,7 +902,7 @@ bool DungeonRun::FollowLeaderIn(Player* bot, WorldPosition& way)
+     Player* leader = sObjectMgr.GetPlayer(group->GetLeaderGuid());
+     if (!leader || !leader->GetPlayerbotAI() || !leader->IsInWorld() || leader->IsBeingTeleported())
+         return false;
+-    int const focus = leader->GetPlayerbotAI()->GetAiObjectContext()->GetValue<int>("manual int", "group quest focus")->Get();
++    int const focus = PeerInt(leader, "group quest focus");
+     Quest const* quest = focus > 0 ? sObjectMgr.GetQuestTemplate(uint32(focus)) : nullptr;
+     AreaTableEntry const* area = quest && quest->GetZoneOrSort() > 0 ? GetAreaEntryByAreaID(quest->GetZoneOrSort()) : nullptr;
+     if (!area)
+@@ -658,7 +920,7 @@ bool DungeonRun::FollowLeaderIn(Player* bot, WorldPosition& way)
+         if (!Route(area->mapid, WayInWing).empty())
+             return false;
+     }
+-    else if (!leader->GetMap()->IsDungeon() || area->mapid != leader->GetMapId())
++    else if (!OnDungeonMap(leader) || area->mapid != leader->GetMapId())
+         return false;
+     // The way in nearest it on its continent, else any.
+     AreaTriggerEntry const* best = nullptr;
+@@ -952,9 +1214,8 @@ int DungeonRun::LastPoint(Player* bot, std::vector<RouteStep> const& route, int
+ {
+     if (bot->GetPlayerbotAI())
+     {
+-        AiObjectContext* context = bot->GetPlayerbotAI()->GetAiObjectContext();
+-        int const from = context->GetValue<int>("manual int", "shortcut from")->Get() - 1;
+-        if (context->GetValue<int>("manual int", "shortcut to")->Get() - 1 == step && from >= 0 && from < int(route.size()))
++        int const from = PeerInt(bot, "shortcut from") - 1;
++        if (PeerInt(bot, "shortcut to") - 1 == step && from >= 0 && from < int(route.size()))
+             return from;
+     }
+     int last = step - 1;
+@@ -1060,7 +1321,7 @@ bool DungeonRun::InDungeonGroup(Player* bot)
+     if (Active(bot) || GatherPoint(bot, point, gatherer) || GoingIn(bot))
+         return true;
+     Player* leader = sObjectMgr.GetPlayer(bot->GetGroup()->GetLeaderGuid());
+-    return leader && leader != bot && leader->IsInWorld() && leader->GetMap()->IsDungeon();
++    return leader && leader != bot && leader->IsInWorld() && OnDungeonMap(leader);
+ }
+ 
+ Player* DungeonRun::Reviver(Player* bot)
+@@ -1087,9 +1348,8 @@ bool DungeonRun::GoingIn(Player* bot)
+     Player* leader = group ? sObjectMgr.GetPlayer(group->GetLeaderGuid()) : nullptr;
+     if (!leader || !leader->GetPlayerbotAI() || leader->GetPlayerbotAI()->IsRealPlayer())
+         return false;
+-    AiObjectContext* context = leader->GetPlayerbotAI()->GetAiObjectContext();
+-    int const focus = context->GetValue<int>("manual int", "group quest focus")->Get();
+-    if (focus <= 0 || context->GetValue<int>("manual int", "gathered")->Get() != focus)
++    int const focus = PeerInt(leader, "group quest focus");
++    if (focus <= 0 || PeerInt(leader, "gathered") != focus)
+         return false;
+     Quest const* quest = sObjectMgr.GetQuestTemplate(uint32(focus));
+     AreaTableEntry const* area = quest && quest->GetZoneOrSort() > 0 ? GetAreaEntryByAreaID(quest->GetZoneOrSort()) : nullptr;
+@@ -1109,7 +1369,7 @@ bool DungeonRun::WalkingIn(Player* bot)
+         return false;
+     Player* leader = sObjectMgr.GetPlayer(bot->GetGroup()->GetLeaderGuid());
+     WorldPosition way, inside;
+-    if (!leader || !leader->IsInWorld() || leader->GetMap()->IsDungeon() || !WayInto(leader, way, inside))
++    if (!leader || !leader->IsInWorld() || OnDungeonMap(leader) || !WayInto(leader, way, inside))
+         return false;
+     return !Route(inside.getMapId(), WayInWing).empty();
+ }
+@@ -1123,7 +1383,7 @@ void DungeonRun::TakeQuests(Player* leader, uint32_t npc, uint32_t dungeonMap)
+     for (GroupReference* ref = leader->GetGroup()->GetFirstMember(); ref; ref = ref->next())
+     {
+         Player* member = ref->getSource();
+-        if (!member || !member->GetPlayerbotAI() || !member->IsInWorld() || !member->IsAlive() || member->GetDistance(giver) > 60.0f)
++        if (!member || !member->GetPlayerbotAI() || !Mine(member) || !member->IsInWorld() || !member->IsAlive() || member->GetDistance(giver) > 60.0f)
+             continue;
+         std::string taken;
+         for (auto i = bounds.first; i != bounds.second; ++i)
+@@ -1153,7 +1413,7 @@ void DungeonRun::Gossip(Player* leader, uint32_t npc)
+     for (GroupReference* ref = leader->GetGroup()->GetFirstMember(); ref; ref = ref->next())
+     {
+         Player* member = ref->getSource();
+-        if (!member || !member->GetPlayerbotAI() || !member->IsInWorld() || !member->IsAlive() || member->GetDistance(host) > 60.0f)
++        if (!member || !member->GetPlayerbotAI() || !Mine(member) || !member->IsInWorld() || !member->IsAlive() || member->GetDistance(host) > 60.0f)
+             continue;
+         sScriptDevAIMgr.OnGossipHello(member, host);
+         member->GetPlayerMenu()->CloseGossip();
+@@ -1168,7 +1428,7 @@ bool DungeonRun::WayInto(Player* bot, WorldPosition& way, WorldPosition& inside)
+     Player* leader = group ? sObjectMgr.GetPlayer(group->GetLeaderGuid()) : nullptr;
+     if (!leader || !leader->GetPlayerbotAI())
+         return false;
+-    int const focus = leader->GetPlayerbotAI()->GetAiObjectContext()->GetValue<int>("manual int", "group quest focus")->Get();
++    int const focus = PeerInt(leader, "group quest focus");
+     Quest const* quest = focus > 0 ? sObjectMgr.GetQuestTemplate(uint32(focus)) : nullptr;
+     AreaTableEntry const* area = quest && quest->GetZoneOrSort() > 0 ? GetAreaEntryByAreaID(quest->GetZoneOrSort()) : nullptr;
+     if (!area)
+@@ -1192,7 +1452,7 @@ bool DungeonRun::FightInside(Player* bot)
+     for (GroupReference* ref = group ? group->GetFirstMember() : nullptr; ref; ref = ref->next())
+     {
+         Player* member = ref->getSource();
+-        if (member && member != bot && member->IsInWorld() && member->IsAlive() && member->GetMap()->IsDungeon() && member->IsInCombat())
++        if (member && member != bot && member->IsInWorld() && member->IsAlive() && OnDungeonMap(member) && member->IsInCombat())
+             return true;
+     }
+     return false;
+@@ -1221,7 +1481,7 @@ bool DungeonRun::RestFull(Player* member)
+     Player* leader = member->GetGroup() ? sObjectMgr.GetPlayer(member->GetGroup()->GetLeaderGuid()) : nullptr;
+     if (!leader || !leader->GetPlayerbotAI())
+         return false;
+-    time_t const since = leader->GetPlayerbotAI()->GetAiObjectContext()->GetValue<time_t>("manual time", "rest full since")->Get();
++    time_t const since = PeerTime(leader, "rest full since");
+     return since && time(nullptr) - since < RestFullTime;
+ }
+ 
+@@ -1307,7 +1567,7 @@ Player* DungeonRun::Puller(Player* leader, Creature* target)
+         {
+             Player* member = ref->getSource();
+             if (!member || member == leader || !member->GetPlayerbotAI() || !member->IsInWorld() || !member->IsAlive() ||
+-                member->GetMapId() != leader->GetMapId() || member->GetDistance(leader) > ReadyRange)
++                member->GetMapId() != leader->GetMapId() || !Mine(member) || member->GetDistance(leader) > ReadyRange)
+                 continue;
+             // With its group, at its level: one above a cliff, 36 yards up,
+             // was picked (dev, 2026-11-20).
+@@ -1388,6 +1648,8 @@ bool DungeonRun::InPullRange(Player* puller, Creature* target)
+ bool DungeonRun::StartPull(Player* leader, Player* puller, Creature* target, WorldPosition const& spot)
+ {
+     PlayerbotAI* ai = puller->GetPlayerbotAI();
++    if (!ai || !Mine(puller))
++        return false; // on another map or instance (Kamino 288)
+     PullStrategy* strategy = PullStrategy::Get(ai);
+     if (!strategy || !strategy->CanDoPullAction(target))
+         return false;
+@@ -1406,8 +1668,20 @@ bool DungeonRun::StartPull(Player* leader, Player* puller, Creature* target, Wor
+ // The route its leader walks now and the step it heads for (its index).
+ std::vector<DungeonRun::RouteStep> const* DungeonRun::LeaderRoute(Player* leader, int& leaderStep, std::string& key)
+ {
++    // A leader on another map or instance: the route it last published
++    // (Kamino 288).
++    if (!Mine(leader))
++    {
++        std::lock_guard<std::mutex> guard(peersLock);
++        auto const at = published.find(leader->GetGUIDLow());
++        if (at == published.end() || !at->second.route)
++            return nullptr;
++        leaderStep = at->second.routeStep;
++        key = at->second.routeKey;
++        return at->second.route;
++    }
+     AiObjectContext* context = leader->GetPlayerbotAI()->GetAiObjectContext();
+-    if (!leader->GetMap()->IsDungeon())
++    if (!OnDungeonMap(leader))
+     {
+         WorldPosition way, inside;
+         if (!DungeonRun::WalkingIn(leader) || !DungeonRun::WayInto(leader, way, inside))
+@@ -1598,7 +1872,7 @@ bool DungeonRun::ToTankSpot(Player* leader)
+     WorldPosition spot;
+     if (!FightLeg(leader, hold, spot, hasTank) || !hasTank || !leader->GetPlayerbotAI())
+         return false;
+-    time_t const since = leader->GetPlayerbotAI()->GetAiObjectContext()->GetValue<time_t>("manual time", "to tank spot")->Get();
++    time_t const since = PeerTime(leader, "to tank spot");
+     return spot.distance(WorldPosition(leader)) <= 8.0f || (since && time(nullptr) - since < 30);
+ }
+ 
+@@ -1617,7 +1891,7 @@ Player* DungeonRun::TankOf(Player* member)
+ 
+ void DungeonRun::UnseenAttackers(Player* member)
+ {
+-    static std::map<uint64, time_t> madeVisible;
++    static std::map<uint64, time_t> madeVisible; // under unhurtLock (Kamino 288)
+     // Its health and since when, per creature fighting a group: none taken
+     // in UnhurtTime, it is out of the fight - two Deviate Lurkers in the
+     // water by the Wailing Caverns' mouth, one evading below, one on a mage
+@@ -1629,6 +1903,19 @@ void DungeonRun::UnseenAttackers(Player* member)
+     if (!group || !member->IsInCombat())
+         return;
+     time_t const now = time(nullptr);
++    // Creatures long out of any fight forgotten - both maps only grew.
++    {
++        static time_t pruned = 0;
++        std::lock_guard<std::mutex> guard(unhurtLock);
++        if (now - pruned >= 300)
++        {
++            pruned = now;
++            for (auto i = unhurt.begin(); i != unhurt.end();)
++                i = now - i->second.second > 2 * UnhurtTime ? unhurt.erase(i) : std::next(i);
++            for (auto i = madeVisible.begin(); i != madeVisible.end();)
++                i = now - i->second > 300 ? madeVisible.erase(i) : std::next(i);
++        }
++    }
+     std::vector<Creature*> unseen;
+     for (HostileReference* ref = member->getHostileRefManager().getFirst(); ref; ref = ref->next())
+     {
+@@ -1687,7 +1974,8 @@ void DungeonRun::UnseenAttackers(Player* member)
+                     fighting->AI()->EnterEvadeMode();
+                 for (GroupReference* g = group->GetFirstMember(); g; g = g->next())
+                     if (Player* other = g->getSource())
+-                        if (other->IsInWorld() && other->GetMapId() == fighting->GetMapId() && other->getAttackers().empty())
++                        if (Mine(other) && other->IsInWorld() && other->GetMapId() == fighting->GetMapId() &&
++                            other->GetInstanceId() == fighting->GetInstanceId() && other->getAttackers().empty())
+                             other->CombatStopWithPets(true);
+                 return; // its references changed - the rest next time
+             }
+@@ -1703,22 +1991,30 @@ void DungeonRun::UnseenAttackers(Player* member)
+     for (Creature* creature : unseen)
+     {
+         uint64 const guid = creature->GetObjectGuid().GetRawValue();
+-        auto const made = madeVisible.find(guid);
+-        if (creature->IsAlive() && creature->GetVisibility() != VISIBILITY_ON && made == madeVisible.end())
++        bool known = false, recent = false;
++        {
++            std::lock_guard<std::mutex> guard(unhurtLock);
++            auto const made = madeVisible.find(guid);
++            known = made != madeVisible.end();
++            recent = known && now - made->second < 30;
++            if (!known && creature->IsAlive() && creature->GetVisibility() != VISIBILITY_ON)
++                madeVisible[guid] = now;
++            else if (known && !recent)
++                madeVisible.erase(made);
++        }
++        if (creature->IsAlive() && creature->GetVisibility() != VISIBILITY_ON && !known)
+         {
+             sLog.outString("Bot #%d %s:%d <%s>: unseen %s (%u) on it - visibility %u, death state %u, alive - made visible", member->GetGUIDLow(),
+                 member->GetTeam() == ALLIANCE ? "A" : "H", member->GetLevel(), member->GetName(), creature->GetName(), creature->GetDbGuid(),
+                 uint32(creature->GetVisibility()), uint32(creature->GetDeathState()));
+-            madeVisible[guid] = now;
+             creature->SetVisibility(VISIBILITY_ON);
+             continue;
+         }
+-        if (made != madeVisible.end() && now - made->second < 30)
++        if (recent)
+             continue;
+         sLog.outString("Bot #%d %s:%d <%s>: unseen %s (%u) on it - visibility %u, death state %u, alive %d - taken off the map", member->GetGUIDLow(),
+             member->GetTeam() == ALLIANCE ? "A" : "H", member->GetLevel(), member->GetName(), creature->GetName(), creature->GetDbGuid(),
+             uint32(creature->GetVisibility()), uint32(creature->GetDeathState()), int(creature->IsAlive()));
+-        madeVisible.erase(guid);
+         creature->CombatStop(true);
+         creature->AddObjectToRemoveList();
+     }
+@@ -1764,10 +2060,10 @@ bool DungeonRun::EscortFollow(Player* member, Player* leader)
+ {
+     if (!leader || !leader->GetPlayerbotAI() || leader->GetMapId() != member->GetMapId() || leader->GetInstanceId() != member->GetInstanceId())
+         return false;
+-    if (time(nullptr) - leader->GetPlayerbotAI()->GetAiObjectContext()->GetValue<time_t>("manual time", "run escort")->Get() <= 5)
++    if (time(nullptr) - PeerTime(leader, "run escort") <= 5)
+         return true;
+     return EscortStateOf(member) == ESCORT_ON &&
+-        leader->GetPlayerbotAI()->GetAiObjectContext()->GetValue<int>("manual int", "run escort tries")->Get() <= EscortTries;
++        PeerInt(leader, "run escort tries") <= EscortTries;
+ }
+ 
+ bool DungeonRun::EscortPending(Player* leader)
+@@ -1776,16 +2072,15 @@ bool DungeonRun::EscortPending(Player* leader)
+     // On - unless given up (its starter dead after its last try, the event
+     // left "in progress" till he respawns).
+     if (state == ESCORT_ON)
+-        return leader->GetPlayerbotAI()->GetAiObjectContext()->GetValue<int>("manual int", "run escort tries")->Get() <= EscortTries;
++        return PeerInt(leader, "run escort tries") <= EscortTries;
+     if (state == ESCORT_READY)
+-        return leader->GetPlayerbotAI()->GetAiObjectContext()->GetValue<int>("manual int", "run escort tries")->Get() < EscortTries;
++        return PeerInt(leader, "run escort tries") < EscortTries;
+     if (state != ESCORT_WAITING)
+         return false;
+     // Failed: its starter back after its respawn - a while at most.
+-    AiObjectContext* context = leader->GetPlayerbotAI()->GetAiObjectContext();
+-    time_t const failed = context->GetValue<time_t>("manual time", "run escort failed")->Get();
+-    return context->GetValue<int>("manual int", "run escort tries")->Get() > 0 &&
+-        context->GetValue<int>("manual int", "run escort tries")->Get() < EscortTries &&
++    time_t const failed = PeerTime(leader, "run escort failed");
++    int const tries = PeerInt(leader, "run escort tries");
++    return tries > 0 && tries < EscortTries &&
+         failed && time(nullptr) - failed < EscortWaitTime;
+ }
+ 
+@@ -2147,7 +2442,7 @@ Creature* DungeonRun::ChainNext(Player* leader, Player*& puller)
+ {
+     puller = nullptr;
+     Group* group = leader->GetGroup();
+-    if (!group || !leader->GetMap()->IsDungeon() || !Active(leader) || EscortPending(leader))
++    if (!group || !OnDungeonMap(leader) || !Active(leader) || EscortPending(leader))
+         return nullptr;
+     // What the group fights: one creature, low, no boss.
+     std::set<Unit*> foes;
+@@ -2187,7 +2482,7 @@ Creature* DungeonRun::ChainNext(Player* leader, Player*& puller)
+         ++step;
+     if (step < 0 || step >= int(route->size()))
+         return nullptr;
+-    std::string const failed = leader->GetPlayerbotAI()->GetAiObjectContext()->GetValue<std::string>("manual string", "run pull failed")->Get();
++    std::string const failed = PeerString(leader, "run pull failed");
+     Creature* next = TrashAhead(leader, (*route)[step].point, failed);
+     if (!next || next == foe || next->IsInCombat() || IsBoss(next) || IsKillFirst(next) || NeedsCorner(leader, next) ||
+         std::abs(next->GetPositionZ() - leader->GetPositionZ()) > 5.0f)
+@@ -2266,7 +2561,7 @@ Player* DungeonRun::BodyToRaise(Player* bot, uint32& spell, Corpse*& corpse)
+ void DungeonRun::ShareQuests(Player* leader)
+ {
+     Group* group = leader->GetGroup();
+-    int const focus = leader->GetPlayerbotAI()->GetAiObjectContext()->GetValue<int>("manual int", "group quest focus")->Get();
++    int const focus = PeerInt(leader, "group quest focus");
+     Quest const* focused = focus > 0 ? sObjectMgr.GetQuestTemplate(uint32(focus)) : nullptr;
+     AreaTableEntry const* area = focused && focused->GetZoneOrSort() > 0 ? GetAreaEntryByAreaID(focused->GetZoneOrSort()) : nullptr;
+     if (!group || !area)
+@@ -2274,7 +2569,7 @@ void DungeonRun::ShareQuests(Player* leader)
+     std::vector<Player*> members;
+     for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+         if (Player* member = ref->getSource())
+-            if (member->IsInWorld() && member->GetPlayerbotAI())
++            if (member->IsInWorld() && member->GetPlayerbotAI() && Mine(member))
+                 members.push_back(member);
+     for (Player* holder : members)
+         for (uint8 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
+@@ -2414,7 +2709,7 @@ bool DungeonRun::MemberStep(Player* bot, Player* leader, RouteStep const*& next)
+     // of it - its leader passed them all (one left to find its own way to
+     // the portal went back and forth short of it; dev, 2026-11-20).
+     WorldPosition way, inside;
+-    if (!bot->GetMap()->IsDungeon() && leader->GetMap()->IsDungeon() && WayInto(bot, way, inside))
++    if (!bot->GetMap()->IsDungeon() && OnDungeonMap(leader) && WayInto(bot, way, inside))
+     {
+         route = &Route(inside.getMapId(), WayInWing);
+         leaderStep = int(route->size());
+@@ -2483,7 +2778,7 @@ bool DungeonRun::MemberStep(Player* bot, Player* leader, RouteStep const*& next)
+     // Outside still, its leader in: on the other map, never "by" it - a
+     // member walking to the portal was sent back point by point every half
+     // minute (dev, 2026-11-22); it walks on to the portal instead.
+-    bool const byLeader = (!bot->GetMap()->IsDungeon() && leader->GetMap()->IsDungeon()) ||
++    bool const byLeader = (!bot->GetMap()->IsDungeon() && OnDungeonMap(leader)) ||
+         (leader->GetMapId() == bot->GetMapId() && leader->GetDistance(bot) <= SeparatedRange);
+     // Displaced: more than 15 yards off the line of its leg, its last point
+     // to its next - a member back from drinking half way along an 84-yard
+diff --git a/playerbot/strategy/values/DungeonRun.h b/playerbot/strategy/values/DungeonRun.h
+index 22ccddd..45805ee 100644
+--- a/playerbot/strategy/values/DungeonRun.h
++++ b/playerbot/strategy/values/DungeonRun.h
+@@ -1,6 +1,9 @@
+ #pragma once
+ 
+ #include <cstdint>
++#include <ctime>
++#include <functional>
++#include <string>
+ #include <vector>
+ 
+ // kalimdor: a group of bots inside a dungeon is on a run (owner, 2026-11-10;
+@@ -26,6 +29,7 @@
+ 
+ #include "playerbot/strategy/Value.h"
+ #include "playerbot/WorldPosition.h"
++#include "Quests/QuestDef.h"
+ 
+ class Player;
+ 
+@@ -43,6 +47,43 @@ namespace ai
+     class DungeonRun
+     {
+     public:
++        // kalimdor (Kamino 288): a bot's update runs on its map's thread -
++        // two bots on one map and instance share one, on different ones they
++        // run at the same time. Another bot's AI values, its map and its moves
++        // are touched directly only when Mine(other); else its values are read
++        // from what it last published (at most a second old), and what is
++        // asked of it is posted for it to do in its own update. Unlocked
++        // reads of another thread's AI context crashed-class: its values are
++        // made on first use, into an unlocked map.
++        class Updating
++        {
++        public:
++            explicit Updating(Player* bot);
++            ~Updating();
++        private:
++            Player* previous;
++        };
++        static bool Mine(Player* other);
++        // By its map id: another player's GetMap() is null while it is
++        // between maps (the server asserts on it).
++        static bool OnDungeonMap(Player* player);
++        static int PeerInt(Player* other, std::string const& name);
++        static time_t PeerTime(Player* other, std::string const& name);
++        static std::string PeerString(Player* other, std::string const& name);
++        // Its status of a quest - elsewhere, of its group quest focus only
++        // (NONE for any other).
++        static QuestStatus PeerQuestStatus(Player* other, uint32 questId);
++        static void PostInt(Player* other, std::string const& name, int value);
++        static void PostTime(Player* other, std::string const& name, time_t value);
++        static void PostString(Player* other, std::string const& name, std::string const& value);
++        // Out of its fight state and put at a point - by itself, if not Mine.
++        static void PostPut(Player* other, WorldPosition const& at);
++        // Anything else done to it: now if Mine, else in its own update.
++        static void PostCall(Player* other, std::function<void(Player*)> call);
++        // From its own update, first: what was posted for it done, its values
++        // published.
++        static void Sync(Player* bot);
++
+         // guid: its spawn point; group: the spawn group that places it
+         // (guid 0 - the point is the instance's choice), or 0.
+         // event: the game event it spawns in (> 0) or is gone in (< 0), or
+diff --git a/playerbot/strategy/values/GroupQuests.cpp b/playerbot/strategy/values/GroupQuests.cpp
+index 45dcdbc..ad4d672 100644
+--- a/playerbot/strategy/values/GroupQuests.cpp
++++ b/playerbot/strategy/values/GroupQuests.cpp
+@@ -429,7 +429,7 @@ static QuestStatus FocusStatus(Player* bot, uint32 questId)
+ {
+     if (Group* group = bot->GetGroup())
+         if (Player* leader = sObjectMgr.GetPlayer(group->GetLeaderGuid()))
+-            if (leader != bot && leader->GetGroup() == group && leader->GetQuestStatus(questId) == QUEST_STATUS_INCOMPLETE)
++            if (leader != bot && leader->GetGroup() == group && DungeonRun::PeerQuestStatus(leader, questId) == QUEST_STATUS_INCOMPLETE)
+                 return QUEST_STATUS_INCOMPLETE;
+     return bot->GetQuestStatus(questId);
+ }
+@@ -451,8 +451,7 @@ bool GroupQuests::FocusOver(Player* bot)
+     if (bot->GetMap()->IsDungeon() && context->GetValue<int>("manual int", "run done instance")->Get() == int(bot->GetInstanceId()))
+         return true;
+     if (Player* leader = sObjectMgr.GetPlayer(bot->GetGroup()->GetLeaderGuid()))
+-        if (leader != bot && leader->GetPlayerbotAI() &&
+-            leader->GetPlayerbotAI()->GetAiObjectContext()->GetValue<int>("manual int", "group quest focus")->Get() != questId)
++        if (leader != bot && leader->GetPlayerbotAI() && DungeonRun::PeerInt(leader, "group quest focus") != questId)
+             return true;
+     // On its way in or inside its dungeon: over when its run is - cleared or
+     // given up - not when the quest left its leader's log (owner,

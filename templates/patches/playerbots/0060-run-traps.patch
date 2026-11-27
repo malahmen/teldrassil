@@ -1,0 +1,268 @@
+diff --git a/playerbot/strategy/actions/LookForGroupAction.cpp b/playerbot/strategy/actions/LookForGroupAction.cpp
+index 5fa7199..67f7c91 100644
+--- a/playerbot/strategy/actions/LookForGroupAction.cpp
++++ b/playerbot/strategy/actions/LookForGroupAction.cpp
+@@ -3,6 +3,7 @@
+ #include "playerbot/strategy/values/DungeonRun.h"
+ #include "playerbot/strategy/values/GroupQuests.h"
+ #include "playerbot/TravelMgr.h"
++#include "Maps/MapPersistentStateMgr.h" // kalimdor: a cleared copy reset
+ 
+ using namespace ai;
+ 
+@@ -128,6 +129,51 @@ bool GoGroupQuestAction::Execute(Event& event)
+     if (!quest || !group)
+         return false;
+ 
++    // Its dungeon's copy, bound to the group, already cleared by it, and the
++    // quest still open (its drops did not come): reset and run again, with
++    // everyone outside - FarmRuns at most, then the quest is given up for a
++    // while and the group breaks up (GroupQuests::ResetLater; owner,
++    // 2026-11-26: a group re-entered a cleared Ragefire Chasm for a day).
++    if (AreaTableEntry const* area = quest->GetZoneOrSort() > 0 ? GetAreaEntryByAreaID(quest->GetZoneOrSort()) : nullptr)
++        if (MapEntry const* dungeon = sMapStore.LookupEntry(area->mapid))
++            if (dungeon->IsDungeon())
++                if (InstanceGroupBind* bind = group->GetBoundInstance(area->mapid))
++                    if (bind->state && int(bind->state->GetInstanceId()) == AI_VALUE2(int, "manual int", "run done instance"))
++                    {
++                        if (AI_VALUE2(int, "manual int", "farm quest") != int(quest->GetQuestId()))
++                        {
++                            SET_AI_VALUE2(int, "manual int", "farm quest", int(quest->GetQuestId()));
++                            SET_AI_VALUE2(int, "manual int", "farm runs", 1); // the run that cleared it
++                        }
++                        int const runs = AI_VALUE2(int, "manual int", "farm runs");
++                        if (runs >= GroupQuests::FarmRuns)
++                        {
++                            sLog.outString("Bot #%d %s:%d <%s>: gives up %s for now - %d cleared runs, its drops did not come", bot->GetGUIDLow(),
++                                bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), quest->GetTitle().c_str(), runs);
++                            for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
++                                if (Player* member = ref->getSource())
++                                    if (DungeonRun::IsBot(member) && DungeonRun::Mine(member))
++                                        GroupQuests::Skip(member, quest->GetQuestId());
++                            SET_AI_VALUE2(int, "manual int", "farm quest", 0);
++                            SET_AI_VALUE2(int, "manual int", "farm runs", 0);
++                            GroupQuests::BreakUp(bot);
++                            return true;
++                        }
++                        // Everyone out of its copy first: the core resets none
++                        // with a player inside.
++                        for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
++                            if (Player* member = ref->getSource())
++                                if (member->GetMapId() == area->mapid)
++                                    return false;
++                        SET_AI_VALUE2(int, "manual int", "farm runs", runs + 1);
++                        sLog.outString("Bot #%d %s:%d <%s>: %s cleared, %s still open - its copy reset for run %d of %d", bot->GetGUIDLow(),
++                            bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), area->area_name[0], quest->GetTitle().c_str(),
++                            runs + 1, GroupQuests::FarmRuns);
++                        GroupQuests::ResetLater(bot);
++                        SET_AI_VALUE2(int, "manual int", "run done instance", 0);
++                        return true;
++                    }
++
+     uint32 set = 0;
+     for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+     {
+@@ -161,7 +207,9 @@ bool EndGroupQuestAction::Execute(Event& event)
+     DungeonRun::ClearGatherPoint(bot);
+     sLog.outString("Bot #%d %s:%d <%s>: %s is over for it (%s)", bot->GetGUIDLow(), bot->GetTeam() == ALLIANCE ? "A" : "H",
+         bot->GetLevel(), bot->GetName(), quest ? quest->GetTitle().c_str() : "a group quest",
+-        !bot->GetGroup() ? "no group" : bot->GetQuestStatus(uint32(questId)) == QUEST_STATUS_COMPLETE ? "done" : "no longer in its log");
++        !bot->GetGroup() ? "no group" : bot->GetQuestStatus(uint32(questId)) == QUEST_STATUS_COMPLETE ? "done" :
++        bot->GetMap()->IsDungeon() && AI_VALUE2(int, "manual int", "run done instance") == int(bot->GetInstanceId()) ? "its dungeon cleared" :
++        bot->GetQuestStatus(uint32(questId)) == QUEST_STATUS_INCOMPLETE ? "its leader let it go" : "no longer in its log");
+     SetGroupQuestFocus(bot, 0);
+     // Its queue values go with it: "lfg joined" kept it in its group
+     // (GroupQuests::Holds) and "lfg quest" asking, after the quest was over
+diff --git a/playerbot/strategy/actions/MoveAwayFromEnemyGuardAction.cpp b/playerbot/strategy/actions/MoveAwayFromEnemyGuardAction.cpp
+index 9625254..e871b28 100644
+--- a/playerbot/strategy/actions/MoveAwayFromEnemyGuardAction.cpp
++++ b/playerbot/strategy/actions/MoveAwayFromEnemyGuardAction.cpp
+@@ -108,7 +108,17 @@ bool LeaveHostileTerritoryAction::Execute(Event& event)
+     WorldPosition* exit = nullptr;
+     std::string const failedExits = AI_VALUE2(std::string, "manual string", "failed exits");
+     int32 const failedCount = AI_VALUE2(int32, "manual int", "failed exit count");
+-    TravelNode* start = failedCount < EnemyGuards::ExitsBeforeHearth ? sTravelNodeMap.getNode(botPosition, bot) : nullptr;
++    // Walk-outs from this zone lately (EnemyGuards::WalkoutsBeforeHome).
++    uint32 const zone = bot->GetZoneId();
++    if (AI_VALUE2(int32, "manual int", "walkout zone") != int32(zone) ||
++        time(nullptr) - AI_VALUE2(time_t, "manual time", "walkout since") > EnemyGuards::WalkoutWindow)
++    {
++        SET_AI_VALUE2(int32, "manual int", "walkout zone", int32(zone));
++        SET_AI_VALUE2(time_t, "manual time", "walkout since", time(nullptr));
++        SET_AI_VALUE2(int32, "manual int", "walkouts", 0);
++    }
++    bool const trapped = AI_VALUE2(int32, "manual int", "walkouts") >= EnemyGuards::WalkoutsBeforeHome;
++    TravelNode* start = !trapped && failedCount < EnemyGuards::ExitsBeforeHearth ? sTravelNodeMap.getNode(botPosition, bot) : nullptr;
+     if (start)
+     {
+         float bestDistance = 0.0f;
+@@ -200,10 +210,21 @@ bool LeaveHostileTerritoryAction::Execute(Event& event)
+         RESET_AI_VALUE2(std::string, "manual string", "failed exits");
+         RESET_AI_VALUE2(int32, "manual int", "failed exit count");
+ 
++        char const* const why = trapped ? "walked out again and again, pushed back each time" :
++            failedCount >= EnemyGuards::ExitsBeforeHearth ? "two ways out could not be walked" : "no way out on foot";
++        SET_AI_VALUE2(int32, "manual int", "walkouts", 0);
++        // Trapped and no hearthstone ready: put at its inn - the trap held
++        // for a day with the hearth on cooldown or gone.
++        if (trapped && leader == bot && (!bot->HasItemCount(6948, 1) || !AI_VALUE2(bool, "spell ready", "8690")))
++        {
++            sLog.outString("Bot #%d %s:%d <%s> in %s: %s - no hearthstone ready, put at its inn", bot->GetGUIDLow(),
++                bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), botPosition.getAreaName().c_str(), why);
++            bot->TeleportToHomebind();
++            return true;
++        }
+         sLog.outString("Bot #%d %s:%d <%s> in %s: %s - %s uses the hearthstone", bot->GetGUIDLow(),
+             bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), botPosition.getAreaName().c_str(),
+-            failedCount >= EnemyGuards::ExitsBeforeHearth ? "two ways out could not be walked" : "no way out on foot",
+-            leader == bot ? "it" : "its group leader");
++            why, leader == bot ? "it" : "its group leader");
+         return leaderAi->DoSpecificAction("hearthstone", Event(), true);
+     }
+ 
+@@ -239,6 +260,7 @@ bool LeaveHostileTerritoryAction::Execute(Event& event)
+     };
+     ai->SayToGeneral(lines[urand(0, lines.size() - 1)]);
+ 
++    SET_AI_VALUE2(int32, "manual int", "walkouts", AI_VALUE2(int32, "manual int", "walkouts") + 1);
+     sLog.outString("Bot #%d %s:%d <%s> in %s (%s): %s walks out of %s to %s", bot->GetGUIDLow(),
+         bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), here.c_str(),
+         AI_VALUE2(std::string, "manual string", "leave reason").c_str(),
+diff --git a/playerbot/strategy/values/EnemyGuards.h b/playerbot/strategy/values/EnemyGuards.h
+index 41ff2c5..3714e23 100644
+--- a/playerbot/strategy/values/EnemyGuards.h
++++ b/playerbot/strategy/values/EnemyGuards.h
+@@ -106,6 +106,13 @@ namespace ai
+         // cooldown, or cancelled) was tried every tick - 91 times in a row
+         // for a level-2 bot stranded in Durotar (meksha, 2026-10-31).
+         static constexpr time_t HearthRetry = 10 * 60;
++        // Walked out WalkoutsBeforeHome times within WalkoutWindow without
++        // leaving the zone: trapped - the guards push it back each time, so
++        // no way out ever counts as failed (eleven Horde bots at Talrendis
++        // Point, a day long; the cluster, 2026-11-26). Home by hearthstone,
++        // else put at its inn.
++        static constexpr int WalkoutsBeforeHome = 6;
++        static constexpr time_t WalkoutWindow = 30 * 60;
+         // A way out is remembered by its coordinates, to the yard.
+         static std::string ExitKey(const WorldPosition& position);
+     };
+diff --git a/playerbot/strategy/values/GroupQuests.cpp b/playerbot/strategy/values/GroupQuests.cpp
+index 0db2628..cf2cd54 100644
+--- a/playerbot/strategy/values/GroupQuests.cpp
++++ b/playerbot/strategy/values/GroupQuests.cpp
+@@ -205,6 +205,43 @@ namespace
+     }
+ }
+ 
++namespace
++{
++    std::set<uint64> resets; // leaders whose group's copies are to be reset (queueLock)
++}
++
++void GroupQuests::ResetLater(Player* leader)
++{
++    std::lock_guard<std::mutex> guard(queueLock);
++    resets.insert(leader->GetObjectGuid().GetRawValue());
++}
++
++bool GroupQuests::Skipped(Player* bot, uint32 questId)
++{
++    std::string const skip = ContextOf(bot)->GetValue<std::string>("manual string", "group quest skip")->Get();
++    std::string const key = std::to_string(questId) + ":";
++    size_t const at = skip.find("," + key);
++    if (at == std::string::npos)
++        return false;
++    return time_t(std::stoll(skip.substr(at + 1 + key.size()))) > time(nullptr);
++}
++
++void GroupQuests::Skip(Player* bot, uint32 questId)
++{
++    // Its other entries still running, this one anew.
++    std::string kept = ",";
++    for (std::string const& entry : split(ContextOf(bot)->GetValue<std::string>("manual string", "group quest skip")->Get(), ','))
++    {
++        size_t const colon = entry.find(':');
++        if (colon == std::string::npos || entry.substr(0, colon) == std::to_string(questId))
++            continue;
++        if (time_t(std::stoll(entry.substr(colon + 1))) > time(nullptr))
++            kept += entry + ",";
++    }
++    kept += std::to_string(questId) + ":" + std::to_string(time(nullptr) + SkipTime) + ",";
++    ContextOf(bot)->GetValue<std::string>("manual string", "group quest skip")->Set(kept);
++}
++
+ void GroupQuests::Ask(Player* leader, Quest const* quest)
+ {
+     std::lock_guard<std::mutex> guard(queueLock);
+@@ -271,16 +308,28 @@ static void BreakUpNow(Player* leader)
+ void GroupQuests::Match()
+ {
+     std::map<uint64, uint32> asks;
+-    std::set<uint64> breakUps;
++    std::set<uint64> breakUps, resetting;
+     {
+         std::lock_guard<std::mutex> guard(queueLock);
+         asks = asking;
+         breakUps.swap(breakingUp);
++        resetting.swap(resets);
+     }
+     for (uint64 raw : breakUps)
+         if (Player* leader = sObjectMgr.GetPlayer(ObjectGuid(raw)))
+             if (leader->IsInWorld() && leader->GetPlayerbotAI())
+                 BreakUpNow(leader);
++    // The resets asked for (ResetLater): here, on the world's update, as the
++    // core's own reset packet is handled.
++    for (uint64 raw : resetting)
++        if (Player* leader = sObjectMgr.GetPlayer(ObjectGuid(raw)))
++            if (Group* group = leader->GetGroup())
++                if (group->IsLeader(leader->GetObjectGuid()))
++                {
++                    group->ResetInstances(INSTANCE_RESET_ALL, leader);
++                    sLog.outString("Bot #%d %s:%d <%s>: its group's dungeon copies reset", leader->GetGUIDLow(),
++                        leader->GetTeam() == ALLIANCE ? "A" : "H", leader->GetLevel(), leader->GetName());
++                }
+     struct Request { Player* leader; Quest const* quest; uint32 wanted; time_t since; bool setOff; };
+     std::map<std::pair<uint32, uint32>, std::vector<Request>> byQuest; // (team, quest)
+     std::vector<uint64> gone;
+@@ -544,7 +593,8 @@ Quest const* GroupQuests::Ready(Player* bot)
+ 
+     int const questId = bot->GetPlayerbotAI()->GetAiObjectContext()->GetValue<int>("manual int", "lfg quest")->Get();
+     Quest const* quest = questId > 0 ? sObjectMgr.GetQuestTemplate(uint32(questId)) : nullptr;
+-    if (!IsGroupQuest(quest) || bot->GetQuestStatus(quest->GetQuestId()) != QUEST_STATUS_INCOMPLETE || QuestFlow::IsGrey(bot, quest))
++    if (!IsGroupQuest(quest) || bot->GetQuestStatus(quest->GetQuestId()) != QUEST_STATUS_INCOMPLETE || QuestFlow::IsGrey(bot, quest) ||
++        Skipped(bot, quest->GetQuestId()))
+         return nullptr;
+ 
+     // Members, not invitations still open - and its tanks and healers:
+@@ -754,7 +804,7 @@ Quest const* GroupQuests::Pending(Player* bot)
+         uint32 const questId = bot->GetQuestSlotQuestId(slot);
+         Quest const* quest = sObjectMgr.GetQuestTemplate(questId);
+         if (!IsGroupQuest(quest) || bot->GetQuestStatus(questId) != QUEST_STATUS_INCOMPLETE || QuestFlow::IsGrey(bot, quest) ||
+-            !CanEnter(bot, quest))
++            !CanEnter(bot, quest) || Skipped(bot, questId))
+             continue;
+ 
+         if (GroupSize(bot) < WantedSize(quest))
+diff --git a/playerbot/strategy/values/GroupQuests.h b/playerbot/strategy/values/GroupQuests.h
+index e2bac13..7292a5a 100644
+--- a/playerbot/strategy/values/GroupQuests.h
++++ b/playerbot/strategy/values/GroupQuests.h
+@@ -107,6 +107,18 @@ namespace ai
+         // invites leave it alone, and it them (Kamino 291).
+         static bool Queued(Player* bot);
+         static void Match();
++
++        // A dungeon cleared and its quest not done (drops that did not come):
++        // its copy reset, everyone outside, and run again - FarmRuns at most;
++        // then the quest is given up for SkipTime and the group breaks up
++        // (owner, 2026-11-26: a group re-entered its cleared Ragefire Chasm
++        // for a day, The Power to Destroy... still open). The reset is the
++        // matcher's, on the world's update (ResetLater).
++        static void ResetLater(Player* leader);
++        static bool Skipped(Player* bot, uint32 questId);
++        static void Skip(Player* bot, uint32 questId);
++        static constexpr int FarmRuns = 2;
++        static constexpr time_t SkipTime = 2 * 60 * 60;
+         static constexpr time_t MatchEvery = 5;
+         static constexpr float NearRange = 1500.0f;
+     };

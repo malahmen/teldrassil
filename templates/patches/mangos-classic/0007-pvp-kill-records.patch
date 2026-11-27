@@ -1,0 +1,91 @@
+diff --git a/src/game/Entities/Unit.cpp b/src/game/Entities/Unit.cpp
+index 7d1b89f..b78f137 100644
+--- a/src/game/Entities/Unit.cpp
++++ b/src/game/Entities/Unit.cpp
+@@ -48,6 +48,7 @@
+ #include "Movement/MoveSpline.h"
+ #include "Entities/CreatureLinkingMgr.h"
+ #include "Tools/Formulas.h"
++#include "Database/DatabaseEnv.h" // kalimdor: PvP kill records
+ #include "Entities/Transports.h"
+ #include "Anticheat/Anticheat.hpp"
+ #include "Spells/SpellStacking.h"
+@@ -1016,6 +1017,35 @@ uint32 Unit::DealDamage(Unit* dealer, Unit* victim, uint32 damage, CleanDamage c
+     return damage;
+ }
+ 
++// kalimdor: the PvP kill records' table, made as the world starts - the stats
++// exporter reads it before any kill (World::SetInitialWorldSettings).
++void Unit::MakePvPKillTable()
++{
++    CharacterDatabase.DirectExecute(
++            "CREATE TABLE IF NOT EXISTS `kalimdor_pvp_kill` ("
++            " `id` int unsigned NOT NULL AUTO_INCREMENT, `time` bigint unsigned NOT NULL,"
++            " `killer` int unsigned NOT NULL, `killer_level` tinyint unsigned NOT NULL,"
++            " `victim` int unsigned NOT NULL, `victim_level` tinyint unsigned NOT NULL,"
++            " `map` smallint unsigned NOT NULL, `zone` int unsigned NOT NULL,"
++            " `battleground` tinyint unsigned NOT NULL, `honorable` tinyint unsigned NOT NULL,"
++            " PRIMARY KEY (`id`), KEY `killer` (`killer`), KEY `victim` (`victim`), KEY `time` (`time`))"
++            " ENGINE=InnoDB DEFAULT CHARSET=utf8 COMMENT='kalimdor: PvP kills, killing blows (stats)'");
++}
++
++// kalimdor: one row per PvP kill in kalimdor_pvp_kill (characters database;
++// Unit::Kill).
++void Unit::RecordPvPKill(Player* killer, Player* victim)
++{
++    // Honorable as the game rewards it: not a grey victim to the killer, no
++    // Honorless Target on it.
++    bool const honorable = !MaNGOS::XP::IsTrivialLevelDifference(killer->GetLevel(), victim->GetLevel()) &&
++        !victim->GetAura(2479, EFFECT_INDEX_0);
++    CharacterDatabase.PExecute("INSERT INTO `kalimdor_pvp_kill` (`time`, `killer`, `killer_level`, `victim`, `victim_level`, `map`, `zone`, `battleground`, `honorable`)"
++        " VALUES (%u, %u, %u, %u, %u, %u, %u, %u, %u)", uint32(time(nullptr)), killer->GetGUIDLow(), uint32(killer->GetLevel()),
++        victim->GetGUIDLow(), uint32(victim->GetLevel()), victim->GetMapId(), victim->GetZoneId(),
++        uint32(victim->GetMap()->IsBattleGround()), uint32(honorable));
++}
++
+ void Unit::Kill(Unit* killer, Unit* victim, DamageEffectType damagetype, SpellEntry const* spellInfo, bool durabilityLoss, bool duel_hasEnded)
+ {
+     DEBUG_FILTER_LOG(LOG_FILTER_DAMAGE, "DealDamage %s Killed %s", killer ? killer->GetGuidStr().c_str() : "", victim->GetGuidStr().c_str());
+@@ -1087,6 +1117,14 @@ void Unit::Kill(Unit* killer, Unit* victim, DamageEffectType damagetype, SpellEn
+ 
+     // tbc+ has on death proc
+ 
++    // kalimdor: each PvP kill recorded - who landed the killing blow on whom,
++    // where (battleground or open world), honorable or not - for the stats
++    // (owner, 2026-11-24: open-world PvP rankings; the game keeps only a
++    // count per character, battlegrounds and open world together).
++    if (responsiblePlayer && victim->GetTypeId() == TYPEID_PLAYER && responsiblePlayer != victim &&
++        responsiblePlayer->GetTeam() != static_cast<Player*>(victim)->GetTeam())
++        RecordPvPKill(responsiblePlayer, static_cast<Player*>(victim));
++
+     // Reward player, his pets, and group/raid members
+     if (tapper != victim)
+     {
+diff --git a/src/game/Entities/Unit.h b/src/game/Entities/Unit.h
+index c5a03c1..0bc7986 100644
+--- a/src/game/Entities/Unit.h
++++ b/src/game/Entities/Unit.h
+@@ -1459,6 +1459,9 @@ class Unit : public WorldObject
+         static uint32 DealDamage(Unit* dealer, Unit* victim, uint32 damage, CleanDamage const* cleanDamage, DamageEffectType damagetype, SpellSchoolMask damageSchoolMask, SpellEntry const* spellInfo, bool durabilityLoss, Spell* spell = nullptr);
+         int32 DealHeal(Unit* pVictim, uint32 addhealth, SpellEntry const* spellInfo, bool critical = false);
+         static void Kill(Unit* killer, Unit* victim, DamageEffectType damagetype, SpellEntry const* spellInfo, bool durabilityLoss, bool duel_hasEnded);
++        // kalimdor: a PvP kill recorded for the stats (kalimdor_pvp_kill).
++        static void RecordPvPKill(Player* killer, Player* victim);
++        static void MakePvPKillTable();
+         static void HandleDamageDealt(Unit* dealer, Unit* victim, uint32& damage, CleanDamage const* cleanDamage, DamageEffectType damagetype, SpellSchoolMask damageSchoolMask, SpellEntry const* spellInfo, bool duel_hasEnded);
+         void InterruptOrDelaySpell(Unit* pVictim, DamageEffectType damagetype, SpellEntry const* spellInfo);
+ 
+diff --git a/src/game/World/World.cpp b/src/game/World/World.cpp
+index e344c52..2e10c7c 100644
+--- a/src/game/World/World.cpp
++++ b/src/game/World/World.cpp
+@@ -1449,6 +1449,9 @@ void World::SetInitialWorldSettings()
+ #endif
+ #endif
+ 
++    // kalimdor: the PvP kill records' table (Unit::RecordPvPKill).
++    Unit::MakePvPKillTable();
++
+     sLog.outString("---------------------------------------");
+     sLog.outString("      CMANGOS: World initialized       ");
+     sLog.outString("---------------------------------------");

@@ -1,0 +1,62 @@
+diff --git a/src/game/Entities/Creature.cpp b/src/game/Entities/Creature.cpp
+index fc240c1..8f08f09 100644
+--- a/src/game/Entities/Creature.cpp
++++ b/src/game/Entities/Creature.cpp
+@@ -1621,15 +1621,11 @@ bool Creature::LoadFromDB(uint32 dbGuid, Map* map, uint32 newGuid, uint32 forced
+     }
+ 
+     // Creature can be loaded already in map if grid has been unloaded while creature walk to another grid
+-    // kalimdor: dead too - a second object of the same spawn shares its guid,
+-    // and as either left the world the map's guid store lost the other: alive,
+-    // fighting, targetable by no one, not even a GM's .die (a Deviate Shambler
+-    // that died across a grid line from its spawn, its home grid unloaded and
+-    // loaded again; the Wailing Caverns, dev, 2026-11-21). The dead one
+-    // respawns at its spawn point itself.
++    // (a dead copy of the same spawn is refused further down, only where it
++    // would share the new object's guid - kalimdor, Kamino 289)
+     {
+         Creature* existing = map->GetCreature(dbGuid);
+-        if (existing)
++        if (existing && existing->IsAlive())
+             return false;
+     }
+ 
+@@ -1677,6 +1673,19 @@ bool Creature::LoadFromDB(uint32 dbGuid, Map* map, uint32 newGuid, uint32 forced
+     if (dynguid || newGuid == 0)
+         newGuid = map->GenerateLocalLowGuid(cinfo->GetHighGuid());
+ 
++    // kalimdor: a dead copy of this spawn still in the world under the very
++    // guid the new object would take - two objects sharing one guid, and as
++    // either left the world the map's object store lost the other: alive,
++    // fighting, targetable by no one, not even a GM's .die (a Deviate Shambler
++    // that died across a grid line from its spawn, its home grid unloaded and
++    // loaded again; the Wailing Caverns, dev, 2026-11-21). The dead one
++    // respawns at its spawn point itself. Only that exact guid is refused: a
++    // dynamic-guid copy (spawn groups, DYNGUID creatures) gets a fresh one, and
++    // refusing it left its spawn group counting a member that never came back
++    // (Kamino 289).
++    if (map->GetCreature(ObjectGuid(cinfo->GetHighGuid(), cinfo->Entry, newGuid)))
++        return false;
++
+     CreatureCreatePos pos(map, data->posX, data->posY, data->posZ, data->orientation);
+ 
+     if (!Create(dbGuid, newGuid, pos, cinfo, data, eventData))
+diff --git a/src/mangosd/mangosd.conf.dist.in b/src/mangosd/mangosd.conf.dist.in
+index 8bc3e88..cf8bbd0 100644
+--- a/src/mangosd/mangosd.conf.dist.in
++++ b/src/mangosd/mangosd.conf.dist.in
+@@ -253,10 +253,10 @@ Compression = 1
+ PlayerLimit = 100
+ SaveRespawnTimeImmediately = 1
+ MaxOverspeedPings = 2
+-# kalimdor: grids kept loaded - a grid loaded again made a second copy of a
+-# creature that had died outside it (Entities/Creature.cpp LoadFromDB; dev,
+-# 2026-11-21).
+-GridUnload = 0
++# kalimdor: grids unload again (Kamino 289) - kept loaded, ~100 roaming bots
++# held every grid, its terrain and navmesh; the second copy of a creature that
++# died outside a reloaded grid is refused in Entities/Creature.cpp LoadFromDB.
++GridUnload = 1
+ LoadAllGridsOnMaps = ""
+ Autoload.Active = 1
+ GridCleanUpDelay = 300000
