@@ -1,0 +1,152 @@
+diff --git a/playerbot/strategy/values/GroupQuests.cpp b/playerbot/strategy/values/GroupQuests.cpp
+index 98a2ba8..37a8ab5 100644
+--- a/playerbot/strategy/values/GroupQuests.cpp
++++ b/playerbot/strategy/values/GroupQuests.cpp
+@@ -13,6 +13,7 @@
+ 
+ #include <algorithm>
+ #include <set>
++#include <tuple>
+ 
+ using namespace ai;
+ 
+@@ -376,7 +377,10 @@ void GroupQuests::Match()
+                         leader->GetTeam() == ALLIANCE ? "A" : "H", leader->GetLevel(), leader->GetName());
+                 }
+     struct Request { Player* leader; Quest const* quest; uint32 wanted; time_t since; bool setOff; };
+-    std::map<std::pair<uint32, uint32>, std::vector<Request>> byQuest; // (team, quest)
++    // By place, not quest (owner, 2026-11-27): groups for two quests in one
++    // dungeon, wing or world boss fill one group - two each waited half
++    // full. Its size too: the upper spire's 10 and the lower's 5 share a map.
++    std::map<std::tuple<uint32, uint64, uint32>, std::vector<Request>> byQuest; // (team, place, size)
+     std::vector<uint64> gone;
+     for (auto const& [raw, questId] : asks)
+     {
+@@ -431,7 +435,7 @@ void GroupQuests::Match()
+                 gone.push_back(raw);
+             continue;
+         }
+-        byQuest[{ uint32(leader->GetTeam()), questId }].push_back({ leader, quest, WantedSize(quest),
++        byQuest[{ uint32(leader->GetTeam()), PlaceOf(quest), WantedSize(quest) }].push_back({ leader, quest, WantedSize(quest),
+             ContextOf(leader)->GetValue<time_t>("manual time", "lfg since")->Get(), focus > 0 });
+     }
+     {
+@@ -464,7 +468,7 @@ void GroupQuests::Match()
+             bool const late20 = !into.setOff && into.since && now - into.since >= StandInAfter;
+             bool const needTank = late20 && LimitsFor(into.wanted).minTanks > 0 && !HasTank(into.leader);
+             bool const needHealer = late20 && LimitsFor(into.wanted).minHealers > 0 && !HasRole(into.leader, Healer);
+-            // The smaller groups for the same quest, whole, while they fit -
++            // The smaller groups for the same place, whole, while they fit -
+             // groups not set off yet: one set off only takes free bots.
+             for (size_t j = i + 1; j < requests.size() && !into.setOff; ++j)
+             {
+@@ -478,8 +482,9 @@ void GroupQuests::Match()
+                     fits = fits && Movable(joiner) && CanEnter(joiner, into.quest) && !placed.count(joiner->GetGUIDLow());
+                 if (!fits)
+                     continue;
+-                sLog.outString("Bot #%d %s:%d <%s>: its group of %u joins %s's, bigger, for the same quest", other->GetGUIDLow(),
+-                    other->GetTeam() == ALLIANCE ? "A" : "H", other->GetLevel(), other->GetName(), uint32(joiners.size()), into.leader->GetName());
++                sLog.outString("Bot #%d %s:%d <%s>: its group of %u joins %s's, bigger, for the same place (%s, theirs %s)", other->GetGUIDLow(),
++                    other->GetTeam() == ALLIANCE ? "A" : "H", other->GetLevel(), other->GetName(), uint32(joiners.size()), into.leader->GetName(),
++                    requests[j].quest->GetTitle().c_str(), into.quest->GetTitle().c_str());
+                 Withdraw(other);
+                 ContextOf(other)->GetValue<bool>("manual bool", "lfg grouped")->Set(false);
+                 // Its members first, its leader last: the group it leaves
+@@ -510,6 +515,10 @@ void GroupQuests::Match()
+                 char const* how = nullptr;
+                 if (status == QUEST_STATUS_INCOMPLETE)
+                     how = "";
++                // Another group quest for the same place: it comes along, as
++                // one with this quest would (owner, 2026-11-27).
++                else if (HasQuestAt(bot, PlaceOf(into.quest), into.wanted))
++                    how = " for its own quest there";
+                 else if (bot->GetLevel() >= into.quest->GetMinLevel())
+                 {
+                     // A tank or a healer: up to TankLevelGap above at once,
+@@ -850,6 +859,51 @@ static std::map<uint32, uint32> const questWing =
+         { 8950, DungeonRun::WING_DM_WEST }, // The Instigator's Enchantment
+ };
+ 
++// kalimdor: where a group quest's group goes (GroupQuests::PlaceOf) - kind in
++// the high word: 1 the quest itself, 2 a dungeon or raid (map, wing), 3 a
++// world boss (its entry).
++uint64 GroupQuests::PlaceOf(Quest const* quest)
++{
++    if (!quest)
++        return 0;
++    for (int i = 0; i < QUEST_OBJECTIVES_COUNT; ++i)
++        if (quest->ReqCreatureOrGOId[i] > 0)
++            if (CreatureInfo const* info = ObjectMgr::GetCreatureTemplate(quest->ReqCreatureOrGOId[i]))
++                if (info->Rank == CREATURE_ELITE_WORLDBOSS)
++                    return (uint64(3) << 32) | uint32(quest->ReqCreatureOrGOId[i]);
++    if (quest->GetZoneOrSort() > 0)
++        if (AreaTableEntry const* area = GetAreaEntryByAreaID(quest->GetZoneOrSort()))
++            if (MapEntry const* map = sMapStore.LookupEntry(area->mapid))
++                if (map->IsDungeon())
++                {
++                    // A quest whose wing is not known goes with the others of
++                    // its dungeon whose wing is not known either: its group
++                    // goes by the dungeon's level (CanEnter).
++                    auto const wing = questWing.find(quest->GetQuestId());
++                    uint32 const w = wing != questWing.end() ? wing->second : 0;
++                    return (uint64(2) << 32) | (uint64(area->mapid) << 8) | w;
++                }
++    return (uint64(1) << 32) | quest->GetQuestId();
++}
++
++bool GroupQuests::HasQuestAt(Player* bot, uint64 place, uint32 wanted)
++{
++    // Kind 1 is one quest - the caller asked about it already.
++    if ((place >> 32) == 1)
++        return false;
++    for (uint8 slot = 0; slot < MAX_QUEST_LOG_SIZE; ++slot)
++    {
++        uint32 const questId = bot->GetQuestSlotQuestId(slot);
++        if (!questId || bot->GetQuestStatus(questId) != QUEST_STATUS_INCOMPLETE)
++            continue;
++        Quest const* quest = sObjectMgr.GetQuestTemplate(questId);
++        if (IsGroupQuest(quest) && PlaceOf(quest) == place && WantedSize(quest) == wanted && !QuestFlow::IsGrey(bot, quest) &&
++            !Skipped(bot, questId))
++            return true;
++    }
++    return false;
++}
++
+ // The lowest level a wing takes (owner, 2026-11-12: wings are not all the
+ // same level - Scarlet Monastery's Graveyard 26, its Cathedral 35).
+ static uint32 WingMinLevel(uint32 wing)
+diff --git a/playerbot/strategy/values/GroupQuests.h b/playerbot/strategy/values/GroupQuests.h
+index 1f29250..17b7d31 100644
+--- a/playerbot/strategy/values/GroupQuests.h
++++ b/playerbot/strategy/values/GroupQuests.h
+@@ -70,6 +70,16 @@ namespace ai
+         static bool IsGroupQuest(Quest const* quest);
+         // The group it needs: elite 3, dungeon 5, raid the instance's limit.
+         static uint32_t WantedSize(Quest const* quest);
++        // kalimdor: where its group goes - the queue matches by this, not by
++        // the quest (owner, 2026-11-27: two groups for two quests in one
++        // dungeon each waited half full). A dungeon or raid: its map, and its
++        // wing where known; a world boss: the boss; else the quest itself
++        // (an elite quest out in the world).
++        static uint64_t PlaceOf(Quest const* quest);
++        // It has a group quest for that place, unfinished, not grey, not
++        // skipped, of that size - one a group asking for another quest there
++        // can take along.
++        static bool HasQuestAt(Player* bot, uint64_t place, uint32_t wanted);
+         static time_t WaitFor(uint32_t wanted);
+         // Its size now: the bot's group with the invitations still open, or 1
+         // alone.
+@@ -113,8 +123,11 @@ namespace ai
+         // the middle of its update: groups and invites changed by many bots
+         // at once crashed the cluster's world server (2026-11-24). It fills
+         // a group, the bigger first, with:
+-        // - the smaller groups asking for the same quest, whole (merged);
+-        // - free bots with the quest, any level;
++        // - the smaller groups asking for the same place, whole (merged) -
++        //   its dungeon or raid (and wing), or world boss, whatever their
++        //   quest there (PlaceOf; owner, 2026-11-27);
++        // - free bots with the quest, or another group quest for the same
++        //   place, any level;
+         // - free tanks and healers within 5 levels, without it;
+         // - after HelpAfter, free bots of any role up to HelpLevelGap above
+         //   it, without it (to help).

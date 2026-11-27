@@ -1,0 +1,17 @@
+diff --git a/src/game/World/WorldState.cpp b/src/game/World/WorldState.cpp
+index 620c369..f8435cd 100644
+--- a/src/game/World/WorldState.cpp
++++ b/src/game/World/WorldState.cpp
+@@ -472,8 +472,11 @@ void WorldState::HandleExternalEvent(uint32 eventId, uint32 param)
+                 case CUSTOM_EVENT_TAERAR_DIED:  bossId = 3; break;
+             }
+             m_emeraldDragonsState |= 1 << bossId;
++            // kalimdor: back 3 days after the last of the four dies (owner,
++            // 2026-11-27; Kamino 308) - 30 hours before. The four are still
++            // shuffled over the four portals, one each (RespawnEmeraldDragons).
+             if (m_emeraldDragonsState == 0xF)
+-                m_emeraldDragonsTimer = 30 * HOUR * IN_MILLISECONDS;
++                m_emeraldDragonsTimer = 3 * DAY * IN_MILLISECONDS;
+             Save(SAVE_ID_EMERALD_DRAGONS); // save to DB right away
+             break;
+         }

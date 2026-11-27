@@ -1,0 +1,73 @@
+diff --git a/playerbot/strategy/values/DungeonRun.cpp b/playerbot/strategy/values/DungeonRun.cpp
+index 0470146..3cfb536 100644
+--- a/playerbot/strategy/values/DungeonRun.cpp
++++ b/playerbot/strategy/values/DungeonRun.cpp
+@@ -16,6 +16,7 @@
+ #include "Maps/MapPersistentStateMgr.h"
+ #include "Maps/SpawnGroup.h"
+ #include "Maps/SpawnManager.h"
++#include "Entities/Corpse.h"
+ #include "AI/EventAI/CreatureEventAIMgr.h"
+ #include "Pools/PoolManager.h"
+ #include "GameEvents/GameEventMgr.h"
+@@ -1397,15 +1398,27 @@ int DungeonRun::NoteWipe(Player* member)
+     Group* group = member->GetGroup();
+     if (!group || !member->IsInWorld())
+         return 0;
+-    uint32 here = 0, dead = 0;
++    // A wipe is every member of the group died inside this dungeon (owner,
++    // 2026-11-27) - one alive anywhere, or one that died or stayed outside,
++    // and it is not. Counting only the members found in the instance made
++    // one member killed alone inside, the rest outside, a wipe. Died inside:
++    // dead in this instance, or its corpse lies here - released, it is a
++    // ghost outside, and its corpse is where it died. Death state and
++    // corpse are plain reads, as the matcher's; offline members do not count.
++    uint32 online = 0, diedHere = 0;
+     for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+         if (Player* other = ref->getSource())
+-            if (other->IsInWorld() && other->GetMapId() == member->GetMapId() && other->GetInstanceId() == member->GetInstanceId())
+-            {
+-                ++here;
+-                dead += !other->IsAlive();
+-            }
+-    bool const wiped = here && dead == here;
++        {
++            ++online;
++            if (other->IsAlive())
++                continue;
++            bool inside = other->IsInWorld() && other->GetMapId() == member->GetMapId() && other->GetInstanceId() == member->GetInstanceId();
++            if (!inside)
++                if (Corpse* corpse = other->GetCorpse())
++                    inside = corpse->GetMapId() == member->GetMapId() && corpse->GetInstanceId() == member->GetInstanceId();
++            diedHere += inside;
++        }
++    bool const wiped = online && diedHere == online;
+     std::lock_guard<std::mutex> guard(runsLock);
+     RunRecord& record = runs[group->GetId()];
+     if (record.instance != int(member->GetInstanceId()))
+@@ -1414,7 +1427,7 @@ int DungeonRun::NoteWipe(Player* member)
+     {
+         ++record.wipes;
+         sLog.outString("Bot #%d %s:%d <%s>: wipe %d in its run (%u dead)", member->GetGUIDLow(), member->GetTeam() == ALLIANCE ? "A" : "H",
+-            member->GetLevel(), member->GetName(), record.wipes, here);
++            member->GetLevel(), member->GetName(), record.wipes, online);
+     }
+     record.wiped = wiped;
+     return record.wipes;
+diff --git a/playerbot/strategy/values/DungeonRun.h b/playerbot/strategy/values/DungeonRun.h
+index 0fd7c19..dbe1566 100644
+--- a/playerbot/strategy/values/DungeonRun.h
++++ b/playerbot/strategy/values/DungeonRun.h
+@@ -405,8 +405,10 @@ namespace ai
+         // instance - not its leader's alone. A new leader goes on from it
+         // (step, best step, wipes, escort tries); it started again from the
+         // portal, every count at 0. Wipes are counted here by any member,
+-        // dead or alive, that sees every member in the instance dead - the
+-        // leader's own check never ran while it was dead.
++        // dead or alive, that sees every member of the group died inside
++        // the dungeon (owner, 2026-11-27: one alive anywhere, or one that
++        // died outside, and it is not a wipe) - the leader's own check never
++        // ran while it was dead.
+         struct RunRecord { int instance = 0, step = 0, best = 0, wipes = 0, escortTries = 0; bool wiped = false; };
+         static bool RunRecordOf(Player* bot, RunRecord& record);
+         static void KeepRunRecord(Player* leader);

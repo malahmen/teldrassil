@@ -1,0 +1,329 @@
+diff --git a/playerbot/strategy/actions/ActionContext.h b/playerbot/strategy/actions/ActionContext.h
+index 419b4d5..333c26f 100644
+--- a/playerbot/strategy/actions/ActionContext.h
++++ b/playerbot/strategy/actions/ActionContext.h
+@@ -392,6 +392,8 @@ namespace ai
+             // Dungeon Boss Actions
+             creators["enable onyxia fight strategy"] = [](PlayerbotAI* ai) { return new OnyxiaEnableFightStrategyAction(ai); };
+             creators["disable onyxia fight strategy"] = [](PlayerbotAI* ai) { return new OnyxiaDisableFightStrategyAction(ai); };
++            creators["move out of onyxia breath"] = [](PlayerbotAI* ai) { return new OnyxiaDeepBreathMoveAction(ai); };
++            creators["move to onyxia flank"] = [](PlayerbotAI* ai) { return new OnyxiaFlankAction(ai); };
+ 
+             creators["enable magmadar fight strategy"] = [](PlayerbotAI* ai) { return new MagmadarEnableFightStrategyAction(ai); };
+             creators["disable magmadar fight strategy"] = [](PlayerbotAI* ai) { return new MagmadarDisableFightStrategyAction(ai); };
+diff --git a/playerbot/strategy/actions/OnyxiasLairDungeonActions.cpp b/playerbot/strategy/actions/OnyxiasLairDungeonActions.cpp
+index 4fd6136..53378ce 100644
+--- a/playerbot/strategy/actions/OnyxiasLairDungeonActions.cpp
++++ b/playerbot/strategy/actions/OnyxiasLairDungeonActions.cpp
+@@ -1,5 +1,56 @@
+-
+ #include "playerbot/playerbot.h"
+ #include "OnyxiasLairDungeonActions.h"
++#include "playerbot/strategy/triggers/OnyxiasLairDungeonTriggers.h"
++
++#include <cmath>
++
++using namespace ai;
++
++namespace
++{
++    // Her ring's centre and a radius inside the room's wall (her points are
++    // about 45 yd out, over the edge of the floor).
++    constexpr float CentreX = -21.6f;
++    constexpr float CentreY = -214.5f;
++    constexpr float FloorRadius = 38.0f;
++}
++
++bool OnyxiaDeepBreathMoveAction::Execute(Event& event)
++{
++    Creature* onyxia = OnyxiaFight::Find(bot);
++    float fromX, fromY, dirX, dirY, side;
++    if (!onyxia || !OnyxiaFight::Breathing(onyxia, fromX, fromY, dirX, dirY))
++        return false;
++    OnyxiaFight::LaneDistance(bot, fromX, fromY, dirX, dirY, side);
++    // Straight across the lane from where the bot stands on its middle line:
++    // the foot of the bot on that line, then out along its normal.
++    float const along = (bot->GetPositionX() - fromX) * dirX + (bot->GetPositionY() - fromY) * dirY;
++    float footX = fromX + dirX * along, footY = fromY + dirY * along;
++    float const normalX = -dirY * side, normalY = dirX * side;
++    float x = footX + normalX * OnyxiaFight::LaneSafe, y = footY + normalY * OnyxiaFight::LaneSafe;
++    // Off the floor that way: slide along the lane towards the room's centre
++    // until the point is on it.
++    for (int i = 0; i < 8 && std::hypot(x - CentreX, y - CentreY) > FloorRadius; ++i)
++    {
++        footX += (CentreX - footX) * 0.35f;
++        footY += (CentreY - footY) * 0.35f;
++        x = footX + normalX * OnyxiaFight::LaneSafe;
++        y = footY + normalY * OnyxiaFight::LaneSafe;
++    }
++    return MoveTo(bot->GetMapId(), x, y, bot->GetPositionZ(), false, true, false, true);
++}
+ 
+-using namespace ai;
+\ No newline at end of file
++bool OnyxiaFlankAction::Execute(Event& event)
++{
++    Creature* onyxia = OnyxiaFight::Find(bot);
++    if (!onyxia || OnyxiaFight::InAir(onyxia))
++        return false;
++    // Her side nearer the bot, at right angles to her facing.
++    float const toBot = onyxia->GetAngle(bot) - onyxia->GetOrientation();
++    float const flank = onyxia->GetOrientation() + (std::sin(toBot) >= 0.0f ? M_PI_F / 2.0f : -M_PI_F / 2.0f);
++    bool const melee = !ai->IsRanged(bot) && !ai->IsHeal(bot);
++    float const distance = melee ? onyxia->GetCombatReach() + 2.0f : 25.0f;
++    float const x = onyxia->GetPositionX() + distance * std::cos(flank);
++    float const y = onyxia->GetPositionY() + distance * std::sin(flank);
++    return MoveTo(bot->GetMapId(), x, y, bot->GetPositionZ(), false, true, false, true);
++}
+diff --git a/playerbot/strategy/actions/OnyxiasLairDungeonActions.h b/playerbot/strategy/actions/OnyxiasLairDungeonActions.h
+index fdbb188..368cdf1 100644
+--- a/playerbot/strategy/actions/OnyxiasLairDungeonActions.h
++++ b/playerbot/strategy/actions/OnyxiasLairDungeonActions.h
+@@ -27,4 +27,23 @@ namespace ai
+     public:
+         OnyxiaDisableFightStrategyAction(PlayerbotAI* ai) : ChangeAllStrategyAction(ai, "disable onyxia fight strategy", "-onyxia") {}
+     };
++
++    // kalimdor (Kamino 305): out of a Deep Breath's lane - across it, to the
++    // side the bot is on, kept inside the room (triggers/
++    // OnyxiasLairDungeonTriggers.h).
++    class OnyxiaDeepBreathMoveAction : public MovementAction
++    {
++    public:
++        OnyxiaDeepBreathMoveAction(PlayerbotAI* ai) : MovementAction(ai, "move out of onyxia breath") {}
++        bool Execute(Event& event) override;
++    };
++
++    // On the ground, to her flank: out of her front cone and her tail's
++    // sweep - melee by her side, ranged and healers further out.
++    class OnyxiaFlankAction : public MovementAction
++    {
++    public:
++        OnyxiaFlankAction(PlayerbotAI* ai) : MovementAction(ai, "move to onyxia flank") {}
++        bool Execute(Event& event) override;
++    };
+ }
+diff --git a/playerbot/strategy/generic/OnyxiasLairDungeonStrategies.cpp b/playerbot/strategy/generic/OnyxiasLairDungeonStrategies.cpp
+index f98aede..6065c25 100644
+--- a/playerbot/strategy/generic/OnyxiasLairDungeonStrategies.cpp
++++ b/playerbot/strategy/generic/OnyxiasLairDungeonStrategies.cpp
+@@ -11,9 +11,20 @@ void OnyxiasLairDungeonStrategy::InitCombatTriggers(std::list<TriggerNode*>& tri
+         NextAction::array(0, new NextAction("enable onyxia fight strategy", 100.0f), NULL)));
+ }
+ 
++// kalimdor (Kamino 305): the fight was switched on with nothing in it. Out of
++// each Deep Breath's lane in the air phase; on the ground, everyone but her
++// tank on her flanks, out of Flame Breath, Cleave and Tail Sweep. Fear Ward
++// (phase 3's Bellowing Roar) is the priests' own; whelps are fought as any
++// adds.
+ void OnyxiaFightStrategy::InitCombatTriggers(std::list<TriggerNode*>& triggers)
+ {
+-    // ...
++    triggers.push_back(new TriggerNode(
++        "onyxia deep breath",
++        NextAction::array(0, new NextAction("move out of onyxia breath", 100.0f), NULL)));
++
++    triggers.push_back(new TriggerNode(
++        "onyxia front or tail",
++        NextAction::array(0, new NextAction("move to onyxia flank", 95.0f), NULL)));
+ }
+ 
+ void OnyxiaFightStrategy::InitNonCombatTriggers(std::list<TriggerNode*>& triggers)
+@@ -32,5 +43,8 @@ void OnyxiaFightStrategy::InitDeadTriggers(std::list<TriggerNode*>& triggers)
+ 
+ void OnyxiaFightStrategy::InitReactionTriggers(std::list<TriggerNode*>& triggers)
+ {
+-    // ...
++    // A breath lasts seconds: out of it even mid-cast.
++    triggers.push_back(new TriggerNode(
++        "onyxia deep breath",
++        NextAction::array(0, new NextAction("move out of onyxia breath", 100.0f), NULL)));
+ }
+diff --git a/playerbot/strategy/triggers/OnyxiasLairDungeonTriggers.cpp b/playerbot/strategy/triggers/OnyxiasLairDungeonTriggers.cpp
+index efb8256..ad696f5 100644
+--- a/playerbot/strategy/triggers/OnyxiasLairDungeonTriggers.cpp
++++ b/playerbot/strategy/triggers/OnyxiasLairDungeonTriggers.cpp
+@@ -1,5 +1,119 @@
+-
+ #include "playerbot/playerbot.h"
+ #include "OnyxiasLairDungeonTriggers.h"
++#include "Grids/GridNotifiers.h"
++#include "Grids/GridNotifiersImpl.h"
++#include "Grids/CellImpl.h"
++
++#include <cmath>
++
++using namespace ai;
++
++namespace
++{
++    // The centre of her ring of 8 points (boss_onyxia.cpp aMoveData: their
++    // mean, about 45 yd from each).
++    constexpr float CentreX = -21.6f;
++    constexpr float CentreY = -214.5f;
++
++    bool IsBreath(uint32 spellId)
++    {
++        switch (spellId)
++        {
++            case 17086: case 18351:     // north to south, south to north
++            case 18576: case 18609:     // east to west, west to east
++            case 18564: case 18584:     // south-east to north-west, and back
++            case 18596: case 18617:     // south-west to north-east, and back
++            case 21131:                 // into the entrance tunnel
++                return true;
++            default:
++                return false;
++        }
++    }
++}
++
++Creature* OnyxiaFight::Find(Player* bot)
++{
++    if (!bot->IsInWorld() || bot->IsBeingTeleported() || bot->GetMapId() != 249)
++        return nullptr;
++    std::list<Unit*> found;
++    MaNGOS::AllCreaturesOfEntryInRangeCheck check(bot, Entry, 150.0f);
++    MaNGOS::UnitListSearcher<MaNGOS::AllCreaturesOfEntryInRangeCheck> searcher(found, check);
++    Cell::VisitAllObjects(bot, searcher, 150.0f);
++    for (Unit* unit : found)
++        if (unit->IsAlive() && unit->IsInCombat())
++            return static_cast<Creature*>(unit);
++    return nullptr;
++}
++
++bool OnyxiaFight::InAir(Creature* onyxia)
++{
++    return onyxia && onyxia->IsHovering();
++}
++
++bool OnyxiaFight::Breathing(Creature* onyxia, float& fromX, float& fromY, float& dirX, float& dirY)
++{
++    Spell* spell = nullptr;
++    for (CurrentSpellTypes type : { CURRENT_GENERIC_SPELL, CURRENT_CHANNELED_SPELL })
++        if (Spell* current = onyxia ? onyxia->GetCurrentSpell(type) : nullptr)
++            if (current->m_spellInfo && IsBreath(current->m_spellInfo->Id))
++                spell = current;
++    if (!spell)
++        return false;
++    fromX = onyxia->GetPositionX();
++    fromY = onyxia->GetPositionY();
++    float dx = CentreX - fromX, dy = CentreY - fromY;
++    float length = std::sqrt(dx * dx + dy * dy);
++    // The tunnel breath, or a breath from near the centre: along her facing.
++    if (spell->m_spellInfo->Id == 21131 || length < 10.0f)
++    {
++        dx = std::cos(onyxia->GetOrientation());
++        dy = std::sin(onyxia->GetOrientation());
++        length = 1.0f;
++    }
++    dirX = dx / length;
++    dirY = dy / length;
++    return true;
++}
++
++float OnyxiaFight::LaneDistance(Player* bot, float fromX, float fromY, float dirX, float dirY, float& side)
++{
++    float const px = bot->GetPositionX() - fromX, py = bot->GetPositionY() - fromY;
++    // The signed distance from the lane's middle line (the cross product).
++    float const cross = dirX * py - dirY * px;
++    side = cross >= 0.0f ? 1.0f : -1.0f;
++    return std::fabs(cross);
++}
++
++bool OnyxiaFight::InFrontOrTail(Player* bot, Creature* onyxia)
++{
++    if (!bot->IsWithinDist(onyxia, 35.0f))
++        return false;
++    // The angle between her facing and the bot, 0 straight ahead, pi behind.
++    float angle = onyxia->GetAngle(bot) - onyxia->GetOrientation();
++    while (angle > M_PI_F)
++        angle -= 2.0f * M_PI_F;
++    while (angle < -M_PI_F)
++        angle += 2.0f * M_PI_F;
++    angle = std::fabs(angle);
++    // Flame Breath and Cleave in front (60 degrees either side); Tail Sweep
++    // behind (45 degrees either side, at the reach her tail has).
++    return angle < M_PI_F / 3.0f || (angle > M_PI_F * 0.75f && bot->IsWithinDist(onyxia, 25.0f));
++}
++
++bool OnyxiaDeepBreathTrigger::IsActive()
++{
++    Creature* onyxia = OnyxiaFight::Find(bot);
++    float fromX, fromY, dirX, dirY, side;
++    if (!onyxia || !bot->IsAlive() || !OnyxiaFight::Breathing(onyxia, fromX, fromY, dirX, dirY))
++        return false;
++    return OnyxiaFight::LaneDistance(bot, fromX, fromY, dirX, dirY, side) < OnyxiaFight::LaneHalfWidth;
++}
+ 
+-using namespace ai;
+\ No newline at end of file
++bool OnyxiaFrontOrTailTrigger::IsActive()
++{
++    Creature* onyxia = OnyxiaFight::Find(bot);
++    // Her tank stands in front, facing her away; everyone else on her flanks.
++    if (!onyxia || !bot->IsAlive() || OnyxiaFight::InAir(onyxia) || onyxia->GetVictim() == bot)
++        return false;
++    return OnyxiaFight::InFrontOrTail(bot, onyxia);
++}
+diff --git a/playerbot/strategy/triggers/OnyxiasLairDungeonTriggers.h b/playerbot/strategy/triggers/OnyxiasLairDungeonTriggers.h
+index 897c9c8..ba26214 100644
+--- a/playerbot/strategy/triggers/OnyxiasLairDungeonTriggers.h
++++ b/playerbot/strategy/triggers/OnyxiasLairDungeonTriggers.h
+@@ -26,4 +26,42 @@ namespace ai
+     public:
+         OnyxiaEndFightTrigger(PlayerbotAI* ai) : EndBossFightTrigger(ai, "end onyxia fight", "onyxia", 10184) {}
+     };
++
++    // kalimdor: Onyxia's fight (Kamino 305). Her script (ScriptDevAI
++    // kalimdor/onyxias_lair/boss_onyxia.cpp) hovers her in phase 2
++    // (SetHover: IsHovering) - she never flies, so mod-playerbots' IsFlying()
++    // phase check does not port - between 8 points on a ring around the room,
++    // each Deep Breath cast from her point straight across it, through the
++    // centre, one spell per direction.
++    namespace OnyxiaFight
++    {
++        static constexpr uint32 Entry = 10184;
++        // Alive, in reach of the bot (the room is ~100 yd across).
++        Creature* Find(Player* bot);
++        bool InAir(Creature* onyxia);
++        // Casting a Deep Breath: the lane it burns, from her through the
++        // room's centre (or along her facing, for the tunnel breath).
++        bool Breathing(Creature* onyxia, float& fromX, float& fromY, float& dirX, float& dirY);
++        // The bot's distance from the lane's middle line, and on which side.
++        float LaneDistance(Player* bot, float fromX, float fromY, float dirX, float dirY, float& side);
++        static constexpr float LaneHalfWidth = 16.0f;
++        static constexpr float LaneSafe = 24.0f;
++        // On the ground: in her front cone (Flame Breath, Cleave) or behind
++        // her (Tail Sweep).
++        bool InFrontOrTail(Player* bot, Creature* onyxia);
++    }
++
++    class OnyxiaDeepBreathTrigger : public Trigger
++    {
++    public:
++        OnyxiaDeepBreathTrigger(PlayerbotAI* ai) : Trigger(ai, "onyxia deep breath") {}
++        bool IsActive() override;
++    };
++
++    class OnyxiaFrontOrTailTrigger : public Trigger
++    {
++    public:
++        OnyxiaFrontOrTailTrigger(PlayerbotAI* ai) : Trigger(ai, "onyxia front or tail") {}
++        bool IsActive() override;
++    };
+ }
+\ No newline at end of file
+diff --git a/playerbot/strategy/triggers/TriggerContext.h b/playerbot/strategy/triggers/TriggerContext.h
+index 86e9e88..678d8e7 100644
+--- a/playerbot/strategy/triggers/TriggerContext.h
++++ b/playerbot/strategy/triggers/TriggerContext.h
+@@ -354,6 +354,8 @@ namespace ai
+             // Dungeon Boss Triggers
+             creators["start onyxia fight"] = [](PlayerbotAI* ai) { return new OnyxiaStartFightTrigger(ai); };
+             creators["end onyxia fight"] = [](PlayerbotAI* ai) { return new OnyxiaEndFightTrigger(ai); };
++            creators["onyxia deep breath"] = [](PlayerbotAI* ai) { return new OnyxiaDeepBreathTrigger(ai); };
++            creators["onyxia front or tail"] = [](PlayerbotAI* ai) { return new OnyxiaFrontOrTailTrigger(ai); };
+ 
+             creators["start magmadar fight"] = [](PlayerbotAI* ai) { return new MagmadarStartFightTrigger(ai); };
+             creators["end magmadar fight"] = [](PlayerbotAI* ai) { return new MagmadarEndFightTrigger(ai); };

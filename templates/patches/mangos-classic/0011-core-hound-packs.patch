@@ -1,0 +1,158 @@
+diff --git a/src/game/AI/ScriptDevAI/scripts/eastern_kingdoms/molten_core/molten_coreScripts.cpp b/src/game/AI/ScriptDevAI/scripts/eastern_kingdoms/molten_core/molten_coreScripts.cpp
+index ff4877b..28e0572 100644
+--- a/src/game/AI/ScriptDevAI/scripts/eastern_kingdoms/molten_core/molten_coreScripts.cpp
++++ b/src/game/AI/ScriptDevAI/scripts/eastern_kingdoms/molten_core/molten_coreScripts.cpp
+@@ -71,6 +71,142 @@ struct FireBlossom : public AuraScript
+     }
+ };
+ 
++/*######
++## npc_core_hound - kalimdor (Kamino 307)
++######*/
++
++// A Core Hound pack dies together: a hound brought down while another of its
++// pack lives collapses and smolders, and reignites at full health 10 seconds
++// later unless the whole pack is down by then - the game's own texts (7866,
++// 7867) were in the database, and nothing used them: they died one by one,
++// with only their Serrated Bite (their EventAI, replaced by this).
++enum
++{
++    NPC_CORE_HOUND          = 11671,
++    SPELL_SERRATED_BITE     = 19771,
++    EMOTE_SMOLDER           = 7866,     // "%s collapses and begins to smolder."
++    EMOTE_REIGNITE          = 7867,     // "%s reignites from the heat of another Core Hound!"
++};
++
++static constexpr float CoreHoundPackRange = 40.0f;
++static constexpr uint32 CoreHoundReigniteTime = 10 * IN_MILLISECONDS;
++
++struct npc_core_houndAI : public ScriptedAI
++{
++    npc_core_houndAI(Creature* creature) : ScriptedAI(creature) { Reset(); }
++
++    bool m_smoldering = false;
++    uint32 m_reigniteTimer = 0;
++    uint32 m_biteTimer = 0;
++
++    void Reset() override
++    {
++        if (m_smoldering)
++            Rise();
++        m_biteTimer = urand(5000, 9000);
++        SetDeathPrevention(true);
++    }
++
++    // Its pack: the Core Hounds near it, itself too, smoldering or not.
++    CreatureList Pack()
++    {
++        CreatureList pack;
++        GetCreatureListWithEntryInGrid(pack, m_creature, NPC_CORE_HOUND, CoreHoundPackRange);
++        return pack;
++    }
++
++    static npc_core_houndAI* HoundOf(Creature* hound)
++    {
++        return hound ? dynamic_cast<npc_core_houndAI*>(hound->AI()) : nullptr;
++    }
++
++    // A hound of the pack still up and fighting.
++    bool PackFights()
++    {
++        for (Creature* hound : Pack())
++            if (hound != m_creature && hound->IsAlive())
++                if (npc_core_houndAI* ai = HoundOf(hound))
++                    if (!ai->m_smoldering)
++                        return true;
++        return false;
++    }
++
++    // The whole pack down: every smoldering hound dies now.
++    void KillPack()
++    {
++        for (Creature* hound : Pack())
++            if (hound->IsAlive())
++                if (npc_core_houndAI* ai = HoundOf(hound))
++                    if (ai->m_smoldering)
++                    {
++                        ai->SetDeathPrevention(false);
++                        hound->DealDamage(hound, hound, hound->GetHealth(), nullptr, DIRECT_DAMAGE, SPELL_SCHOOL_MASK_NORMAL, nullptr, false);
++                    }
++    }
++
++    void JustPreventedDeath(Unit* /*attacker*/) override
++    {
++        // Hit again while smoldering (an area spell): it smolders on.
++        if (m_smoldering)
++            return;
++        m_smoldering = true;
++        m_reigniteTimer = CoreHoundReigniteTime;
++        DoBroadcastText(EMOTE_SMOLDER, m_creature);
++        m_creature->AttackStop();
++        SetCombatMovement(false, true);
++        SetMeleeEnabled(false);
++        m_creature->SetStandState(UNIT_STAND_STATE_DEAD);
++        m_creature->SetFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_UNTARGETABLE);
++        // The last of its pack down: the pack dies on its next update - not
++        // from inside the damage that brought it down.
++        if (!PackFights())
++            m_reigniteTimer = 1;
++    }
++
++    void Rise()
++    {
++        m_smoldering = false;
++        m_creature->RemoveFlag(UNIT_FIELD_FLAGS, UNIT_FLAG_UNTARGETABLE);
++        m_creature->SetStandState(UNIT_STAND_STATE_STAND);
++        SetMeleeEnabled(true);
++        SetCombatMovement(true, true);
++    }
++
++    void UpdateAI(const uint32 diff) override
++    {
++        if (m_smoldering)
++        {
++            if (m_reigniteTimer > diff)
++            {
++                m_reigniteTimer -= diff;
++                return;
++            }
++            if (!PackFights())
++            {
++                KillPack();
++                return;
++            }
++            Rise();
++            m_creature->SetHealth(m_creature->GetMaxHealth());
++            DoBroadcastText(EMOTE_REIGNITE, m_creature);
++            return;
++        }
++
++        if (!m_creature->SelectHostileTarget() || !m_creature->GetVictim())
++            return;
++
++        if (m_biteTimer <= diff)
++        {
++            if (DoCastSpellIfCan(m_creature->GetVictim(), SPELL_SERRATED_BITE) == CAST_OK)
++                m_biteTimer = urand(5000, 9000);
++        }
++        else
++            m_biteTimer -= diff;
++
++        DoMeleeAttackIfReady();
++    }
++};
++
+ void AddSC_molten_core()
+ {
+     Script* pNewScript;
+@@ -80,5 +216,10 @@ void AddSC_molten_core()
+     pNewScript->pGOUse = &GOUse_go_molten_core_rune;
+     pNewScript->RegisterSelf();
+ 
++    pNewScript = new Script;
++    pNewScript->Name = "npc_core_hound";
++    pNewScript->GetAI = &GetNewAIInstance<npc_core_houndAI>;
++    pNewScript->RegisterSelf();
++
+     RegisterSpellScript<FireBlossom>("spell_fire_blossom");
+ }

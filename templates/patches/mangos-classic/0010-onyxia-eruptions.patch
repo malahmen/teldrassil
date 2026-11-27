@@ -1,0 +1,67 @@
+diff --git a/src/game/AI/ScriptDevAI/scripts/kalimdor/onyxias_lair/boss_onyxia.cpp b/src/game/AI/ScriptDevAI/scripts/kalimdor/onyxias_lair/boss_onyxia.cpp
+index 9a223ef..8b2bdcf 100644
+--- a/src/game/AI/ScriptDevAI/scripts/kalimdor/onyxias_lair/boss_onyxia.cpp
++++ b/src/game/AI/ScriptDevAI/scripts/kalimdor/onyxias_lair/boss_onyxia.cpp
+@@ -454,7 +454,13 @@ struct boss_onyxiaAI : public CombatAI
+             case ONYXIA_BELLOWING_ROAR:
+             {
+                 if (DoCastSpellIfCan(nullptr, SPELL_BELLOWINGROAR) == CAST_OK)
++                {
++                    // kalimdor (Kamino 306): the roar makes the floor's lava
++                    // fissures erupt - who stands on a crack burns.
++                    if (m_instance)
++                        m_instance->EruptFissures(m_creature);
+                     ResetCombatAction(action, urand(15000, 45000));
++                }
+                 break;
+             }
+             case ONYXIA_FLAME_BREATH:
+diff --git a/src/game/AI/ScriptDevAI/scripts/kalimdor/onyxias_lair/instance_onyxias_lair.cpp b/src/game/AI/ScriptDevAI/scripts/kalimdor/onyxias_lair/instance_onyxias_lair.cpp
+index f18a64b..baf8157 100644
+--- a/src/game/AI/ScriptDevAI/scripts/kalimdor/onyxias_lair/instance_onyxias_lair.cpp
++++ b/src/game/AI/ScriptDevAI/scripts/kalimdor/onyxias_lair/instance_onyxias_lair.cpp
+@@ -75,9 +75,24 @@ void instance_onyxias_lair::OnObjectCreate(GameObject* pGo)
+                 // pGO->CastSpell(pGO, SPELL_SUMMONWHELP, TRIGGERED_NONE);
+             }
+             break;
++        default:
++            // kalimdor (Kamino 306): the Lava Fissures - 52 trap objects
++            // (176513-176515, 176809-176842, 176908-176922) casting Eruption
++            // 17731, with no trigger radius: nothing used them, so the floor
++            // never erupted.
++            if (pGo->GetGOInfo()->type == GAMEOBJECT_TYPE_TRAP && pGo->GetGOInfo()->trap.spellId == 17731)
++                m_lFissureGUIDList.push_back(pGo->GetObjectGuid());
++            break;
+     }
+ }
+ 
++void instance_onyxias_lair::EruptFissures(Unit* onyxia)
++{
++    for (ObjectGuid const& guid : m_lFissureGUIDList)
++        if (GameObject* fissure = instance->GetGameObject(guid))
++            fissure->Use(onyxia);
++}
++
+ void instance_onyxias_lair::SetData(uint32 uiType, uint32 uiData)
+ {
+     if (uiType != TYPE_ONYXIA)
+diff --git a/src/game/AI/ScriptDevAI/scripts/kalimdor/onyxias_lair/onyxias_lair.h b/src/game/AI/ScriptDevAI/scripts/kalimdor/onyxias_lair/onyxias_lair.h
+index 5440f1d..25c7fdd 100644
+--- a/src/game/AI/ScriptDevAI/scripts/kalimdor/onyxias_lair/onyxias_lair.h
++++ b/src/game/AI/ScriptDevAI/scripts/kalimdor/onyxias_lair/onyxias_lair.h
+@@ -36,10 +36,15 @@ class instance_onyxias_lair : public ScriptedInstance
+ 
+         void SetData(uint32 uiType, uint32 uiData) override;
+ 
++        // kalimdor: the lair's Lava Fissures erupt (their trap, Eruption
++        // 17731) - Onyxia's phase-3 Bellowing Roar (Kamino 306).
++        void EruptFissures(Unit* onyxia);
++
+     protected:
+         uint32 m_uiEncounter;
+ 
+         GuidList m_lWarderGUIDList;
++        GuidList m_lFissureGUIDList;
+         time_t m_tPhaseTwoStart;
+ };
+ 
