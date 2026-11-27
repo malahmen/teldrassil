@@ -451,11 +451,11 @@ bot in five a tank, one in five a healer, at this population.
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries sixty-nine changes to playerbots (`templates/patches/playerbots/`)
+teldrassil carries seventy changes to playerbots (`templates/patches/playerbots/`)
 and twelve to the core (`templates/patches/mangos-classic/`), applied in order
 before every build to the pinned upstreams - together they make kalimdor's tree
 exactly (checked: the stack on kalimdor's untouched import gives kalimdor
-`98b410a` with its branches for Kamino 300-308 merged in order, both trees;
+`79ae5e3` with its branches for Kamino 300-308 merged in order, both trees;
 see the newest patches below). Sources that are kalimdor itself (`PROVENANCE.md` at
 their root - `SOURCE_REPO`, or `SOURCE_DIR` on a kalimdor clone) commit their
 changes: nothing is applied to them or taken off, so a kalimdor branch ahead
@@ -742,7 +742,7 @@ on `SSH_HOST` the server's image applies its own (Kamino 298).
   less, as the server - unsold items vanish instead of being mailed to a
   random bot - and buys only as its own character (`AhBot.GUID`), if set.
   (Kamino 273, 2026-11-09.)
-- **Ahead of kalimdor `main` (2026-11-27):** 0065-0069 and core 0009-0012 are
+- **Ahead of kalimdor `main` (2026-11-27; `main` at `79ae5e3`, with 0065):** 0066-0070 and core 0009-0012 are
   kalimdor branches not merged yet, in this order: `fix/combat-watchdog`,
   `fix/lfg-by-place`, `fix/wipe-whole-group`, `fix/marli-spell-lists`,
   `fix/jeklik-swoop` (`sql/` only), `fix/naxx-strategy-switch`,
@@ -757,20 +757,24 @@ on `SSH_HOST` the server's image applies its own (Kamino 298).
   2026-11-27.)
 - **mangos-classic 0010:** Onyxia's phase-3 Bellowing Roar makes the lair's
   lava fissures erupt. (Kamino 306, 2026-11-27.)
-- **playerbots 0069:** an Onyxia fight strategy - out of each Deep Breath's
+- **playerbots 0070:** an Onyxia fight strategy - out of each Deep Breath's
   lane, and everyone but her target on her flanks on the ground. (Kamino 305,
   2026-11-27.)
-- **playerbots 0068:** Naxxramas's bot strategy switched on (the Four
+- **playerbots 0069:** Naxxramas's bot strategy switched on (the Four
   Horsemen's Void Zones), and off again after the fight. (Kamino 305,
   2026-11-27.)
 - **mangos-classic 0009:** Mar'li casts her own spells, not Venoxis's. (Kamino
   303, 2026-11-27.) Jeklik's Swoop (Kamino 304) is `sql/0005` only.
-- **playerbots 0067:** a wipe is every member of the group died inside the
+- **playerbots 0068:** a wipe is every member of the group died inside the
   dungeon. (Kamino 302, 2026-11-27.)
-- **playerbots 0066:** the group queue matches by place - dungeon, wing or
+- **playerbots 0067:** the group queue matches by place - dungeon, wing or
   world boss - not by quest. (Kamino 301, 2026-11-27.)
-- **playerbots 0065:** a combat watchdog - a bot in combat 2 minutes with no
+- **playerbots 0066:** a combat watchdog - a bot in combat 2 minutes with no
   real fight near it is taken out of combat. (Kamino 300, 2026-11-27.)
+- **playerbots 0065:** no stealth on a dungeon run or its way in - rogues
+  neither stealth nor prowl, and leave it at once: a stealthed rogue leader
+  stood still until what respawned there two hours later attacked it.
+  (kalimdor #1 on GitHub, 2026-11-27.)
 - **playerbots 0064, mangos-classic 0008:** run records - each run, boss
   kills for everyone there, and lifetime totals in `kalimdor_*` tables the
   server creates itself; nothing grows for good. (kalimdor #70, 2026-11-27.)
