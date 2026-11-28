@@ -1,0 +1,62 @@
+diff --git a/playerbot/PlayerbotMgr.cpp b/playerbot/PlayerbotMgr.cpp
+index 3c02eec..9008ce6 100644
+--- a/playerbot/PlayerbotMgr.cpp
++++ b/playerbot/PlayerbotMgr.cpp
+@@ -500,6 +500,40 @@ void PlayerbotHolder::OnBotLogin(Player * const bot)
+         }
+     }
+ 
++    // kalimdor: a random bot logging in inside a dungeon or a raid with no
++    // player in its group - after a restart its bots-only group was left just
++    // above, and the run with it - is put at the dungeon's entrance (owner,
++    // 2026-11-28). Left there, it was sent to its hearth 60 seconds later
++    // without a word (Group::_homebindIfInstance: Condrin, out of Ragefire
++    // Chasm to Undercity), or, its group already gone, stood in the dungeon
++    // alone (Calsich, Shadowfang Keep, dev).
++    if (!ai->HasRealPlayerMaster() && sRandomPlayerbotMgr.IsRandomBot(bot) && bot->GetMap() && bot->GetMap()->IsDungeon())
++    {
++        bool withPlayer = false;
++        if (Group* now = bot->GetGroup())
++            for (GroupReference* ref = now->GetFirstMember(); ref; ref = ref->next())
++                if (Player* member = ref->getSource())
++                    if (!member->GetPlayerbotAI() || member->GetPlayerbotAI()->IsRealPlayer())
++                        withPlayer = true;
++        if (!withPlayer)
++        {
++            MapEntry const* entry = sMapStore.LookupEntry(bot->GetMapId());
++            char const* place = entry ? entry->name[0] : "a dungeon";
++            if (AreaTrigger const* out = sObjectMgr.GetGoBackTrigger(bot->GetMapId()))
++            {
++                sLog.outString("Bot #%d %s:%d <%s>: logs in inside %s with no group there - put at its entrance", bot->GetGUIDLow(),
++                    bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), place);
++                bot->TeleportTo(out->target_mapId, out->target_X, out->target_Y, out->target_Z, out->target_Orientation);
++            }
++            else
++            {
++                sLog.outString("Bot #%d %s:%d <%s>: logs in inside %s with no group there - no entrance known, sent to its hearth", bot->GetGUIDLow(),
++                    bot->GetTeam() == ALLIANCE ? "A" : "H", bot->GetLevel(), bot->GetName(), place);
++                bot->TeleportToHomebind();
++            }
++        }
++    }
++
+     ai->ResetStrategies();
+ 
+     if (master && !master->IsTaxiFlying())
+diff --git a/playerbot/strategy/triggers/DungeonRunTrigger.cpp b/playerbot/strategy/triggers/DungeonRunTrigger.cpp
+index b9027ef..36612d1 100644
+--- a/playerbot/strategy/triggers/DungeonRunTrigger.cpp
++++ b/playerbot/strategy/triggers/DungeonRunTrigger.cpp
+@@ -101,6 +101,12 @@ bool DungeonRunTrigger::IsActive()
+     // Done here: this instance, and on a map with wings this wing.
+     if (AI_VALUE2(int, "manual int", "run done instance") == instance && AI_VALUE2(int, "manual int", "run done wing") == int(DungeonRun::RunWing(bot)))
+         return false;
++    // kalimdor: a new run only for a group set off on its group quest - not
++    // a group that happens to be inside, as one left over by a restart
++    // (owner, 2026-11-28: Condrin's "run" of 2 in Ragefire Chasm after the
++    // restart, its group taken apart as its bots logged in).
++    if (AI_VALUE2(int, "manual int", "group quest focus") <= 0)
++        return false;
+     return !DungeonRun::BossesOf(bot->GetMapId()).empty();
+ }
+ 
