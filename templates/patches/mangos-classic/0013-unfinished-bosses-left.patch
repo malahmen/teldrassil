@@ -1,0 +1,18 @@
+diff --git a/src/game/Entities/Unit.cpp b/src/game/Entities/Unit.cpp
+index 325fe0f..7a697e4 100644
+--- a/src/game/Entities/Unit.cpp
++++ b/src/game/Entities/Unit.cpp
+@@ -1083,6 +1083,13 @@ void Unit::MakeKalimdorRecordTables()
+         CharacterDatabase.DirectExecute(sql);
+     // A run still on as the world starts was cut off by the stop: unfinished.
+     CharacterDatabase.DirectExecute("UPDATE `kalimdor_run` SET `result` = 3, `ended` = UNIX_TIMESTAMP() WHERE `result` = 0");
++    // Its bosses left counted as a run given up counts them (DungeonRun.cpp):
++    // its bosses less those killed in its copy while it was on. Runs marked
++    // unfinished before this were left at 0 - counted again here too, while
++    // their kills are kept (a run with none left counts 0 again).
++    CharacterDatabase.DirectExecute("UPDATE `kalimdor_run` r SET r.`bosses_left` = GREATEST(0, CAST(r.`bosses` AS SIGNED) -"
++        " (SELECT COUNT(DISTINCT k.`boss`) FROM `kalimdor_boss_kill` k WHERE k.`map` = r.`map` AND k.`instance` = r.`instance`"
++        " AND k.`time` >= r.`started` AND k.`time` <= r.`ended`)) WHERE r.`result` = 3 AND r.`bosses_left` = 0");
+ 
+     // Totals new, rows already there (recorded before the totals were):
+     // filled from them once.
