@@ -451,14 +451,13 @@ bot in five a tank, one in five a healer, at this population.
   level); `"random"`, the default, rolls them. It too takes a fresh population
   to apply to bots that exist already.
 
-teldrassil carries seventy changes to playerbots (`templates/patches/playerbots/`)
+teldrassil carries seventy-one changes to playerbots (`templates/patches/playerbots/`)
 and twelve to the core (`templates/patches/mangos-classic/`), applied in order
 before every build to the pinned upstreams - together they make kalimdor's tree
 exactly (checked: the stack on kalimdor's untouched import gives kalimdor
-`79ae5e3` with its branches for Kamino 300-308 merged in order, both trees;
-see the newest patches below). Sources that are kalimdor itself (`PROVENANCE.md` at
-their root - `SOURCE_REPO`, or `SOURCE_DIR` on a kalimdor clone) commit their
-changes: nothing is applied to them or taken off, so a kalimdor branch ahead
+`f39b29a`, both trees; see the newest patches below). Sources that are
+kalimdor itself (`PROVENANCE.md` at their root - `SOURCE_REPO`, or
+`SOURCE_DIR` on a kalimdor clone) commit their changes: nothing is applied to them or taken off, so a kalimdor branch ahead
 of the stack builds as it is (Kamino 290).
 
 kalimdor's world-database additions - its `sql/`: travel nodes, item rarity,
@@ -742,13 +741,12 @@ on `SSH_HOST` the server's image applies its own (Kamino 298).
   less, as the server - unsold items vanish instead of being mailed to a
   random bot - and buys only as its own character (`AhBot.GUID`), if set.
   (Kamino 273, 2026-11-09.)
-- **Ahead of kalimdor `main` (2026-11-27; `main` at `79ae5e3`, with 0065):** 0066-0070 and core 0009-0012 are
-  kalimdor branches not merged yet, in this order: `fix/combat-watchdog`,
-  `fix/lfg-by-place`, `fix/wipe-whole-group`, `fix/marli-spell-lists`,
-  `fix/jeklik-swoop` (`sql/` only), `fix/naxx-strategy-switch`,
-  `feat/onyxia-strategy`, `fix/onyxia-eruptions`, `fix/core-hound-packs`,
-  `fix/emerald-dragons-respawn`. Merged in another order, or changed before
-  merging, they are made again from kalimdor's merges.
+- **playerbots 0071:** a run its group left is given up and recorded so -
+  at once when the group breaks up, or after 10 minutes with none of it in
+  the dungeon (a ghost whose corpse lies there counts), with its wipes, its
+  bosses left and a "given up" for each member seen inside; before, such a
+  run stayed on until the next restart marked it unfinished.
+  (kalimdor #82, 2026-11-28.)
 - **mangos-classic 0012:** the Emerald Dragons come back 3 days after the last
   of the four dies (30 hours before). (Kamino 308, 2026-11-27.)
 - **mangos-classic 0011:** Molten Core's Core Hound packs die together - a

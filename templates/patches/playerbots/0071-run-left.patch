@@ -1,0 +1,244 @@
+diff --git a/playerbot/RandomPlayerbotMgr.cpp b/playerbot/RandomPlayerbotMgr.cpp
+index 3fc3a59..93af406 100644
+--- a/playerbot/RandomPlayerbotMgr.cpp
++++ b/playerbot/RandomPlayerbotMgr.cpp
+@@ -695,6 +695,16 @@ void RandomPlayerbotMgr::UpdateAIInternal(uint32 elapsed, bool minimal)
+             GroupQuests::Match();
+         }
+     }
++    // kalimdor: runs left given up (DungeonRun::SweepRuns; owner, 2026-11-27).
++    {
++        static time_t nextSweep = 0;
++        time_t const now = time(nullptr);
++        if (now >= nextSweep)
++        {
++            nextSweep = now + DungeonRun::SweepEvery;
++            DungeonRun::SweepRuns();
++        }
++    }
+ 
+ #ifdef MEMORY_MONITOR
+     sMemoryMonitor.LogCount(sConfig.GetStringDefault("LogsDir") + "/" + "memory.csv");
+diff --git a/playerbot/strategy/values/DungeonRun.cpp b/playerbot/strategy/values/DungeonRun.cpp
+index 3cfb536..b26a91d 100644
+--- a/playerbot/strategy/values/DungeonRun.cpp
++++ b/playerbot/strategy/values/DungeonRun.cpp
+@@ -2480,11 +2480,74 @@ void DungeonRun::RecordBossDeath(Player* killer, Creature* boss)
+             " ON DUPLICATE KEY UPDATE `kills` = `kills` + 1", member->GetGUIDLow(), boss->GetEntry(), boss->GetMapId());
+ }
+ 
++namespace
++{
++    // kalimdor: the runs on, by copy (map, instance): its leader and group,
++    // the members seen in it, when one of its group was last there
++    // (RecordRunStart, RecordRunEnd, SweepRuns).
++    struct OpenRun { uint32 leader = 0, group = 0; std::string dungeon; std::set<uint32> members; time_t seen = 0; };
++    std::mutex openRunsLock;
++    std::map<std::pair<uint32, uint32>, OpenRun> openRuns;
++
++    // Its group's wipes in the copy (NoteWipe's record of the run).
++    int WipesOf(uint32 group, uint32 instance)
++    {
++        std::lock_guard<std::mutex> guard(runsLock);
++        auto const at = runs.find(group);
++        return at != runs.end() && at->second.instance == int(instance) ? at->second.wipes : 0;
++    }
++
++    // A run left: given up, its members' totals - those seen in the copy.
++    // Its bosses left: those not killed in the copy since it started. Under
++    // openRunsLock.
++    void GiveUpLeftRun(std::pair<uint32, uint32> const& copy, OpenRun const& run, int wipes, char const* why)
++    {
++        Player* leader = sObjectMgr.GetPlayer(ObjectGuid(HIGHGUID_PLAYER, run.leader), false);
++        if (leader)
++            sLog.outString("Bot #%d %s:%d <%s>: its group's run in %s (copy %u) given up - %s", leader->GetGUIDLow(),
++                leader->GetTeam() == ALLIANCE ? "A" : "H", leader->GetLevel(), leader->GetName(), run.dungeon.c_str(), copy.second, why);
++        else
++            sLog.outString("Bot #%u: its group's run in %s (copy %u) given up - %s", run.leader, run.dungeon.c_str(), copy.second, why);
++        std::string name = run.dungeon;
++        CharacterDatabase.escape_string(name);
++        CharacterDatabase.PExecute("UPDATE `kalimdor_run` r SET r.`ended` = %u, r.`result` = 2, r.`wipes` = %u, r.`bosses_left` = GREATEST(0, CAST(r.`bosses` AS SIGNED) -"
++            " (SELECT COUNT(DISTINCT k.`boss`) FROM `kalimdor_boss_kill` k WHERE k.`map` = r.`map` AND k.`instance` = r.`instance` AND k.`time` >= r.`started`))"
++            " WHERE r.`map` = %u AND r.`instance` = %u AND r.`result` = 0", uint32(time(nullptr)), uint32(std::max(0, wipes)), copy.first, copy.second);
++        for (uint32 member : run.members)
++            CharacterDatabase.PExecute("INSERT INTO `kalimdor_run_total` (`guid`, `map`, `dungeon`, `cleared`, `given_up`) VALUES (%u, %u, '%s', 0, 1)"
++                " ON DUPLICATE KEY UPDATE `given_up` = `given_up` + 1", member, copy.first, name.c_str());
++        // Its bots' run here forgotten (on the world's own update, none is
++        // updating): back in the copy, a new run starts and is recorded.
++        for (uint32 low : run.members)
++            if (Player* member = sObjectMgr.GetPlayer(ObjectGuid(HIGHGUID_PLAYER, low), false))
++                if (member->GetPlayerbotAI() && !member->GetPlayerbotAI()->IsRealPlayer())
++                    if (Value<int>* value = member->GetPlayerbotAI()->GetAiObjectContext()->GetValue<int>("manual int", "run instance"))
++                        if (value->Get() == int(copy.second))
++                            value->Set(0);
++    }
++}
++
+ void DungeonRun::RecordRunStart(Player* leader, char const* dungeon, uint32 bosses)
+ {
+     Group* group = leader->GetGroup();
+     std::string name = dungeon;
+     CharacterDatabase.escape_string(name);
++    std::pair<uint32, uint32> const copy{ leader->GetMapId(), leader->GetInstanceId() };
++    {
++        std::lock_guard<std::mutex> guard(openRunsLock);
++        auto const before = openRuns.find(copy);
++        if (before != openRuns.end())
++            GiveUpLeftRun(copy, before->second, WipesOf(before->second.group, copy.second), "the copy's run started again");
++        OpenRun& run = openRuns[copy];
++        run = OpenRun{ leader->GetGUIDLow(), group ? group->GetId() : 0, dungeon };
++        run.seen = time(nullptr);
++        run.members.insert(leader->GetGUIDLow());
++        if (group)
++            for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
++                if (Player* member = ref->getSource())
++                    if (member->IsInWorld() && member->GetMapId() == copy.first && member->GetInstanceId() == copy.second)
++                        run.members.insert(member->GetGUIDLow());
++    }
+     CharacterDatabase.PExecute("INSERT INTO `kalimdor_run` (`started`, `map`, `instance`, `dungeon`, `leader`, `faction`, `members`, `bosses`)"
+         " VALUES (%u, %u, %u, '%s', %u, '%s', %u, %u)", uint32(time(nullptr)), leader->GetMapId(), leader->GetInstanceId(), name.c_str(),
+         leader->GetGUIDLow(), leader->GetTeam() == ALLIANCE ? "A" : "H", group ? group->GetMembersCount() : 1, bosses);
+@@ -2492,12 +2555,11 @@ void DungeonRun::RecordRunStart(Player* leader, char const* dungeon, uint32 boss
+ 
+ void DungeonRun::RecordRunEnd(Player* leader, char const* dungeon, bool cleared, int wipes, uint32 bossesLeft)
+ {
+-    // Once per copy: its leader's last update of the run may come again.
+-    static std::mutex lock;
+-    static std::set<std::pair<uint32, uint32>> ended;
++    // Once per run: its leader's last update of the run may come again, and
++    // a run given up as left (SweepRuns) is ended already.
+     {
+-        std::lock_guard<std::mutex> guard(lock);
+-        if (!ended.insert({ leader->GetMapId(), leader->GetInstanceId() }).second)
++        std::lock_guard<std::mutex> guard(openRunsLock);
++        if (!openRuns.erase({ leader->GetMapId(), leader->GetInstanceId() }))
+             return;
+     }
+     std::string name = dungeon;
+@@ -2515,6 +2577,89 @@ void DungeonRun::RecordRunEnd(Player* leader, char const* dungeon, bool cleared,
+                         name.c_str(), cleared ? 1 : 0, cleared ? 0 : 1, cleared ? 1 : 0, cleared ? 0 : 1);
+ }
+ 
++void DungeonRun::RunGroupBreaksUp(Player* leader)
++{
++    Group* group = leader->GetGroup();
++    if (!group)
++        return;
++    bool forget = false;
++    {
++        std::lock_guard<std::mutex> guard(openRunsLock);
++        for (auto at = openRuns.begin(); at != openRuns.end(); ++at)
++        {
++            if (at->second.group != group->GetId())
++                continue;
++            // Its members in the copy now, the group still there.
++            for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
++                if (Player* member = ref->getSource())
++                    if (member->IsInWorld() && member->GetMapId() == at->first.first && member->GetInstanceId() == at->first.second)
++                        at->second.members.insert(member->GetGUIDLow());
++            GiveUpLeftRun(at->first, at->second, WipesOf(at->second.group, at->first.second), "its group broke up");
++            openRuns.erase(at);
++            forget = true;
++            break;
++        }
++    }
++    if (forget)
++    {
++        std::lock_guard<std::mutex> guard(runsLock);
++        runs.erase(group->GetId());
++    }
++}
++
++void DungeonRun::SweepRuns()
++{
++    time_t const now = time(nullptr);
++    std::vector<uint32> forget;
++    {
++        std::lock_guard<std::mutex> guard(openRunsLock);
++        for (auto at = openRuns.begin(); at != openRuns.end();)
++        {
++            std::pair<uint32, uint32> const& copy = at->first;
++            OpenRun& run = at->second;
++            Group* group = run.group ? sObjectMgr.GetGroupById(run.group) : nullptr;
++            char const* why = nullptr;
++            if (!group)
++                why = "its group is gone";
++            else
++            {
++                // One of its group in the copy - alive, dead there, or a
++                // ghost whose corpse lies there (running back).
++                bool there = false;
++                for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
++                    if (Player* member = ref->getSource())
++                    {
++                        bool inside = member->IsInWorld() && member->GetMapId() == copy.first && member->GetInstanceId() == copy.second;
++                        if (inside)
++                            run.members.insert(member->GetGUIDLow());
++                        else if (!member->IsAlive())
++                            if (Corpse* corpse = member->GetCorpse())
++                                inside = corpse->GetMapId() == copy.first && corpse->GetInstanceId() == copy.second;
++                        there |= inside;
++                    }
++                if (there)
++                    run.seen = now;
++                else if (now - run.seen >= LeftRunTime)
++                    why = "none of its group there for 10 minutes";
++            }
++            if (!why)
++            {
++                ++at;
++                continue;
++            }
++            GiveUpLeftRun(copy, run, WipesOf(run.group, copy.second), why);
++            if (group)
++                forget.push_back(run.group);
++            at = openRuns.erase(at);
++        }
++    }
++    // Its group's record of the run (its step, its wipes) forgotten: back
++    // in the copy, it is a new run.
++    std::lock_guard<std::mutex> guard(runsLock);
++    for (uint32 id : forget)
++        runs.erase(id);
++}
++
+ void DungeonRun::RecordBossLoot(Player* looter, Creature* boss)
+ {
+     static std::mutex lock;
+diff --git a/playerbot/strategy/values/DungeonRun.h b/playerbot/strategy/values/DungeonRun.h
+index dbe1566..38d4d0a 100644
+--- a/playerbot/strategy/values/DungeonRun.h
++++ b/playerbot/strategy/values/DungeonRun.h
+@@ -337,6 +337,20 @@ namespace ai
+         // as it ends (kalimdor_run_total) - by its leader.
+         static void RecordRunStart(Player* leader, char const* dungeon, uint32 bosses);
+         static void RecordRunEnd(Player* leader, char const* dungeon, bool cleared, int wipes, uint32 bossesLeft);
++        // kalimdor: a run left is given up (owner, 2026-11-27: Condrin's and
++        // Maothrall's runs stayed on, their groups gone, until the restart
++        // marked them unfinished): checked each SweepEvery on the world's own
++        // update (RandomPlayerbotMgr::UpdateAIInternal) - its group gone (it
++        // broke up), at once; none of its group in its copy, alive or as a
++        // ghost whose corpse lies there, for LeftRunTime. Its members' totals:
++        // those seen in the copy on the run. The same copy's run started
++        // again: the one before given up first.
++        static constexpr time_t LeftRunTime = 10 * 60;
++        static constexpr time_t SweepEvery = 60;
++        static void SweepRuns();
++        // Its group breaking up (GroupQuests): its run given up now, its members
++        // in the copy counted while the group is there.
++        static void RunGroupBreaksUp(Player* leader);
+         static bool IsBoss(Creature* creature);
+         // Bags full and loot worth taking (a boss's, or an upgrade): room
+         // made - its best gear is worn, so what is in its bags is not -
+diff --git a/playerbot/strategy/values/GroupQuests.cpp b/playerbot/strategy/values/GroupQuests.cpp
+index 37a8ab5..d5b2799 100644
+--- a/playerbot/strategy/values/GroupQuests.cpp
++++ b/playerbot/strategy/values/GroupQuests.cpp
+@@ -346,6 +346,7 @@ static void BreakUpNow(Player* leader)
+         }
+     sLog.outString("Bot #%d %s:%d <%s>: its group of %u breaks up", leader->GetGUIDLow(), leader->GetTeam() == ALLIANCE ? "A" : "H",
+         leader->GetLevel(), leader->GetName(), group->GetMembersCount());
++    DungeonRun::RunGroupBreaksUp(leader);
+     group->Disband(true);
+     sObjectMgr.RemoveGroup(group);
+     delete group;
