@@ -452,10 +452,10 @@ bot in five a tank, one in five a healer, at this population.
   to apply to bots that exist already.
 
 teldrassil carries seventy-two changes to playerbots (`templates/patches/playerbots/`)
-and twelve to the core (`templates/patches/mangos-classic/`), applied in order
+and thirteen to the core (`templates/patches/mangos-classic/`), applied in order
 before every build to the pinned upstreams - together they make kalimdor's tree
 exactly (checked: the stack on kalimdor's untouched import gives kalimdor
-`44749e5`, both trees; see the newest patches below). Sources that are
+`4df5382`, both trees; see the newest patches below). Sources that are
 kalimdor itself (`PROVENANCE.md` at their root - `SOURCE_REPO`, or
 `SOURCE_DIR` on a kalimdor clone) commit their changes: nothing is applied to them or taken off, so a kalimdor branch ahead
 of the stack builds as it is (Kamino 290).
@@ -741,6 +741,11 @@ on `SSH_HOST` the server's image applies its own (Kamino 298).
   less, as the server - unsold items vanish instead of being mailed to a
   random bot - and buys only as its own character (`AhBot.GUID`), if set.
   (Kamino 273, 2026-11-09.)
+- **core 0013:** a run cut off by a stop counts its bosses left - the
+  world start marked it unfinished with none left; now its bosses less those
+  killed in its copy while it was on, as a run given up counts them, and runs
+  already marked so are counted again at each start. (kalimdor #84,
+  2026-11-28.)
 - **playerbots 0072:** after a restart, a random bot that logs in inside a
   dungeon with no player in its group is put at the dungeon's entrance -
   its bots-only group is left as it logs in, and the core sent it to its
